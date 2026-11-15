@@ -2,7 +2,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { api } from "@/lib/api";
-import type { FullProfileBundle, User } from "@/types/api";
+import type {
+  FullProfileBundle,
+  Opportunity,
+  OpportunityListResponse,
+  OpportunitySourcePublic,
+  User,
+} from "@/types/api";
 
 const mockUser: User = {
   id: "11111111-1111-1111-1111-111111111111",
@@ -254,6 +260,291 @@ describe("Job Hunter Frontend - Fase 01.1", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Empresa Exemplo LTDA/i)).toBeInTheDocument();
+    });
+  });
+});
+
+const mockSources: OpportunitySourcePublic[] = [
+  {
+    id: "src-remoteok",
+    slug: "remote_ok",
+    name: "Remote OK",
+    source_type: "json_api",
+    base_url: "https://remoteok.com/api",
+    terms_url: "https://remoteok.com/terms",
+    attribution_text: "Fonte: Remote OK — atribuição obrigatória.",
+    enabled: true,
+    refresh_interval_seconds: 3600,
+    last_synced_at: "2026-11-15T20:00:00Z",
+    last_success_at: "2026-11-15T20:00:00Z",
+    last_error_summary: null,
+  },
+];
+
+function buildMockOpportunity(overrides: Partial<Opportunity> = {}): Opportunity {
+  return {
+    id: "opp-1",
+    is_manual: false,
+    external_id: "109001",
+    title: "Junior Python Backend Developer",
+    company_name: "Acme Cloud",
+    description: "Build FastAPI services and PostgreSQL databases.",
+    opportunity_type: "junior",
+    employment_type: "pj",
+    work_mode: "remote",
+    location_text: "Worldwide",
+    city: null,
+    state: null,
+    country: "Worldwide",
+    eligible_countries: ["Worldwide"],
+    eligibility_unknown: false,
+    language: "English",
+    salary_min: 4000,
+    salary_max: 6000,
+    salary_currency: "USD",
+    salary_period: "month",
+    requirements: ["Python", "FastAPI"],
+    technologies: ["Python", "FastAPI", "PostgreSQL"],
+    source_url: "https://remoteok.com/remote-jobs/junior-python-109001",
+    application_url: "https://remoteok.com/remote-jobs/junior-python-109001",
+    published_at: "2026-11-12T10:00:00Z",
+    deadline_at: null,
+    source_status: "active",
+    first_seen_at: "2026-11-15T20:00:00Z",
+    last_seen_at: "2026-11-15T20:00:00Z",
+    source: mockSources[0],
+    user_state: {
+      is_saved: false,
+      is_dismissed: false,
+      last_viewed_at: null,
+    },
+    match: {
+      eligible: true,
+      geographic_eligibility: "eligible",
+      inclusion_reasons: [
+        "Categoria compatível com a frente de Desenvolvedor Júnior ativa.",
+        "Elegibilidade remota compatível com o perfil (Worldwide).",
+      ],
+      exclusion_reasons: [],
+    },
+    ...overrides,
+  };
+}
+
+describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+  });
+
+  it("renderiza listagem por frente, busca, paginação, salvar/dispensar e links com atribuição sem nofollow", async () => {
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
+
+    const oppJr = buildMockOpportunity();
+    const listSpy = vi
+      .spyOn(api.opportunities, "list")
+      .mockImplementation(async (params = {}) => {
+        if (params.type === "internship") {
+          return {
+            items: [
+              buildMockOpportunity({
+                id: "opp-intern",
+                title: "Estágio Engenharia de Dados",
+                opportunity_type: "internship",
+                employment_type: "internship",
+                eligibility_unknown: true,
+                match: {
+                  eligible: true,
+                  geographic_eligibility: "unknown",
+                  inclusion_reasons: [
+                    "Trabalho remoto com elegibilidade geográfica não especificada.",
+                  ],
+                  exclusion_reasons: [],
+                },
+              }),
+            ],
+            total: 1,
+            page: 1,
+            page_size: 10,
+            total_pages: 1,
+          };
+        }
+        return {
+          items: [oppJr],
+          total: 20,
+          page: params.page || 1,
+          page_size: 10,
+          total_pages: 2,
+        } satisfies OpportunityListResponse;
+      });
+
+    const updateStateSpy = vi
+      .spyOn(api.opportunities, "updateState")
+      .mockResolvedValue({
+        is_saved: true,
+        is_dismissed: false,
+        last_viewed_at: null,
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    // Navega para Desenvolvedor Júnior
+    fireEvent.click(screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Junior Python Backend Developer")).toBeInTheDocument();
+    });
+
+    // Verifica atribuição visível e ausência de nofollow nos links de saída
+    const outboundLink = screen.getByRole("link", {
+      name: /Ver oportunidade original/i,
+    });
+    expect(outboundLink).toHaveAttribute(
+      "href",
+      "https://remoteok.com/remote-jobs/junior-python-109001"
+    );
+    expect(outboundLink.getAttribute("rel") || "").not.toContain("nofollow");
+
+    // Salva oportunidade
+    fireEvent.click(screen.getByRole("button", { name: /^Salvar$/i }));
+    await waitFor(() => {
+      expect(updateStateSpy).toHaveBeenCalledWith("opp-1", { is_saved: true });
+    });
+
+    // Paginação Próxima página
+    fireEvent.click(screen.getByRole("button", { name: /Próxima/i }));
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "junior", page: 2 })
+      );
+    });
+
+    // Navega para Estágios e verifica sinalização de elegibilidade geográfica desconhecida
+    fireEvent.click(screen.getAllByRole("button", { name: /^Estágios$/i })[0]);
+    await waitFor(() => {
+      expect(screen.getByText("Estágio Engenharia de Dados")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/Elegibilidade geográfica não confirmada/i)
+    ).toBeInTheDocument();
+
+    // Dispensa estágio
+    fireEvent.click(screen.getByRole("button", { name: /^Dispensar$/i }));
+    await waitFor(() => {
+      expect(updateStateSpy).toHaveBeenCalledWith("opp-intern", {
+        is_dismissed: true,
+      });
+    });
+  });
+
+  it("exibe estados vazio e de erro e captura links do PWA Web Share Target para cadastro manual", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?share_title=Freela%20API%20FastAPI&share_url=https%3A%2F%2Fexample.org%2Ffreela&share_text=Projeto%20Python"
+    );
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+
+    let callCount = 0;
+    vi.spyOn(api.opportunities, "list").mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw new Error("Falha temporária de rede");
+      }
+      return {
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 10,
+        total_pages: 1,
+      };
+    });
+
+    const createManualSpy = vi
+      .spyOn(api.opportunities, "createManual")
+      .mockResolvedValue(
+        buildMockOpportunity({
+          id: "manual-1",
+          is_manual: true,
+          source: null,
+          title: "Freela API FastAPI",
+          opportunity_type: "freelance",
+          source_url: "https://example.org/freela",
+        })
+      );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Link recebido via Web Share Target \(PWA\)/i)
+      ).toBeInTheDocument();
+    });
+
+    // Converte link compartilhado via PWA no modal de cadastro manual
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Cadastrar como Oportunidade Privada/i,
+      })
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText(/Título da oportunidade/i)
+      ).toHaveValue("Freela API FastAPI");
+    });
+    expect(screen.getByLabelText(/URL oficial da oportunidade/i)).toHaveValue(
+      "https://example.org/freela"
+    );
+
+    fireEvent.change(screen.getByLabelText(/Categoria alvo/i), {
+      target: { value: "freelance" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Salvar Oportunidade Privada/i })
+    );
+
+    await waitFor(() => {
+      expect(createManualSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Freela API FastAPI",
+          opportunity_type: "freelance",
+          source_url: "https://example.org/freela",
+        })
+      );
+    });
+
+    // Na aba Freelancers: 1a tentativa falha (estado de erro) e Retry cai no estado vazio
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Não foi possível carregar as oportunidades/i)
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Tentar novamente/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Nenhuma oportunidade encontrada com os filtros atuais/i)
+      ).toBeInTheDocument();
     });
   });
 });

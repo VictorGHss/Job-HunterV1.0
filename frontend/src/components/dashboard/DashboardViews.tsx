@@ -25,7 +25,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import type { NavSection } from "@/components/layout/AppShell";
-import type { FullProfileBundle } from "@/types/api";
+import { OpportunityDiscoveryPage } from "@/components/opportunities/OpportunityDiscoveryPage";
+import type { FullProfileBundle, OpportunityType } from "@/types/api";
 
 interface DashboardProps {
   bundle: FullProfileBundle;
@@ -355,230 +356,257 @@ export function HomeDashboardView({
 export function InternshipsSectionView({
   bundle,
   onNavigate,
+  refreshTrigger = 0,
+  onOpenManualModal = () => undefined,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
+  refreshTrigger?: number;
+  onOpenManualModal?: (category: OpportunityType) => void;
 }) {
   const prefs = bundle.profile.preferences.internships;
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2 text-primary text-xs font-semibold">
-            <GraduationCap className="h-4 w-4" />
-            Diretrizes Configuradas no Perfil
+  const preferencesCard = (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2 text-primary text-xs font-semibold">
+          <GraduationCap className="h-4 w-4" />
+          Diretrizes Ativas do Perfil
+        </div>
+        <CardTitle className="text-base">
+          Critérios aplicados na descoberta de Estágios
+        </CardTitle>
+        <CardDescription>
+          Áreas prioritárias, idiomas preferenciais e exclusões explícitas do seu perfil.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold">Áreas Prioritárias</h4>
+          <div className="flex flex-wrap gap-1.5">
+            {prefs.priority_areas.map((area) => (
+              <Badge key={area} variant="default">
+                {area}
+              </Badge>
+            ))}
           </div>
-          <CardTitle>Estágios na Área de Tecnologia</CardTitle>
-          <CardDescription>
-            Configuração ativa do seu perfil para filtragem e ranqueamento nas
-            próximas fases de coleta. Nenhum dado fictício é exibido.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="space-y-2">
-            <h4 className="text-sm font-semibold">Áreas Prioritárias</h4>
-            <div className="flex flex-wrap gap-2">
-              {prefs.priority_areas.map((area) => (
-                <Badge key={area} variant="default">
-                  {area}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="rounded-lg border border-border p-3 space-y-2">
+            <h4 className="text-xs font-semibold">Idiomas Preferenciais</h4>
+            <div className="flex flex-wrap gap-1.5">
+              {prefs.preferred_languages.map((lang) => (
+                <Badge key={lang} variant="secondary">
+                  {lang}
                 </Badge>
               ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="rounded-lg border border-border p-4 space-y-2">
-              <h4 className="text-sm font-semibold">Idiomas Preferenciais</h4>
-              <div className="flex flex-wrap gap-1.5">
-                {prefs.preferred_languages.map((lang) => (
-                  <Badge key={lang} variant="secondary">
-                    {lang}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-2">
-              <h4 className="text-sm font-semibold flex items-center gap-1.5 text-destructive">
-                <Ban className="h-4 w-4" />
-                Áreas Explicitamente Excluídas
-              </h4>
-              <div className="flex flex-wrap gap-1.5">
-                {prefs.excluded_areas.map((ex) => (
-                  <Badge key={ex} variant="outline">
-                    {ex}
-                  </Badge>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Experiências mantidas apenas como histórico (não elegíveis como
-                cargo-alvo) permanecem no currículo como base profissional, mas
-                não tornam áreas excluídas elegíveis.
-              </p>
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+            <h4 className="text-xs font-semibold flex items-center gap-1.5 text-destructive">
+              <Ban className="h-3.5 w-3.5" />
+              Áreas Explicitamente Excluídas
+            </h4>
+            <div className="flex flex-wrap gap-1.5">
+              {prefs.excluded_areas.map((ex) => (
+                <Badge key={ex} variant="outline">
+                  {ex}
+                </Badge>
+              ))}
             </div>
           </div>
+        </div>
 
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={() => onNavigate("perfil")}>
-              Editar Preferências no Perfil
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => onNavigate("perfil")}>
+            Editar Preferências no Perfil
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
+  return (
+    <OpportunityDiscoveryPage
+      category="internship"
+      title="Estágios na Área de Tecnologia"
+      subtitle="Oportunidades coletadas e manuais avaliadas de forma determinística conforme seu perfil."
+      refreshTrigger={refreshTrigger}
+      onOpenManualModal={onOpenManualModal}
+      preferencesSummary={preferencesCard}
+    />
   );
 }
 
 export function JuniorDeveloperSectionView({
   bundle,
   onNavigate,
+  refreshTrigger = 0,
+  onOpenManualModal = () => undefined,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
+  refreshTrigger?: number;
+  onOpenManualModal?: (category: OpportunityType) => void;
 }) {
   const prefs = bundle.profile.preferences.junior_developer;
+  const preferencesCard = (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2 text-primary text-xs font-semibold">
+          <Code2 className="h-4 w-4" />
+          Diretrizes Ativas do Perfil
+        </div>
+        <CardTitle className="text-base">
+          Regras de contrato e elegibilidade técnica
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 flex items-start gap-3">
+          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="space-y-1 text-xs">
+            <p className="font-semibold">
+              Status do Bloqueio CLT:{" "}
+              {prefs.block_clt
+                ? "ATIVO (Oportunidades exclusivamente CLT serão bloqueadas)"
+                : "DESATIVADO (Oportunidades CLT permitidas)"}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="rounded-lg border border-border p-3 space-y-2">
+            <h4 className="text-xs font-semibold">
+              Modalidades de Contratação Compatíveis
+            </h4>
+            <div className="flex flex-wrap gap-1.5">
+              {prefs.accepted_contract_types.map((c) => (
+                <Badge key={c} variant="success">
+                  {c}
+                </Badge>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border p-3 space-y-2">
+            <h4 className="text-xs font-semibold">Áreas Técnicas Alvo</h4>
+            <div className="flex flex-wrap gap-1.5">
+              {prefs.priority_areas.map((area) => (
+                <Badge key={area} variant="secondary">
+                  {area}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => onNavigate("perfil")}>
+            Configurar Modalidades no Perfil
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2 text-primary text-xs font-semibold">
-            <Code2 className="h-4 w-4" />
-            Diretrizes Configuradas no Perfil
-          </div>
-          <CardTitle>Desenvolvedor Júnior & Posições de Entrada</CardTitle>
-          <CardDescription>
-            Regras de elegibilidade técnica e modalidades de contratação aceitas
-            pelo usuário.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 flex items-start gap-3">
-            <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
-            <div className="space-y-1 text-sm">
-              <p className="font-semibold">
-                Status do Bloqueio CLT:{" "}
-                {prefs.block_clt
-                  ? "ATIVO (Oportunidades exclusivamente CLT serão bloqueadas)"
-                  : "DESATIVADO (Oportunidades CLT permitidas)"}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Esta preferência pode ser alterada a qualquer momento na aba
-                Preferências do seu Perfil Profissional.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="rounded-lg border border-border p-4 space-y-2">
-              <h4 className="text-sm font-semibold">
-                Modalidades de Contratação Compatíveis
-              </h4>
-              <div className="flex flex-wrap gap-1.5">
-                {prefs.accepted_contract_types.map((c) => (
-                  <Badge key={c} variant="success">
-                    {c}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-border p-4 space-y-2">
-              <h4 className="text-sm font-semibold">Áreas Técnicas Alvo</h4>
-              <div className="flex flex-wrap gap-1.5">
-                {prefs.priority_areas.map((area) => (
-                  <Badge key={area} variant="secondary">
-                    {area}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={() => onNavigate("perfil")}>
-              Configurar Modalidades no Perfil
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+    <OpportunityDiscoveryPage
+      category="junior"
+      title="Desenvolvedor Júnior & Posições de Entrada"
+      subtitle="Filtragem contratual, geográfica e técnica aplicada no servidor para vagas júnior."
+      refreshTrigger={refreshTrigger}
+      onOpenManualModal={onOpenManualModal}
+      preferencesSummary={preferencesCard}
+    />
   );
 }
 
 export function FreelancersSectionView({
   bundle,
   onNavigate,
+  refreshTrigger = 0,
+  onOpenManualModal = () => undefined,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
+  refreshTrigger?: number;
+  onOpenManualModal?: (category: OpportunityType) => void;
 }) {
   const freelance = bundle.profile.preferences.freelance;
   const restrictions = bundle.profile.preferences.source_restrictions;
+  const preferencesCard = (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2 text-primary text-xs font-semibold">
+          <Globe2 className="h-4 w-4" />
+          Diretrizes Ativas do Perfil
+        </div>
+        <CardTitle className="text-base">
+          Escopo Freelance e Restrições de Plataformas
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold">Categorias Prioritárias</h4>
+          <div className="flex flex-wrap gap-1.5">
+            {freelance.priority_categories.map((cat) => (
+              <Badge key={cat} variant="default">
+                {cat}
+              </Badge>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="rounded-lg border border-border p-3 space-y-1.5">
+            <h4 className="text-xs font-semibold">Escopo & Idiomas</h4>
+            <p className="text-xs text-muted-foreground">
+              Mercados: <strong>{freelance.scopes.join(", ")}</strong>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Idiomas:{" "}
+              <strong>{freelance.preferred_languages.join(", ")}</strong>
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-border p-3 space-y-1.5">
+            <h4 className="text-xs font-semibold">Restrições de Fontes</h4>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              <li>
+                • <strong>Workana:</strong>{" "}
+                {restrictions.workana_enabled
+                  ? "Habilitada"
+                  : `Desabilitada (${restrictions.workana_disabled_reason})`}
+              </li>
+              <li>
+                • <strong>Gupy:</strong> Exige autorização/token de empresa (não integrada como feed público)
+              </li>
+              <li>
+                • <strong>Planos pagos / taxas:</strong> Bloqueados sem autorização explícita
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => onNavigate("perfil")}>
+            Ajustar Preferências Freelance
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2 text-primary text-xs font-semibold">
-            <Globe2 className="h-4 w-4" />
-            Diretrizes Configuradas no Perfil
-          </div>
-          <CardTitle>Projetos Freelance (Brasil & Exterior)</CardTitle>
-          <CardDescription>
-            Escopo de atuação sob demanda e políticas de fontes configuradas.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="space-y-2">
-            <h4 className="text-sm font-semibold">Categorias Prioritárias</h4>
-            <div className="flex flex-wrap gap-2">
-              {freelance.priority_categories.map((cat) => (
-                <Badge key={cat} variant="default">
-                  {cat}
-                </Badge>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="rounded-lg border border-border p-4 space-y-2">
-              <h4 className="text-sm font-semibold">Escopo & Idiomas</h4>
-              <p className="text-xs text-muted-foreground">
-                Mercados: <strong>{freelance.scopes.join(", ")}</strong>
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Idiomas:{" "}
-                <strong>{freelance.preferred_languages.join(", ")}</strong>
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-border p-4 space-y-2">
-              <h4 className="text-sm font-semibold">Restrições de Fontes</h4>
-              <ul className="text-xs text-muted-foreground space-y-1">
-                <li>
-                  • <strong>Workana:</strong>{" "}
-                  {restrictions.workana_enabled
-                    ? "Habilitada"
-                    : `Desabilitada (${restrictions.workana_disabled_reason})`}
-                </li>
-                <li>
-                  • <strong>Gupy:</strong> Modo seletivo (alta compatibilidade)
-                </li>
-                <li>
-                  • <strong>Planos pagos / taxas:</strong> Bloqueados sem
-                  autorização explícita
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={() => onNavigate("perfil")}>
-              Ajustar Preferências Freelance
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+    <OpportunityDiscoveryPage
+      category="freelance"
+      title="Projetos Freelance (Brasil & Exterior)"
+      subtitle="Descoberta de contratos remotos e cadastro manual de projetos freelance."
+      refreshTrigger={refreshTrigger}
+      onOpenManualModal={onOpenManualModal}
+      preferencesSummary={preferencesCard}
+    />
   );
 }
 

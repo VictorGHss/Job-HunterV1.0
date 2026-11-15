@@ -233,3 +233,132 @@ export interface FullProfileBundle {
   projects: ProfessionalProject[];
   validation_summary: ProfileValidationSummary;
 }
+
+export type OpportunityType =
+  | "internship"
+  | "junior"
+  | "freelance"
+  | "other"
+  | "unknown";
+
+export type WorkMode = "remote" | "hybrid" | "onsite" | "unknown";
+
+export type EmploymentType =
+  | "internship"
+  | "clt"
+  | "pj"
+  | "freelance"
+  | "temporary"
+  | "other"
+  | "unknown";
+
+export type ExternalSourceStatus = "active" | "closed" | "unknown";
+
+export interface OpportunitySourcePublic {
+  id: string;
+  slug: string;
+  name: string;
+  source_type: string;
+  base_url: string;
+  terms_url: string | null;
+  attribution_text: string | null;
+  enabled: boolean;
+  refresh_interval_seconds: number;
+  last_synced_at: string | null;
+  last_success_at: string | null;
+  last_error_summary: string | null;
+}
+
+export interface OpportunityMatchEvaluation {
+  eligible: boolean;
+  geographic_eligibility: "eligible" | "excluded" | "unknown";
+  inclusion_reasons: string[];
+  exclusion_reasons: string[];
+}
+
+export interface OpportunityUserState {
+  is_saved: boolean;
+  is_dismissed: boolean;
+  last_viewed_at: string | null;
+}
+
+export interface Opportunity {
+  id: string;
+  is_manual: boolean;
+  external_id: string | null;
+  title: string;
+  company_name: string | null;
+  description: string | null;
+  opportunity_type: OpportunityType;
+  employment_type: EmploymentType;
+  work_mode: WorkMode;
+  location_text: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  eligible_countries: string[];
+  eligibility_unknown: boolean;
+  language: string | null;
+  salary_min: number | null;
+  salary_max: number | null;
+  salary_currency: string | null;
+  salary_period: string | null;
+  requirements: string[];
+  technologies: string[];
+  source_url: string;
+  application_url: string | null;
+  published_at: string | null;
+  deadline_at: string | null;
+  source_status: ExternalSourceStatus;
+  first_seen_at: string;
+  last_seen_at: string;
+  source: OpportunitySourcePublic | null;
+  user_state: OpportunityUserState;
+  match: OpportunityMatchEvaluation;
+}
+
+export interface OpportunityListResponse {
+  items: Opportunity[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface OpportunityListParams {
+  q?: string;
+  type?: OpportunityType;
+  work_mode?: WorkMode;
+  employment_type?: EmploymentType;
+  location?: string;
+  country?: string;
+  source?: string;
+  published_after?: string;
+  saved_only?: boolean;
+  include_dismissed?: boolean;
+  include_excluded?: boolean;
+  sort?: "recent" | "oldest";
+  page?: number;
+  page_size?: number;
+}
+
+export interface ManualOpportunityCreatePayload {
+  title: string;
+  company_name?: string | null;
+  description?: string | null;
+  opportunity_type: OpportunityType;
+  employment_type: EmploymentType;
+  work_mode: WorkMode;
+  location_text?: string | null;
+  country?: string | null;
+  eligible_countries?: string[];
+  technologies?: string[];
+  source_url: string;
+  application_url?: string | null;
+}
+
+export interface OpportunityUserStateUpdatePayload {
+  is_saved?: boolean;
+  is_dismissed?: boolean;
+  mark_viewed?: boolean;
+}

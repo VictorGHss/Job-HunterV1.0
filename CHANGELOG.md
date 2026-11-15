@@ -6,6 +6,29 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.0] - 2026-11-15 — Fase 02: Motor de Descoberta de Oportunidades v1
+
+### Adicionado
+- **Modelagem e Migração Alembic (`0003_opportunity_discovery`):**
+  - Novas tabelas `opportunity_sources`, `opportunities`, `opportunity_user_states` (unicidade `(user_id, opportunity_id)`) e `opportunity_sync_runs` com compatibilidade PostgreSQL 16 (`JSONB`/`UUID`) e SQLite.
+- **Conectores Reais Auditados e Pipeline de Sincronização:**
+  - `RemoteOKConnector` (`https://remoteok.com/api`, intervalo mínimo 1h, atribuição obrigatória sem `nofollow` e skip de item legal) e `RemotiveConnector` (`https://remotive.com/api/remote-jobs?category=software-dev`, intervalo mínimo 6h, parsing salarial e de localização requerida).
+  - Hardening HTTP em `BaseOpportunityConnector`: timeouts, teto de payload em bytes (`SYNC_MAX_RESPONSE_BYTES`), respeito a `Retry-After` em `429`, backoff e isolamento de falhas.
+  - Deduplicação em 3 camadas (`(source_id, external_id)`, URL canônica sem parâmetros `utm_*`/`ref` e `content_hash`), preservação de `first_seen_at` e detecção conservadora de ausência após `3` ciclos sem resposta positiva.
+  - Comando CLI `python -m app.cli sync-opportunities [--source ... --force --dry-run]`.
+- **Motor Determinístico de Filtragem e Explicabilidade (`evaluate_opportunity_for_user`):**
+  - Avaliação explicável sem IA generativa e sem score percentual arbitrário, respeitando `block_clt` (sem confundir estágio com CLT), `workana_enabled`, `gupy_mode`, `excluded_areas`, idioma, aderência substantiva em tecnologia/requisitos/descrição (não apenas palavra no título) e verificação geográfica (`eligible`, `excluded`, `unknown`).
+- **API Autenticada e Proteções (`/api/v1/opportunities`):**
+  - Listagem paginada (`page_size <= 50`) com filtros combináveis no servidor, consulta individual, cadastro manual privado (`POST /manual` com bloqueio anti-SSRF), edição restrita apenas a oportunidades privadas do próprio usuário (`403` em globais) e estados individuais (`PATCH /{id}/state`).
+- **Frontend de Descoberta e Captura Manual / PWA:**
+  - Telas interativas para `Estágios`, `Desenvolvedor Júnior` e `Freelancers` (`OpportunityDiscoveryPage.tsx`) com busca, filtros, paginação, explicabilidade, atribuição visível sem `nofollow`, estado salvo/dispensado e sinalização de elegibilidade geográfica incerta.
+  - Modal de cadastro privado (`ManualOpportunityModal.tsx`) integrado diretamente ao banner de recebimento do PWA Web Share Target.
+- **Testes:**
+  - Nova suíte backend `tests/test_opportunities_phase02.py` (conectores mockados, deduplicação, 429/timeout/payload limit, matching determinístico, privacidade multiusuário, imutabilidade de fontes globais e CLI).
+  - Suíte frontend `App.test.tsx` ampliada para busca, paginação, salvar/dispensar, atribuição de links, estados vazio/erro e captura PWA Web Share Target.
+
+---
+
 ## [0.1.1] - 2026-11-15 — Fase 01.1: Hardening da Fundação, Isolamento de Dados Pessoais e Segurança
 
 ### Adicionado

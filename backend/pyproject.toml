@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "job-hunter-backend"
-version = "0.1.0"
-description = "Job Hunter - Backend API (Fase 01: Fundação arquitetural e perfil profissional)"
+version = "0.2.0"
+description = "Job Hunter - Backend API (Fase 02: Motor de descoberta de oportunidades v1)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0,<1.0.0",
@@ -16,12 +16,12 @@ dependencies = [
     "alembic>=1.13.3,<2.0.0",
     "psycopg[binary]>=3.2.0,<4.0.0",
     "argon2-cffi>=23.1.0,<25.0.0",
+    "httpx>=0.27.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0,<9.0.0",
-    "httpx>=0.27.0,<1.0.0",
 ]
 
 [tool.setuptools.packages.find]

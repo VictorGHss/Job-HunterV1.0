@@ -5,6 +5,13 @@ import type {
   FullProfileBundle,
   Language,
   LanguagePayload,
+  ManualOpportunityCreatePayload,
+  Opportunity,
+  OpportunityListParams,
+  OpportunityListResponse,
+  OpportunitySourcePublic,
+  OpportunityUserState,
+  OpportunityUserStateUpdatePayload,
   ProfessionalProfile,
   ProfessionalProfileUpdatePayload,
   ProfessionalProject,
@@ -231,6 +238,56 @@ export const api = {
     deleteProject(id: string): Promise<void> {
       return request<void>(`/profile/projects/${id}`, {
         method: "DELETE",
+      });
+    },
+  },
+  opportunities: {
+    listSources(): Promise<OpportunitySourcePublic[]> {
+      return request<OpportunitySourcePublic[]>("/opportunities/sources");
+    },
+    list(params: OpportunityListParams = {}): Promise<OpportunityListResponse> {
+      const search = new URLSearchParams();
+      if (params.q && params.q.trim()) search.set("q", params.q.trim());
+      if (params.type) search.set("type", params.type);
+      if (params.work_mode) search.set("work_mode", params.work_mode);
+      if (params.employment_type)
+        search.set("employment_type", params.employment_type);
+      if (params.location && params.location.trim())
+        search.set("location", params.location.trim());
+      if (params.country && params.country.trim())
+        search.set("country", params.country.trim());
+      if (params.source && params.source.trim())
+        search.set("source", params.source.trim());
+      if (params.published_after)
+        search.set("published_after", params.published_after);
+      if (params.saved_only) search.set("saved_only", "true");
+      if (params.include_dismissed) search.set("include_dismissed", "true");
+      if (params.include_excluded) search.set("include_excluded", "true");
+      if (params.sort) search.set("sort", params.sort);
+      if (params.page) search.set("page", String(params.page));
+      if (params.page_size) search.set("page_size", String(params.page_size));
+
+      const query = search.toString();
+      return request<OpportunityListResponse>(
+        query ? `/opportunities?${query}` : "/opportunities"
+      );
+    },
+    get(id: string): Promise<Opportunity> {
+      return request<Opportunity>(`/opportunities/${id}`);
+    },
+    createManual(payload: ManualOpportunityCreatePayload): Promise<Opportunity> {
+      return request<Opportunity>("/opportunities/manual", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateState(
+      id: string,
+      payload: OpportunityUserStateUpdatePayload
+    ): Promise<OpportunityUserState> {
+      return request<OpportunityUserState>(`/opportunities/${id}/state`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
       });
     },
   },

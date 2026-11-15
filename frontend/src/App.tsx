@@ -12,10 +12,11 @@ import {
   type NavSection,
   type SharedTargetPayload,
 } from "@/components/layout/AppShell";
+import { ManualOpportunityModal } from "@/components/opportunities/ManualOpportunityModal";
 import { ProfilePage } from "@/components/profile/ProfilePage";
 import { ThemeProvider } from "@/context/ThemeContext";
 import { api } from "@/lib/api";
-import type { FullProfileBundle, User } from "@/types/api";
+import type { FullProfileBundle, OpportunityType, User } from "@/types/api";
 
 function detectSharedTargetFromUrl(): SharedTargetPayload | null {
   if (typeof window === "undefined") return null;
@@ -34,6 +35,15 @@ export function JobHunterApp() {
   const [activeSection, setActiveSection] = useState<NavSection>("inicio");
   const [sharedPayload, setSharedPayload] =
     useState<SharedTargetPayload | null>(() => detectSharedTargetFromUrl());
+  const [manualModalOpen, setManualModalOpen] = useState(false);
+  const [manualDefaultCategory, setManualDefaultCategory] =
+    useState<OpportunityType>("junior");
+  const [manualInitialValues, setManualInitialValues] = useState<{
+    title?: string;
+    source_url?: string;
+    description?: string;
+  } | null>(null);
+  const [discoveryRefreshNonce, setDiscoveryRefreshNonce] = useState(0);
 
   const loadBundle = useCallback(async () => {
     const data = await api.profile.getBundle();
@@ -94,53 +104,96 @@ export function JobHunterApp() {
     );
   }
 
+  function handleOpenManualModal(category: OpportunityType) {
+    setManualDefaultCategory(category);
+    setManualInitialValues(null);
+    setManualModalOpen(true);
+  }
+
+  function handleConvertSharedToManual(payload: SharedTargetPayload) {
+    setManualDefaultCategory("junior");
+    setManualInitialValues({
+      title: payload.title || "",
+      source_url: payload.url || "",
+      description: payload.text || "",
+    });
+    setSharedPayload(null);
+    setManualModalOpen(true);
+  }
+
   if (!user || !bundle) {
     return <LoginView onLoginSuccess={handleLoginSuccess} />;
   }
 
   return (
-    <AppShell
-      user={user}
-      activeSection={activeSection}
-      onSelectSection={setActiveSection}
-      onLogout={handleLogout}
-      sharedPayload={sharedPayload}
-      onDismissShared={() => setSharedPayload(null)}
-    >
-      {activeSection === "inicio" && (
-        <HomeDashboardView
-          bundle={bundle}
-          onNavigate={setActiveSection}
-        />
-      )}
-      {activeSection === "estagios" && (
-        <InternshipsSectionView
-          bundle={bundle}
-          onNavigate={setActiveSection}
-        />
-      )}
-      {activeSection === "junior" && (
-        <JuniorDeveloperSectionView
-          bundle={bundle}
-          onNavigate={setActiveSection}
-        />
-      )}
-      {activeSection === "freelancers" && (
-        <FreelancersSectionView
-          bundle={bundle}
-          onNavigate={setActiveSection}
-        />
-      )}
-      {activeSection === "candidaturas" && (
-        <ApplicationsSectionView
-          bundle={bundle}
-          onNavigate={setActiveSection}
-        />
-      )}
-      {activeSection === "perfil" && (
-        <ProfilePage bundle={bundle} onRefresh={loadBundle} />
-      )}
-    </AppShell>
+    <>
+      <AppShell
+        user={user}
+        activeSection={activeSection}
+        onSelectSection={setActiveSection}
+        onLogout={handleLogout}
+        sharedPayload={sharedPayload}
+        onDismissShared={() => setSharedPayload(null)}
+        onConvertSharedToManual={handleConvertSharedToManual}
+      >
+        {activeSection === "inicio" && (
+          <HomeDashboardView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+          />
+        )}
+        {activeSection === "estagios" && (
+          <InternshipsSectionView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+            refreshTrigger={discoveryRefreshNonce}
+            onOpenManualModal={handleOpenManualModal}
+          />
+        )}
+        {activeSection === "junior" && (
+          <JuniorDeveloperSectionView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+            refreshTrigger={discoveryRefreshNonce}
+            onOpenManualModal={handleOpenManualModal}
+          />
+        )}
+        {activeSection === "freelancers" && (
+          <FreelancersSectionView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+            refreshTrigger={discoveryRefreshNonce}
+            onOpenManualModal={handleOpenManualModal}
+          />
+        )}
+        {activeSection === "candidaturas" && (
+          <ApplicationsSectionView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+          />
+        )}
+        {activeSection === "perfil" && (
+          <ProfilePage bundle={bundle} onRefresh={loadBundle} />
+        )}
+      </AppShell>
+
+      <ManualOpportunityModal
+        isOpen={manualModalOpen}
+        defaultCategory={manualDefaultCategory}
+        initialValues={manualInitialValues}
+        onClose={() => setManualModalOpen(false)}
+        onCreated={(created) => {
+          setDiscoveryRefreshNonce((n) => n + 1);
+          if (created.opportunity_type === "internship") {
+            setActiveSection("estagios");
+          } else if (created.opportunity_type === "junior") {
+            setActiveSection("junior");
+          } else if (created.opportunity_type === "freelance") {
+            setActiveSection("freelancers");
+          }
+        }}
+      />
+    </>
   );
 }
 

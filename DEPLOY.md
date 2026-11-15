@@ -58,6 +58,22 @@ docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
 docker compose --env-file .env -f infra/compose.yaml down
 ```
 
+### Sincronização controlada de oportunidades (Fase 02)
+A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores (`Remote OK >= 3600s`, `Remotive >= 21600s`) e evitar tráfego contínuo em segundo plano:
+
+```powershell
+# Teste de conectividade e parsing sem persistir no banco
+docker exec job-hunter-backend python -m app.cli sync-opportunities --dry-run
+
+# Sincronização normal de todas as fontes habilitadas
+docker exec job-hunter-backend python -m app.cli sync-opportunities
+
+# Sincronização pontual de uma fonte específica
+docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --force
+```
+
+As variáveis `SYNC_HTTP_CONNECT_TIMEOUT_SECONDS`, `SYNC_HTTP_READ_TIMEOUT_SECONDS`, `SYNC_MAX_RESPONSE_BYTES`, `SYNC_MAX_RETRIES` e `SYNC_USER_AGENT` no `.env` controlam timeouts, teto de payload e retentativas HTTP (`429 Retry-After` e backoff em `5xx`).
+
 ---
 
 ## 3. Preparação para Cloudflare Tunnel (`jobhunter.ctrls.dev.br`)

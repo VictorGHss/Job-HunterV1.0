@@ -1,4 +1,15 @@
 from app.schemas.auth import AuthSessionResponse, LoginRequest, UserResponse
+from app.schemas.opportunity import (
+    ManualOpportunityCreate,
+    ManualOpportunityUpdate,
+    OpportunityListResponse,
+    OpportunityMatchEvaluation,
+    OpportunityResponse,
+    OpportunitySourcePublicResponse,
+    OpportunityUserStateResponse,
+    OpportunityUserStateUpdate,
+    SyncRunSummary,
+)
 from app.schemas.profile import (
     CareerPreferencesSchema,
     EducationCreate,
@@ -35,6 +46,14 @@ __all__ = [
     "LanguageResponse",
     "LanguageUpdate",
     "LoginRequest",
+    "ManualOpportunityCreate",
+    "ManualOpportunityUpdate",
+    "OpportunityListResponse",
+    "OpportunityMatchEvaluation",
+    "OpportunityResponse",
+    "OpportunitySourcePublicResponse",
+    "OpportunityUserStateResponse",
+    "OpportunityUserStateUpdate",
     "ProfessionalProfileResponse",
     "ProfessionalProfileUpdate",
     "ProfessionalProjectCreate",
@@ -46,6 +65,7 @@ __all__ = [
     "SkillCreate",
     "SkillResponse",
     "SkillUpdate",
+    "SyncRunSummary",
     "UserResponse",
     "WorkExperienceCreate",
     "WorkExperienceResponse",

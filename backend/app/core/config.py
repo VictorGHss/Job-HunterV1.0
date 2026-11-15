@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     login_ip_max_attempts: int = 20
     login_cooldown_seconds: int = 300
 
+    # Coleta de oportunidades (Fase 02)
+    sync_http_connect_timeout_seconds: float = 10.0
+    sync_http_read_timeout_seconds: float = 20.0
+    sync_max_response_bytes: int = 5 * 1024 * 1024
+    sync_max_retries: int = 2
+    sync_user_agent: str = "JobHunter/0.2 (+https://jobhunter.ctrls.dev.br)"
+
     cors_origins: str = (
         "http://localhost:5180,http://127.0.0.1:5180,"
         "http://localhost:5173,http://127.0.0.1:5173,"

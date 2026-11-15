@@ -83,6 +83,7 @@ interface AppShellProps {
   onLogout: () => void;
   sharedPayload: SharedTargetPayload | null;
   onDismissShared: () => void;
+  onConvertSharedToManual?: (payload: SharedTargetPayload) => void;
   children: React.ReactNode;
 }
 
@@ -93,6 +94,7 @@ export function AppShell({
   onLogout,
   sharedPayload,
   onDismissShared,
+  onConvertSharedToManual,
   children,
 }: AppShellProps) {
   return (
@@ -110,11 +112,11 @@ export function AppShell({
                   Job Hunter
                 </span>
                 <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-semibold text-primary">
-                  Fase 01
+                  Fase 02
                 </span>
               </div>
               <p className="text-xs text-muted-foreground hidden sm:block">
-                Fundação arquitetural & Perfil profissional central
+                Motor de descoberta de oportunidades & Perfil central
               </p>
             </div>
           </div>
@@ -209,10 +211,20 @@ export function AppShell({
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground pt-1">
-                  A estrutura PWA de recebimento já está pronta. A análise
-                  automatizada de vagas compartilhadas será ativada na fase de
-                  integração com o motor de oportunidades.
+                  Por segurança (sem raspagem automática no servidor), revise os
+                  metadados antes de salvar este link na sua lista privada.
                 </p>
+                {onConvertSharedToManual && (
+                  <div className="pt-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => onConvertSharedToManual(sharedPayload)}
+                    >
+                      Cadastrar como Oportunidade Privada
+                    </Button>
+                  </div>
+                )}
               </div>
               <Button
                 variant="ghost"

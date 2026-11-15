@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 01.1 — Hardening da fundação, isolamento de dados pessoais e segurança
+- **Fase atual:** Fase 02 — Motor de Descoberta de Oportunidades v1
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -49,7 +49,8 @@ job-hunter/
 │   ├── alembic/
 │   │   ├── versions/
 │   │   │   ├── 0001_initial_foundation.py
-│   │   │   └── 0002_auth_rate_limiting.py
+│   │   │   ├── 0002_auth_rate_limiting.py
+│   │   │   └── 0003_opportunity_discovery.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -57,6 +58,7 @@ job-hunter/
 │   │   │   ├── routes/
 │   │   │   │   ├── auth.py
 │   │   │   │   ├── health.py
+│   │   │   │   ├── opportunities.py
 │   │   │   │   └── profile.py
 │   │   │   └── deps.py
 │   │   ├── core/
@@ -66,19 +68,28 @@ job-hunter/
 │   │   │   ├── base.py
 │   │   │   └── session.py
 │   │   ├── models/
+│   │   │   ├── opportunity.py
 │   │   │   ├── profile.py
 │   │   │   └── user.py
 │   │   ├── schemas/
 │   │   │   ├── auth.py
+│   │   │   ├── opportunity.py
 │   │   │   └── profile.py
 │   │   ├── services/
+│   │   │   ├── opportunities/
+│   │   │   │   ├── connectors/
+│   │   │   │   ├── matching.py
+│   │   │   │   ├── opportunity_service.py
+│   │   │   │   ├── sanitization.py
+│   │   │   │   └── sync_service.py
 │   │   │   ├── auth_service.py
 │   │   │   └── profile_service.py
 │   │   ├── cli.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
-│   │   └── test_foundation_phase01.py
+│   │   ├── test_foundation_phase01.py
+│   │   └── test_opportunities_phase02.py
 │   ├── alembic.ini
 │   ├── Dockerfile
 │   └── pyproject.toml
@@ -162,7 +173,31 @@ docker exec -it job-hunter-backend python -m app.cli import-profile-seed --email
 
 A importação é transacional e idempotente: valida o JSON estritamente (`schema_version: 1`), nunca auto-confirma registros (`draft`/`pending_validation`), preserva campos já preenchidos, preferências personalizadas e estados `confirmed`, evita duplicatas em reexecuções e realiza rollback automático em caso de erro.
 
-### 4.5. Encerrando o Ambiente
+### 4.5. Sincronização de Oportunidades Públicas e Cadastro Manual
+A Fase 02 implementa conectores modulares para feeds públicos com termos verificados e compatíveis, além de captura manual privada e recebimento de links via Web Share Target (PWA):
+
+- **Fontes integradas e habilitadas:**
+  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, intervalo mínimo padrão de `3600s` (1h), com atribuição visível e links diretos **sem `rel="nofollow"`** conforme termos oficiais (`https://remoteok.com/terms`).
+  - **Remotive (`remotive`)**: feed JSON público de desenvolvimento de software (`https://remotive.com/api/remote-jobs?category=software-dev`), intervalo mínimo de `21600s` (6h, máx. 4 req/dia recomendado nos termos), com crédito visível e link direto sem redistribuição em massa.
+- **Fontes avaliadas e não integradas nesta etapa:**
+  - **Gupy**: API oficial (`api.gupy.io`) exige token Bearer corporativo por empresa recrutadora, não sendo feed público livre.
+  - **Arbeitnow**: termos gerais restringem redistribuição comercial sem autorização explícita; mantida pendente de revisão jurídica caso evolua para SaaS.
+  - **Jobicy**: API v2 pública (`1 req/h`) mapeada como candidata futura complementar.
+  - **Workana**: desabilitada por restrição do perfil do usuário e política anti-scraping.
+
+Para sincronizar as fontes públicas via CLI:
+
+```powershell
+# Validação sem gravar no banco
+docker exec job-hunter-backend python -m app.cli sync-opportunities --dry-run
+
+# Sincronização padrão (respeita intervalo mínimo por fonte)
+docker exec job-hunter-backend python -m app.cli sync-opportunities
+```
+
+Oportunidades brasileiras locais, estágios acadêmicos ou freelas recebidos fora dos feeds podem ser cadastrados de forma privada pelo botão **Adicionar Oportunidade** ou via **Web Share Target (PWA)** no navegador/Android, sem raspagem automática de HTML pelo servidor.
+
+### 4.6. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

@@ -22,6 +22,7 @@ from app.db.session import SessionLocal
 from app.models.user import User
 from app.schemas.profile import ProfileSeedDocumentSchema
 from app.services.auth_service import create_user_account
+from app.services.opportunities.sync_service import sync_sources
 from app.services.profile_service import get_or_create_profile, import_profile_seed_for_user
 
 
@@ -142,6 +143,43 @@ def handle_import_profile_seed(args: argparse.Namespace) -> int:
         return 0
 
 
+def handle_sync_opportunities(args: argparse.Namespace) -> int:
+    with SessionLocal() as db:
+        try:
+            results = sync_sources(
+                db,
+                source_slug=args.source,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        except ValueError as err:
+            print(f"[ERRO] {err}", file=sys.stderr)
+            return 1
+
+    if not results:
+        print(
+            "[AVISO] Nenhuma fonte elegível encontrada para o filtro informado.",
+            file=sys.stderr,
+        )
+        return 1
+
+    has_error = False
+    for res in results:
+        status_value = res.status.value if hasattr(res.status, "value") else str(res.status)
+        status_label = status_value.upper()
+        if status_value == "failed":
+            has_error = True
+        detail = f" | detalhe={res.error_summary}" if res.error_summary else ""
+        print(
+            f"[{status_label}] fonte={res.source_slug} | "
+            f"coletadas={res.fetched_count} | criadas={res.inserted_count} | "
+            f"atualizadas={res.updated_count} | ignoradas={res.skipped_count}"
+            f"{detail}"
+        )
+
+    return 1 if has_error else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli",
@@ -199,6 +237,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Caminho para o arquivo JSON local (ex: /run/local-seeds/profile-seed.local.json).",
     )
     import_seed.set_defaults(func=handle_import_profile_seed)
+
+    sync_opps = subparsers.add_parser(
+        "sync-opportunities",
+        help="Sincroniza oportunidades das fontes externas habilitadas de forma segura e respeitando intervalos.",
+    )
+    sync_opps.add_argument(
+        "--source",
+        default=None,
+        help="Slug de uma fonte específica (ex: remote_ok, remotive).",
+    )
+    sync_opps.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignora o intervalo mínimo de atualização configurado para a fonte.",
+    )
+    sync_opps.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Consulta e valida a fonte sem persistir alterações no catálogo.",
+    )
+    sync_opps.set_defaults(func=handle_sync_opportunities)
 
     return parser
 
