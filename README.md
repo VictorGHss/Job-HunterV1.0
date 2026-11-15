@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 02 — Motor de Descoberta de Oportunidades v1
+- **Fase atual:** Fase 02.1 — Conformidade das Fontes e Primeira Sincronização Real
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -176,14 +176,20 @@ A importação é transacional e idempotente: valida o JSON estritamente (`schem
 ### 4.5. Sincronização de Oportunidades Públicas e Cadastro Manual
 A Fase 02 implementa conectores modulares para feeds públicos com termos verificados e compatíveis, além de captura manual privada e recebimento de links via Web Share Target (PWA):
 
-- **Fontes integradas e habilitadas:**
-  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, intervalo mínimo padrão de `3600s` (1h), com atribuição visível e links diretos **sem `rel="nofollow"`** conforme termos oficiais (`https://remoteok.com/terms`).
-  - **Remotive (`remotive`)**: feed JSON público de desenvolvimento de software (`https://remotive.com/api/remote-jobs?category=software-dev`), intervalo mínimo de `21600s` (6h, máx. 4 req/dia recomendado nos termos), com crédito visível e link direto sem redistribuição em massa.
+- **Fonte ativa e habilitada:**
+  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, `enabled=true`, intervalo mínimo padrão de `3600s` (1h), com atribuição visível, links diretos **sem `rel="nofollow"`** e sem uso não autorizado de logotipo, conforme FAQ/termos oficiais (`https://remoteok.com/terms`). Primeira carga real executada em 2026-11-15 persistiu **97 oportunidades** no PostgreSQL local (`88 other`, `4 junior`, `3 freelance`, `2 internship`).
+- **Fonte pausada temporariamente por conformidade:**
+  - **Remotive (`remotive`)**: conector implementado e preservado no código (`https://remotive.com/api/remote-jobs?category=software-dev`, intervalo `21600s`), porém marcado com **`enabled_by_default=False`** (`enabled=false` no banco) até esclarecimento e autorização escrita sobre restrições nos Termos de Uso gerais de março de 2026 para agregação multiusuário. A execução de `sync-opportunities` (mesmo com `--force` ou `--source remotive`) recusa consultas HTTP contra fontes desabilitadas.
 - **Fontes avaliadas e não integradas nesta etapa:**
   - **Gupy**: API oficial (`api.gupy.io`) exige token Bearer corporativo por empresa recrutadora, não sendo feed público livre.
   - **Arbeitnow**: termos gerais restringem redistribuição comercial sem autorização explícita; mantida pendente de revisão jurídica caso evolua para SaaS.
   - **Jobicy**: API v2 pública (`1 req/h`) mapeada como candidata futura complementar.
   - **Workana**: desabilitada por restrição do perfil do usuário e política anti-scraping.
+
+**Como habilitar uma fonte futuramente (após validação dos termos / autorização escrita):**
+1. Alterar `enabled_by_default=True` no `SourceDefinition` do conector correspondente e remover ou atualizar `disabled_reason`.
+2. Garantir `enabled = true` para o respectivo `slug` na tabela `opportunity_sources` (o sistema não reativa automaticamente registros mantidos desabilitados manualmente no banco).
+3. Validar com `python -m app.cli sync-opportunities --source <slug> --dry-run` antes da carga real.
 
 Para sincronizar as fontes públicas via CLI:
 

@@ -58,19 +58,24 @@ docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
 docker compose --env-file .env -f infra/compose.yaml down
 ```
 
-### Sincronização controlada de oportunidades (Fase 02)
-A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores (`Remote OK >= 3600s`, `Remotive >= 21600s`) e evitar tráfego contínuo em segundo plano:
+### Sincronização controlada de oportunidades (Fases 02 e 02.1)
+A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores e o estado de conformidade de cada fonte (`Remote OK`: ativa com intervalo `>= 3600s`; `Remotive`: temporariamente desabilitada com `enabled=false` aguardando autorização escrita):
 
 ```powershell
-# Teste de conectividade e parsing sem persistir no banco
-docker exec job-hunter-backend python -m app.cli sync-opportunities --dry-run
+# Teste de conectividade e parsing sem persistir no banco (apenas fontes habilitadas)
+docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --dry-run
 
 # Sincronização normal de todas as fontes habilitadas
 docker exec job-hunter-backend python -m app.cli sync-opportunities
 
-# Sincronização pontual de uma fonte específica
+# Sincronização pontual ignorando apenas o intervalo mínimo (--force nunca ativa fonte desabilitada)
 docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --force
 ```
+
+Regras operacionais de habilitação:
+- `--force` ignora **somente** o intervalo mínimo entre execuções; nunca executa coleta de uma fonte com `enabled=false` ou `enabled_by_default=False`.
+- Para habilitar uma fonte pausada no futuro após esclarecimento e aprovação escrita dos termos, atualize `enabled_by_default=True` no conector, defina `enabled=true` em `opportunity_sources` e execute `--dry-run` antes da sincronização real.
+- Primeira carga real registrada com `remote_ok`: **97 oportunidades coletadas e inseridas** (0 atualizações/erros).
 
 As variáveis `SYNC_HTTP_CONNECT_TIMEOUT_SECONDS`, `SYNC_HTTP_READ_TIMEOUT_SECONDS`, `SYNC_MAX_RESPONSE_BYTES`, `SYNC_MAX_RETRIES` e `SYNC_USER_AGENT` no `.env` controlam timeouts, teto de payload e retentativas HTTP (`429 Retry-After` e backoff em `5xx`).
 

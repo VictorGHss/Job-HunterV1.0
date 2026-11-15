@@ -243,7 +243,9 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     }
   }
 
-  const unsyncedSources = sources.filter((s) => s.last_synced_at === null);
+  const unsyncedSources = sources.filter(
+    (s) => s.enabled && s.last_synced_at === null
+  );
 
   return (
     <div className="space-y-6">
@@ -358,6 +360,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                 {sources.map((src) => (
                   <option key={src.id} value={src.slug}>
                     {src.name}
+                    {src.enabled ? "" : " (desabilitada)"}
                   </option>
                 ))}
               </select>

@@ -61,6 +61,8 @@ class SourceDefinition:
     terms_url: str
     attribution_text: str
     refresh_interval_seconds: int
+    enabled_by_default: bool = True
+    disabled_reason: str | None = None
 
 
 def parse_retry_after_seconds(header_value: str | None, default_seconds: int = 5) -> int:

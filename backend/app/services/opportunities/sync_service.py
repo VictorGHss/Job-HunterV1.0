@@ -28,7 +28,11 @@ CONNECTOR_CLASSES: dict[str, type[BaseOpportunityConnector]] = {
 
 
 def ensure_default_sources(db: Session) -> list[OpportunitySource]:
-    """Garante o registro das fontes públicas verificadas e permitidas no banco."""
+    """
+    Garante o registro das fontes públicas no banco respeitando o estado explícito
+    de habilitação padrão. Nunca reativa automaticamente fontes que tenham sido
+    desabilitadas manualmente quando a definição padrão permitir habilitação.
+    """
     sources: list[OpportunitySource] = []
     for connector_cls in CONNECTOR_CLASSES.values():
         defn = connector_cls.definition
@@ -43,7 +47,7 @@ def ensure_default_sources(db: Session) -> list[OpportunitySource]:
                 base_url=defn.base_url,
                 terms_url=defn.terms_url,
                 attribution_text=defn.attribution_text,
-                enabled=True,
+                enabled=defn.enabled_by_default,
                 refresh_interval_seconds=defn.refresh_interval_seconds,
             )
             db.add(existing)
@@ -53,6 +57,8 @@ def ensure_default_sources(db: Session) -> list[OpportunitySource]:
             existing.base_url = defn.base_url
             existing.terms_url = defn.terms_url
             existing.attribution_text = defn.attribution_text
+            if not defn.enabled_by_default:
+                existing.enabled = False
             if existing.refresh_interval_seconds <= 0:
                 existing.refresh_interval_seconds = defn.refresh_interval_seconds
         sources.append(existing)
@@ -267,6 +273,31 @@ def sync_sources(
                     source_slug=source.slug,
                     status=SyncRunStatus.SKIPPED.value,
                     error_summary=run.error_summary,
+                )
+            )
+            continue
+
+        if not source.enabled or not connector.definition.enabled_by_default:
+            disabled_msg = (
+                connector.definition.disabled_reason
+                or f"A fonte '{source.slug}' está desabilitada e não pode ser sincronizada."
+            )
+            if source_slug:
+                raise ValueError(disabled_msg)
+            run = OpportunitySyncRun(
+                source_id=source.id,
+                status=SyncRunStatus.SKIPPED.value,
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                error_summary=disabled_msg,
+            )
+            db.add(run)
+            db.commit()
+            summaries.append(
+                SyncRunSummary(
+                    source_slug=source.slug,
+                    status=SyncRunStatus.SKIPPED.value,
+                    error_summary=disabled_msg,
                 )
             )
             continue

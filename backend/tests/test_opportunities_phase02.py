@@ -206,13 +206,17 @@ def test_remote_ok_and_remotive_parsing_and_retry_limits():
 
 def test_sync_deduplication_idempotency_intervals_and_conservative_absence(db_session):
     remote_data = sample_remote_ok_payload()
-    remotive_data = sample_remotive_payload()
+    remotive_calls = {"count": 0}
 
-    def build_connectors(ok_payload=None, rem_payload=None, fail_ok=False):
+    def build_connectors(ok_payload=None, fail_ok=False):
         def ok_handler(_):
             if fail_ok:
                 return httpx.Response(503)
             return httpx.Response(200, json=ok_payload if ok_payload is not None else remote_data)
+
+        def remotive_handler(_):
+            remotive_calls["count"] += 1
+            return httpx.Response(500)
 
         return {
             "remote_ok": RemoteOKConnector(
@@ -221,33 +225,35 @@ def test_sync_deduplication_idempotency_intervals_and_conservative_absence(db_se
                 sleep_fn=lambda _: None,
             ),
             "remotive": RemotiveConnector(
-                transport=httpx.MockTransport(
-                    lambda _: httpx.Response(
-                        200, json=rem_payload if rem_payload is not None else remotive_data
-                    )
-                ),
+                transport=httpx.MockTransport(remotive_handler),
                 max_retries=0,
                 sleep_fn=lambda _: None,
             ),
         }
 
-    # Dry-run não persiste oportunidades
+    # Dry-run não persiste oportunidades e não consulta Remotive desabilitada
     dry_results = sync_sources(
         db_session,
         dry_run=True,
         connector_overrides=build_connectors(),
     )
-    assert all(r.fetched_count == 2 and r.inserted_count == 0 for r in dry_results)
+    assert len(dry_results) == 1
+    assert dry_results[0].source_slug == "remote_ok"
+    assert dry_results[0].fetched_count == 2 and dry_results[0].inserted_count == 0
+    assert remotive_calls["count"] == 0
     assert db_session.execute(select(Opportunity)).scalars().all() == []
 
-    # 1a sincronização real
+    # 1a sincronização real (somente Remote OK ativa)
     first_results = sync_sources(
         db_session,
         connector_overrides=build_connectors(),
     )
-    assert all(r.status == SyncRunStatus.SUCCESS.value and r.inserted_count == 2 for r in first_results)
+    assert len(first_results) == 1
+    assert first_results[0].status == SyncRunStatus.SUCCESS.value
+    assert first_results[0].inserted_count == 2
+    assert remotive_calls["count"] == 0
     opps = db_session.execute(select(Opportunity).order_by(Opportunity.external_id)).scalars().all()
-    assert len(opps) == 4
+    assert len(opps) == 2
     first_seen_snapshot = opps[0].first_seen_at
 
     # Respeito ao intervalo mínimo sem --force
@@ -256,7 +262,9 @@ def test_sync_deduplication_idempotency_intervals_and_conservative_absence(db_se
         force=False,
         connector_overrides=build_connectors(),
     )
-    assert all(r.status == SyncRunStatus.SKIPPED.value for r in skipped_results)
+    assert len(skipped_results) == 1
+    assert skipped_results[0].status == SyncRunStatus.SKIPPED.value
+    assert remotive_calls["count"] == 0
 
     # 2a sincronização com atualização sem duplicar (inclui duplicata por URL canônica com external_id alterado)
     updated_ok = sample_remote_ok_payload()
@@ -286,15 +294,16 @@ def test_sync_deduplication_idempotency_intervals_and_conservative_absence(db_se
     assert refreshed.title == "Junior Python & FastAPI Engineer"
     assert refreshed.first_seen_at == first_seen_snapshot
 
-    # Falha isolada da fonte NÃO encerra vagas existentes nem derruba a outra fonte
+    # Falha da fonte NÃO encerra vagas existentes (e Remotive continua sem requisições)
     partial_failure = sync_sources(
         db_session,
         force=True,
         connector_overrides=build_connectors(fail_ok=True),
     )
-    status_by_slug = {r.source_slug: r.status for r in partial_failure}
-    assert status_by_slug["remote_ok"] == SyncRunStatus.FAILED.value
-    assert status_by_slug["remotive"] == SyncRunStatus.SUCCESS.value
+    assert len(partial_failure) == 1
+    assert partial_failure[0].source_slug == "remote_ok"
+    assert partial_failure[0].status == SyncRunStatus.FAILED.value
+    assert remotive_calls["count"] == 0
 
     db_session.expire_all()
     still_active = db_session.execute(
@@ -500,24 +509,51 @@ def test_api_opportunities_privacy_immutability_filters_pagination_and_states(
     profile_b.country = "Brasil"
     db_session.commit()
 
-    # Sincroniza 4 vagas públicas usando transporte mockado
+    # Sincroniza 3 vagas elegíveis da Remote OK usando transporte mockado (Remotive desabilitada)
+    extended_remote_ok = sample_remote_ok_payload() + [
+        {
+            "id": "109003",
+            "position": "Freelance Backend API Engineer",
+            "company": "Studio Sul",
+            "tags": ["freelance", "python", "fastapi"],
+            "location": "Worldwide",
+            "description": "<p>Build Python FastAPI services.</p>",
+            "url": "https://remoteok.com/remote-jobs/freelance-backend-109003",
+            "date": "2026-11-12T12:00:00+00:00",
+        },
+        {
+            "id": "109004",
+            "position": "Junior Software Engineer React & Python",
+            "company": "Norte Tech",
+            "tags": ["junior", "react", "python"],
+            "location": "LATAM",
+            "description": "<p>React + Python junior engineering position.</p>",
+            "url": "https://remoteok.com/remote-jobs/junior-software-109004",
+            "date": "2026-11-13T12:00:00+00:00",
+        },
+    ]
+    remotive_calls = {"count": 0}
+
+    def remotive_should_not_run(_):
+        remotive_calls["count"] += 1
+        return httpx.Response(500)
+
     sync_sources(
         db_session,
         connector_overrides={
             "remote_ok": RemoteOKConnector(
                 transport=httpx.MockTransport(
-                    lambda _: httpx.Response(200, json=sample_remote_ok_payload())
+                    lambda _: httpx.Response(200, json=extended_remote_ok)
                 ),
                 sleep_fn=lambda _: None,
             ),
             "remotive": RemotiveConnector(
-                transport=httpx.MockTransport(
-                    lambda _: httpx.Response(200, json=sample_remotive_payload())
-                ),
+                transport=httpx.MockTransport(remotive_should_not_run),
                 sleep_fn=lambda _: None,
             ),
         },
     )
+    assert remotive_calls["count"] == 0
 
     client_a = make_client(("10.10.0.1", 50000))
     client_b = make_client(("10.10.0.2", 50000))
@@ -528,11 +564,14 @@ def test_api_opportunities_privacy_immutability_filters_pagination_and_states(
     csrf_a = login_and_get_csrf(client_a, "user.a@example.com", "StrongPasswordA123!")
     csrf_b = login_and_get_csrf(client_b, "user.b@example.com", "StrongPasswordB123!")
 
-    # Fontes públicas sem exposição de segredos
+    # Fontes públicas sem exposição de segredos e com estado correto de habilitação
     sources_resp = client_a.get("/api/v1/opportunities/sources")
     assert sources_resp.status_code == 200
     sources_json = sources_resp.json()
-    assert {s["slug"] for s in sources_json} == {"remote_ok", "remotive"}
+    sources_by_slug = {s["slug"]: s for s in sources_json}
+    assert set(sources_by_slug.keys()) == {"remote_ok", "remotive"}
+    assert sources_by_slug["remote_ok"]["enabled"] is True
+    assert sources_by_slug["remotive"]["enabled"] is False
 
     # Listagem padrão com filtro + paginação limitada
     bad_page_size = client_a.get("/api/v1/opportunities?page_size=200")
@@ -672,3 +711,137 @@ def test_cli_sync_opportunities_dry_run_and_error_handling(
     captured = capsys.readouterr()
     assert "fonte=remote_ok" in captured.out
     assert "coletadas=2" in captured.out
+
+    # CLI recusa --source remotive (desabilitada por padrão) com erro controlado
+    exit_remotive = cli_main(["sync-opportunities", "--source", "remotive"])
+    assert exit_remotive == 1
+    captured_err = capsys.readouterr()
+    assert "desabilitada" in captured_err.err.lower()
+
+
+def test_source_compliance_remotive_disabled_and_remote_ok_active(
+    db_session, db_engine, make_client, monkeypatch, capsys
+):
+    from sqlalchemy.orm import sessionmaker
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    # 1 e 2: Remote OK habilitada por padrão; Remotive desabilitada por padrão
+    sources = ensure_default_sources(db_session)
+    by_slug = {s.slug: s for s in sources}
+    assert by_slug["remote_ok"].enabled is True
+    assert by_slug["remote_ok"].refresh_interval_seconds == 3600
+    assert by_slug["remotive"].enabled is False
+    assert RemotiveConnector.definition.enabled_by_default is False
+    assert RemoteOKConnector.definition.enabled_by_default is True
+
+    # 6: Se Remotive estava habilitada no banco previamente, ensure_default_sources atualiza para False;
+    # Se Remote OK foi desabilitada manualmente pelo operador, ensure_default_sources NÃO a reativa!
+    by_slug["remotive"].enabled = True
+    by_slug["remote_ok"].enabled = False
+    db_session.commit()
+
+    reinitialized = {s.slug: s for s in ensure_default_sources(db_session)}
+    assert reinitialized["remotive"].enabled is False
+    assert reinitialized["remote_ok"].enabled is False
+
+    # Restaura remote_ok=True manualmente para os testes de sincronização abaixo
+    reinitialized["remote_ok"].enabled = True
+    db_session.commit()
+
+    remotive_http_calls = {"count": 0}
+    remote_ok_http_calls = {"count": 0}
+
+    def remotive_guard(_):
+        remotive_http_calls["count"] += 1
+        return httpx.Response(503)
+
+    def ok_handler(_):
+        remote_ok_http_calls["count"] += 1
+        return httpx.Response(200, json=sample_remote_ok_payload())
+
+    overrides = {
+        "remote_ok": RemoteOKConnector(
+            transport=httpx.MockTransport(ok_handler),
+            sleep_fn=lambda _: None,
+        ),
+        "remotive": RemotiveConnector(
+            transport=httpx.MockTransport(remotive_guard),
+            sleep_fn=lambda _: None,
+        ),
+    }
+
+    # 3 e 8: Remotive desabilitada não sofre requisição HTTP; Remote OK sincroniza normalmente
+    res_normal = sync_sources(db_session, connector_overrides=overrides)
+    assert len(res_normal) == 1
+    assert res_normal[0].source_slug == "remote_ok"
+    assert res_normal[0].status == SyncRunStatus.SUCCESS.value
+    assert res_normal[0].inserted_count == 2
+    assert remote_ok_http_calls["count"] == 1
+    assert remotive_http_calls["count"] == 0
+
+    # 4: --force NÃO contorna a desabilitação da Remotive (nem executa HTTP contra ela)
+    res_force = sync_sources(db_session, force=True, connector_overrides=overrides)
+    assert [r.source_slug for r in res_force] == ["remote_ok"]
+    assert remotive_http_calls["count"] == 0
+    assert remote_ok_http_calls["count"] == 2
+
+    # 5: --source remotive recusa execução sem consultar API (tanto no serviço quanto via CLI)
+    with pytest.raises(ValueError, match="(?i)desabilitada"):
+        sync_sources(
+            db_session,
+            source_slug="remotive",
+            force=True,
+            connector_overrides=overrides,
+        )
+    assert remotive_http_calls["count"] == 0
+
+    TestSession = sessionmaker(bind=db_engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr("app.cli.SessionLocal", TestSession)
+    cli_code = cli_main(["sync-opportunities", "--source", "remotive", "--force"])
+    assert cli_code == 1
+    assert remotive_http_calls["count"] == 0
+    capsys.readouterr()
+
+    # 7: API /opportunities/sources reporta estado correto de habilitação
+    user = create_user_account(
+        db_session,
+        email="sources.check@example.com",
+        display_name="Source Check",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    db_session.commit()
+    client = make_client(("10.10.0.9", 50000))
+    login_and_get_csrf(client, "sources.check@example.com", "StrongPassword123!")
+    api_sources = {s["slug"]: s for s in client.get("/api/v1/opportunities/sources").json()}
+    assert api_sources["remote_ok"]["enabled"] is True
+    assert api_sources["remotive"]["enabled"] is False
+
+    # 9: Mesmo que enabled=True exista no banco para Remotive, ensure_default_sources impõe False
+    # e Remote OK sincroniza normalmente; e em cenário controlado de falha HTTP 503 da Remotive,
+    # a sincronização da Remote OK não é interrompida.
+    remotive_row = db_session.execute(
+        select(OpportunitySource).where(OpportunitySource.slug == "remotive")
+    ).scalar_one()
+    remotive_row.enabled = True
+    db_session.commit()
+
+    res_guarded = sync_sources(db_session, force=True, connector_overrides=overrides)
+    assert len(res_guarded) == 1
+    assert res_guarded[0].source_slug == "remote_ok"
+    assert res_guarded[0].status == SyncRunStatus.SUCCESS.value
+    assert remotive_http_calls["count"] == 0
+
+    from dataclasses import replace
+
+    enabled_rem_def = replace(RemotiveConnector.definition, enabled_by_default=True)
+    monkeypatch.setattr(RemotiveConnector, "definition", enabled_rem_def)
+    overrides["remotive"].definition = enabled_rem_def
+    remotive_row.enabled = True
+    db_session.commit()
+
+    res_fail_isolated = sync_sources(db_session, force=True, connector_overrides=overrides)
+    status_map = {r.source_slug: r.status for r in res_fail_isolated}
+    assert status_map["remotive"] == SyncRunStatus.FAILED.value
+    assert status_map["remote_ok"] == SyncRunStatus.SUCCESS.value
+    assert remotive_http_calls["count"] >= 1

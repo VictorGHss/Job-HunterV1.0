@@ -6,6 +6,24 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.1] - 2026-11-15 — Fase 02.1: Conformidade das Fontes e Primeira Sincronização Real
+
+### Alterado
+- **Governança Explícita de Fontes (`SourceDefinition` e `sync_service.py`):**
+  - Adicionados campos `enabled_by_default` e `disabled_reason` em `SourceDefinition`.
+  - `RemoteOKConnector` mantido ativo (`enabled_by_default=True`, intervalo `3600s`, atribuição visível e links diretos sem `nofollow`).
+  - `RemotiveConnector` desabilitado temporariamente (`enabled_by_default=False`) aguardando esclarecimento e autorização escrita sobre restrições nos Termos de Uso gerais de março de 2026 para agregação multiusuário; código preservado para eventual retomada após autorização.
+  - `ensure_default_sources` força `enabled=False` para fontes bloqueadas por padrão no código e preserva desabilitações manuais no banco sem reativá-las automaticamente.
+  - `sync_sources` recusa `--source remotive`, bloqueia qualquer requisição HTTP a fontes desabilitadas mesmo com `--force` e registra estado fiel em `GET /api/v1/opportunities/sources`.
+- **Frontend (`OpportunityDiscoveryPage.tsx`):**
+  - Indicador de fontes não sincronizadas passa a considerar apenas fontes habilitadas; seletor exibe rótulo explícito `(desabilitada)` para fontes pausadas.
+- **Primeira Sincronização Real:**
+  - Executada exclusivamente com `remote_ok` no banco PostgreSQL local `jobhunter`: **97 oportunidades coletadas e inseridas** (`88 other`, `4 junior`, `3 freelance`, `2 internship`), sem consultar a Remotive.
+- **Testes:**
+  - Adicionado `test_source_compliance_remotive_disabled_and_remote_ok_active` em `tests/test_opportunities_phase02.py` cobrindo os 9 cenários de conformidade, `--force`, `--source remotive`, não reativação e isolamento de falhas.
+
+---
+
 ## [0.2.0] - 2026-11-15 — Fase 02: Motor de Descoberta de Oportunidades v1
 
 ### Adicionado

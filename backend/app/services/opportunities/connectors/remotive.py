@@ -109,6 +109,11 @@ class RemotiveConnector(BaseOpportunityConnector):
             "para a página oficial da vaga."
         ),
         refresh_interval_seconds=21600,
+        enabled_by_default=False,
+        disabled_reason=(
+            "Desabilitada temporariamente aguardando esclarecimento e autorização "
+            "escrita sobre os Termos de Uso gerais de março de 2026."
+        ),
     )
 
     def parse_payload(self, payload: Any) -> list[NormalizedOpportunityDraft]:

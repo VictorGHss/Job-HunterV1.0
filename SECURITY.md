@@ -94,3 +94,7 @@ Este documento registra as decisões arquiteturais de segurança implementadas n
   - Oportunidades cadastradas manualmente pertencem estritamente a `created_by_user_id` (`404 Not Found` para qualquer outro usuário).
   - Estados individuais (`is_saved`, `is_dismissed`, `last_viewed_at`) são persistidos por usuário na tabela `opportunity_user_states`.
   - O campo `raw_metadata` das fontes externas nunca é exposto nos schemas de resposta da API.
+- **Governança Explícita de Habilitação e Conformidade de Fontes (Fase 02.1):**
+  - `SourceDefinition` declara explicitamente `enabled_by_default` e `disabled_reason`. Fontes sem conformidade confirmada para agregação multiusuário (atualmente `remotive`, aguardando esclarecimento/autorização escrita sobre os Termos de Uso gerais de março/2026) permanecem desabilitadas por padrão (`enabled=false`).
+  - `ensure_default_sources` aplica bloqueios padrão de conformidade no banco sem nunca reativar automaticamente fontes desabilitadas manualmente pelo operador.
+  - `sync_sources` impede qualquer requisição HTTP externa quando `source.enabled == False` ou `enabled_by_default == False`, recusando `--source <slug>` explicitamente com erro e garantindo que `--force` ignore somente o intervalo mínimo entre coletas.
