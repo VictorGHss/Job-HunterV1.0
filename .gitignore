@@ -1,0 +1,60 @@
+# Ambientes e Segredos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+cloudflared-credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+backend/.venv/
+backend/venv/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+*.tsbuildinfo
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDEs & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Volumes ou bancos locais de teste
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+
+# Seeds privados locais (nunca versionar dados pessoais)
+local-seeds/*
+!local-seeds/profile-seed.example.json

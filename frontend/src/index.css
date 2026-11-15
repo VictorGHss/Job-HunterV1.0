@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Tema Claro: Fundo lavanda muito suave, superfícies claras, roxo como destaque */
+    --background: 256 100% 97.8%;
+    --foreground: 252 42% 11%;
+
+    --card: 255 60% 99.4%;
+    --card-foreground: 252 42% 11%;
+
+    --muted: 255 45% 93.5%;
+    --muted-foreground: 252 20% 38%;
+
+    --primary: 263 75% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 256 48% 92%;
+    --secondary-foreground: 260 55% 24%;
+
+    --accent: 262 65% 91%;
+    --accent-foreground: 263 75% 35%;
+
+    --destructive: 0 78% 52%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 256 32% 86%;
+    --input: 256 32% 85%;
+    --ring: 263 75% 50%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    /* Tema Escuro: Fundo preto/grafite, superfícies escuras, roxo como destaque, sem cartões brancos */
+    --background: 240 12% 4.5%;
+    --foreground: 250 20% 96%;
+
+    --card: 240 12% 8%;
+    --card-foreground: 250 20% 96%;
+
+    --muted: 240 11% 12.5%;
+    --muted-foreground: 245 14% 66%;
+
+    --primary: 263 85% 66%;
+    --primary-foreground: 240 15% 6%;
+
+    --secondary: 245 14% 14%;
+    --secondary-foreground: 250 20% 93%;
+
+    --accent: 262 35% 18%;
+    --accent-foreground: 263 90% 82%;
+
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 240 11% 16%;
+    --input: 240 11% 16%;
+    --ring: 263 85% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground min-h-screen;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}

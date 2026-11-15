@@ -1,0 +1,101 @@
+# Guia de Implantação e Operação (DEPLOY.md)
+
+Este documento descreve a operação do ambiente local em containers e a preparação arquitetural para exposição futura no domínio **`https://jobhunter.ctrls.dev.br`** utilizando **Cloudflare Tunnel** e **Cloudflare Access**.
+
+> [!IMPORTANT]
+> Nenhuma alteração de DNS ou configuração de túneis existentes na conta Cloudflare deve ser executada sem autorização explícita do responsável pelo projeto.
+
+---
+
+## 1. Arquitetura de Execução Local
+
+O ambiente é orquestrado pelo arquivo [`infra/compose.yaml`](infra/compose.yaml) e dividido em três serviços conectados pela rede bridge interna `job_hunter_net`:
+
+1. **`db` (`postgres:16-alpine`)**:
+   - Volume persistente nomeado: `job_hunter_pgdata`.
+   - **Não exposto publicamente no host** (utiliza apenas `expose: ["5432"]` para comunicação interna com o `backend`).
+   - Possui healthcheck ativo com `pg_isready`.
+2. **`backend` (`FastAPI + Uvicorn`)**:
+   - Construído em imagem multi-stage (`target: base`), excluindo `pytest` e arquivos de teste do runtime de produção.
+   - Roda sob usuário não-root (`appuser`, UID `10001`).
+   - Monta `../local-seeds` em `/run/local-seeds:ro` para importação opcional de perfil via CLI administrativa.
+   - Executa `alembic upgrade head` antes de iniciar o servidor ASGI.
+   - Publicado apenas em loopback local: `127.0.0.1:${BACKEND_PORT:-8090}->8000/tcp`.
+3. **`frontend` (`Nginx 1.27 Alpine` + Build estática Vite/React)**:
+   - Serve os artefatos estáticos da SPA e o manifesto PWA (`/manifest.webmanifest`).
+   - Encaminha requisições `/api/*` via proxy reverso interno para `http://backend:8000/api/`, propagando `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto` e `X-Forwarded-Host`.
+   - Publicado apenas em loopback local: `127.0.0.1:${FRONTEND_PORT:-5180}->80/tcp`.
+4. **`backend-test` (Perfil opcional `test` para PostgreSQL 16)**:
+   - Executa a suíte `pytest` usando o estágio `test` do Dockerfile contra o banco dedicado `jobhunter_test`, sem tocar no banco `jobhunter`.
+
+### Portas Padrão (Sem Conflito com Outros Projetos Locais)
+As portas padrão foram selecionadas após inspeção do ambiente para não colidir com serviços existentes (`5432`, `5433`, `15432`, `6379`, `8080`, etc.):
+- `FRONTEND_PORT=5180` (`127.0.0.1:5180`)
+- `BACKEND_PORT=8090` (`127.0.0.1:8090`)
+
+---
+
+## 2. Comandos Operacionais do Dia a Dia
+
+### Iniciar o sistema
+```powershell
+docker compose --env-file .env -f infra/compose.yaml up -d
+```
+
+### Verificar estado e saúde (Healthchecks)
+```powershell
+docker compose --env-file .env -f infra/compose.yaml ps
+curl http://127.0.0.1:8090/api/v1/health
+```
+
+### Visualizar logs sem expor segredos
+```powershell
+docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
+```
+
+### Parar o sistema (Zero consumo em segundo plano)
+```powershell
+docker compose --env-file .env -f infra/compose.yaml down
+```
+
+---
+
+## 3. Preparação para Cloudflare Tunnel (`jobhunter.ctrls.dev.br`)
+
+Quando o responsável decidir publicar o acesso remoto via Cloudflare Tunnel:
+
+### 3.1. Princípios de Exposição Segura
+1. **Encaminhar tráfego exclusivamente para o serviço Web (`frontend`):**
+   - O túnel deve apontar apenas para `http://127.0.0.1:5180` (ou `http://frontend:80` caso o `cloudflared` rode na rede `job_hunter_net`).
+   - O Nginx do `frontend` já realiza o proxy reverso de `/api/*` para o `backend`, eliminando a necessidade de expor o container do backend diretamente na borda se não desejar.
+2. **Nunca expor o PostgreSQL (`db`) no Tunnel:**
+   - O banco de dados jamais deve receber rota pública, subdomínio TCP ou porta exposta no host.
+3. **Segredos fora do Git:**
+   - Tokens (`TUNNEL_TOKEN`) ou arquivos `cloudflared-credentials.json` nunca devem ser commitados no repositório (já bloqueados no `.gitignore`).
+4. **Isolamento de outros túneis:**
+   - Não reutilizar nem sobrescrever arquivos de configuração de containers ou túneis de outros projetos em execução na máquina.
+
+### 3.2. Configuração Obrigatória de Segurança em Produção (`ENVIRONMENT=production`)
+Ao habilitar `ENVIRONMENT=production` no `.env`, a aplicação valida automaticamente no startup (recusando iniciar caso falhe):
+- `COOKIE_SECURE=true` (obrigatório em HTTPS).
+- `SECRET_KEY` forte (mínimo 32 caracteres e 10 caracteres distintos, sem placeholders).
+- `CORS_ORIGINS` não vazio, sem wildcard `*` e exclusivamente com esquema `https://`.
+
+```ini
+ENVIRONMENT=production
+PLANNED_HOSTNAME=https://jobhunter.ctrls.dev.br
+COOKIE_SECURE=true
+COOKIE_SAMESITE=lax
+CORS_ORIGINS=https://jobhunter.ctrls.dev.br
+```
+
+### 3.3. Origem Confiável, Nginx e Cloudflare Tunnel (`TRUSTED_PROXY_CIDRS` / `TRUST_CF_CONNECTING_IP`)
+Para que o rate limiting de login identifique corretamente o cliente sem aceitar spoofing de `X-Forwarded-For`:
+- Em uso local atrás do Nginx do `frontend`, mantenha `TRUSTED_PROXY_CIDRS` restrito às sub-redes internas confiáveis (`127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`) e `TRUST_CF_CONNECTING_IP=false`.
+- Caso o backend seja acessado por fora da rede confiável configurada, cabeçalhos `X-Forwarded-For` e `CF-Connecting-IP` são ignorados automaticamente.
+- Ao publicar via Cloudflare Tunnel (`cloudflared` apontando para o Nginx/`frontend`), só habilite `TRUST_CF_CONNECTING_IP=true` se o Nginx e o backend **não aceitarem conexões HTTP diretas de redes não autenticadas fora do túnel/Cloudflare** (pois do contrário qualquer cliente que alcance a origem diretamente poderia forjar `CF-Connecting-IP`).
+
+### 3.4. Camada Adicional Recomendada: Cloudflare Access (Zero Trust)
+Mesmo com a autenticação Argon2id + Sessão HttpOnly nativa do Job Hunter, recomenda-se configurar uma **Application Policy** no **Cloudflare Zero Trust (Cloudflare Access)** para o hostname `jobhunter.ctrls.dev.br`:
+- **Política:** `Allow` apenas para a lista explícita de e-mails autorizados (One-Time Pin ou provedor de identidade GitHub/Google).
+- **Benefício:** Bloqueia bots, scanners e tentativas de força bruta na borda da Cloudflare antes mesmo de atingirem a máquina local.

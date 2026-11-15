@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "profile": {
+    "full_name": "Nome Exemplo",
+    "professional_email": null,
+    "phone": null,
+    "city": "Cidade Exemplo",
+    "state": "Estado Exemplo",
+    "country": "Brasil",
+    "professional_title": "Desenvolvedor Backend Júnior | Python & APIs",
+    "professional_summary": "Resumo profissional de exemplo em rascunho. Substitua apenas com informações reais revisadas.",
+    "linkedin_url": null,
+    "github_url": null,
+    "portfolio_url": null,
+    "verification_status": "pending_validation",
+    "preferences": {
+      "internships": {
+        "enabled": true,
+        "priority_areas": [
+          "Desenvolvimento Backend",
+          "APIs e integrações"
+        ],
+        "preferred_languages": [
+          "Português Brasileiro",
+          "Inglês"
+        ],
+        "excluded_areas": [
+          "Suporte técnico"
+        ]
+      },
+      "junior_developer": {
+        "enabled": true,
+        "priority_areas": [
+          "Desenvolvimento Backend",
+          "Full Stack"
+        ],
+        "block_clt": false,
+        "accepted_contract_types": [
+          "CLT",
+          "PJ",
+          "Estágio"
+        ],
+        "excluded_areas": []
+      },
+      "freelance": {
+        "enabled": true,
+        "scopes": [
+          "Brasil"
+        ],
+        "priority_categories": [
+          "APIs e integrações",
+          "Automação"
+        ],
+        "preferred_languages": [
+          "Português Brasileiro"
+        ]
+      },
+      "source_restrictions": {
+        "workana_enabled": true,
+        "workana_disabled_reason": "",
+        "gupy_mode": "selective_high_compatibility",
+        "auto_execute_tests": false,
+        "pay_premium_or_fees_without_approval": false,
+        "strict_platform_terms_compliance": true
+      }
+    }
+  },
+  "experiences": [
+    {
+      "company": "Empresa Exemplo",
+      "role": "Desenvolvedor Estagiário",
+      "description": "Descrição das atividades reais executadas.",
+      "start_date": "2025-01-01",
+      "end_date": null,
+      "is_current": true,
+      "experience_type": "internship",
+      "technologies": [
+        "Python",
+        "PostgreSQL"
+      ],
+      "related_skills": [
+        "APIs REST"
+      ],
+      "eligible_as_target_role": true,
+      "verification_status": "pending_validation"
+    }
+  ],
+  "educations": [
+    {
+      "institution": "Instituição Exemplo",
+      "course": "Curso Superior de Tecnologia Exemplo",
+      "field_of_study": "Tecnologia da Informação",
+      "current_semester": "1º semestre",
+      "start_date": null,
+      "expected_graduation_date": null,
+      "education_status": "in_progress",
+      "verification_status": "pending_validation"
+    }
+  ],
+  "skills": [
+    {
+      "name": "Python",
+      "category": "Backend",
+      "proficiency_level": "intermediate",
+      "notes": "Exemplo de habilidade técnica.",
+      "verification_status": "pending_validation"
+    }
+  ],
+  "languages": [
+    {
+      "language_name": "Português Brasileiro",
+      "proficiency_level": "native",
+      "cefr_level": null,
+      "verification_status": "pending_validation"
+    },
+    {
+      "language_name": "Inglês",
+      "proficiency_level": "intermediate",
+      "cefr_level": "B1",
+      "verification_status": "pending_validation"
+    }
+  ],
+  "projects": [
+    {
+      "name": "Projeto Exemplo",
+      "description": "Descrição em rascunho de projeto técnico.",
+      "role": "Desenvolvedor",
+      "technologies": [
+        "Python"
+      ],
+      "links": {},
+      "verified_results": null,
+      "verification_status": "draft"
+    }
+  ]
+}
