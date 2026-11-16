@@ -51,6 +51,11 @@ class NormalizedOpportunityDraft:
     source_status: str
     professional_area: str = "unknown"
     secondary_areas: list[str] = field(default_factory=list)
+    seniority_level: str = "unknown"
+    experience_requirement_mode: str = "not_specified"
+    experience_min_years: int | None = None
+    experience_preferred_years: int | None = None
+    experience_summary: str | None = None
     raw_metadata: dict[str, Any] = field(default_factory=dict)
 
 

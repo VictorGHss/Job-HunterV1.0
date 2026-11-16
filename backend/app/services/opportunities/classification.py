@@ -2,7 +2,13 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
-from app.models.opportunity import EmploymentType, OpportunityType, ProfessionalArea
+from app.models.opportunity import (
+    EmploymentType,
+    ExperienceRequirementMode,
+    OpportunityType,
+    ProfessionalArea,
+    SeniorityLevel,
+)
 
 _COMBINING_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -45,6 +51,24 @@ TECH_TARGET_AREAS: frozenset[str] = frozenset(
         ProfessionalArea.INFRASTRUCTURE.value,
     }
 )
+
+SENIORITY_LABELS_PT: dict[str, str] = {
+    SeniorityLevel.INTERNSHIP.value: "Estágio",
+    SeniorityLevel.ENTRY_LEVEL.value: "Início de carreira / Entry-level",
+    SeniorityLevel.JUNIOR.value: "Júnior",
+    SeniorityLevel.MID_LEVEL.value: "Pleno",
+    SeniorityLevel.SENIOR.value: "Sênior",
+    SeniorityLevel.STAFF_PRINCIPAL.value: "Staff / Principal",
+    SeniorityLevel.MANAGEMENT.value: "Liderança / Gestão",
+    SeniorityLevel.UNKNOWN.value: "Senioridade não informada",
+}
+
+EXPERIENCE_MODE_LABELS_PT: dict[str, str] = {
+    ExperienceRequirementMode.NONE_REQUIRED.value: "Sem exigência de experiência prévia",
+    ExperienceRequirementMode.PREFERRED.value: "Experiência desejável",
+    ExperienceRequirementMode.REQUIRED.value: "Experiência obrigatória",
+    ExperienceRequirementMode.NOT_SPECIFIED.value: "Experiência não especificada",
+}
 
 # Frases que mencionam senioridade ou perfil júnior de TERCEIROS (colegas, líderes, reportados),
 # não os requisitos da própria vaga — removidas apenas do texto de descrição antes da heurística.
@@ -98,13 +122,32 @@ _INTERNSHIP_BODY_PHRASE_RE = re.compile(
 )
 
 # Sinais de EXCLUSÃO/BLOQUEIO para estágio e júnior (cargos seniores, liderança, credenciais médicas plenas)
+_STAFF_PRINCIPAL_RE = re.compile(
+    r"(?<![a-z0-9])(?:staff|principal|distinguished\s+engineer|fellow)(?![a-z0-9])"
+)
+_MANAGEMENT_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"team\s+lead|tech\s+lead|technical\s+(?:product\s+)?lead|"
+    r"engineering\s+lead|product\s+engineering\s+lead|bd\s+lead|cloud\s+lead|"
+    r"lead\s+(?:engineer|developer|software\s+engineer|software\s+developer|designer|product|architect)|"
+    r"head\s+of|director|vp|vice\s+president|chief\s+\w+\s+officer|cto|ceo|cfo|cio|"
+    r"manager|gerente|coordenador(?:a)?|dean"
+    r")(?![a-z0-9])"
+)
+_SENIOR_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:senior|sr\.?|especialista|architect)(?![a-z0-9])"
+)
+_MID_LEVEL_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:pleno|mid[- ]?level|mid[- ]?senior|intermediario)(?![a-z0-9])"
+)
 _LEADERSHIP_OR_SENIOR_RE = re.compile(
     r"(?<![a-z0-9])(?:"
     r"senior|sr\.?|staff|principal|team\s+lead|tech\s+lead|technical\s+(?:product\s+)?lead|"
-    r"engineering\s+lead|bd\s+lead|cloud\s+lead|lead\s+(?:engineer|developer|designer|product|architect)|"
-    r"head\s+of|director|vp|vice\s+president|chief\s+\w+\s+officer|cto|ceo|cfo|"
+    r"engineering\s+lead|product\s+engineering\s+lead|bd\s+lead|cloud\s+lead|"
+    r"lead\s+(?:engineer|developer|designer|product|architect)|"
+    r"head\s+of|director|vp|vice\s+president|chief\s+\w+\s+officer|cto|ceo|cfo|cio|"
     r"manager|gerente|coordenador(?:a)?|director\s+of|dean|"
-    r"pleno|mid[- ]?level|mid[- ]?senior|architect"
+    r"pleno|mid[- ]?level|mid[- ]?senior|architect|especialista"
     r")(?![a-z0-9])"
 )
 _BOARD_CREDENTIAL_RE = re.compile(
@@ -112,10 +155,16 @@ _BOARD_CREDENTIAL_RE = re.compile(
 )
 _EXPERIENCED_YEARS_RE = re.compile(
     r"(?:at\s+least\s+|minimum\s+|preferably\s+)?(?:[3-9]|\d{2,})\s*(?:\+|-\s*\d+\+?)?\s*"
-    r"(?:years?|anos)\s+(?:of\s+)?(?:[a-z0-9/-]+\s+){0,4}(?:experience|experiencia|in\s+)"
+    r"(?:years?|anos)\s+(?:of\s+|de\s+)?(?:[a-z0-9/+-]+\s+){0,4}(?:experience|experiencia|in\s+)"
 )
 
-# Sinais de JÚNIOR / ENTRADA (nunca sênior mascarado)
+# Sinais de JÚNIOR vs INÍCIO DE CARREIRA / ENTRADA
+_JUNIOR_STRICT_RE = re.compile(
+    r"(?<![a-z0-9])(?:junior|jr\.?)(?![a-z0-9])"
+)
+_ENTRY_LEVEL_ONLY_RE = re.compile(
+    r"(?<![a-z0-9])(?:entry[- ]?level|trainee|new\s+grad|graduate|early[- ]?career|inicio\s+de\s+carreira)(?![a-z0-9])"
+)
 _JUNIOR_TITLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
     r"junior|jr\.?|entry[- ]?level|trainee|new\s+grad|graduate|early[- ]?career|inicio\s+de\s+carreira"
@@ -372,6 +421,17 @@ _DEVOPS_STACK_RE = re.compile(
 
 
 @dataclass(frozen=True, slots=True)
+class ExperienceAssessment:
+    mode: str
+    min_years: int | None
+    preferred_years: int | None
+    summary: str | None
+    mandatory_technologies: tuple[str, ...] = ()
+    desirable_technologies: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ClassificationDecision:
     opportunity_type: str
     employment_type: str
@@ -379,6 +439,415 @@ class ClassificationDecision:
     reasons: tuple[str, ...]
     professional_area: str = ProfessionalArea.UNKNOWN.value
     secondary_areas: tuple[str, ...] = ()
+    seniority_level: str = SeniorityLevel.UNKNOWN.value
+    experience_requirement_mode: str = ExperienceRequirementMode.NOT_SPECIFIED.value
+    experience_min_years: int | None = None
+    experience_preferred_years: int | None = None
+    experience_summary: str | None = None
+    required_technologies: tuple[str, ...] = ()
+    desirable_technologies: tuple[str, ...] = ()
+
+
+def _extract_techs_from_text(norm_text: str) -> list[str]:
+    found: list[str] = []
+    for label, pattern in _TECH_EXTRACTION_MAP:
+        if pattern.search(norm_text):
+            found.append(label)
+    return found
+
+
+def classify_experience_requirements(
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    requirements: list[str] | None = None,
+) -> ExperienceAssessment:
+    """
+    Classifica requisitos explícitos de experiência separando obrigatoriedade,
+    desejabilidade e ausência de especificação. Nunca infere anos de experiência
+    apenas a partir do título do cargo ou de nomes isolados de tecnologias/tags.
+    """
+    del title  # Regra estrita: nunca inferir experiência pelo título do cargo
+    reasons: list[str] = []
+    required_years_list: list[int] = []
+    preferred_years_list: list[int] = []
+    has_no_experience = False
+    has_qual_required = False
+    has_qual_preferred = False
+    mandatory_techs: list[str] = []
+    desirable_techs: list[str] = []
+
+    raw_blocks: list[tuple[str, str]] = []
+    if requirements:
+        for req in requirements:
+            if req and str(req).strip():
+                raw_blocks.append(("required", str(req)))
+
+    if description:
+        plain_with_lines = _HTML_TAG_RE.sub(
+            " ",
+            re.sub(
+                r"(?i)<(?:br\s*/?|/p|/div|/li|/h[1-6]|tr)[^>]*>",
+                "\n",
+                _repair_mojibake(description),
+            ),
+        )
+        section_mode = "neutral"
+        for raw_line in plain_with_lines.splitlines():
+            norm_line = normalize_classification_text(raw_line)
+            if not norm_line:
+                continue
+            if _EXP_PREFERRED_HEADER_RE.match(norm_line):
+                section_mode = "preferred"
+            elif _EXP_REQUIRED_HEADER_RE.match(norm_line):
+                section_mode = "required"
+            elif _EXP_NEUTRAL_HEADER_RE.match(norm_line):
+                section_mode = "neutral"
+
+            for sent in re.split(r"(?<=[.!?;])\s+", norm_line):
+                sent_clean = _strip_non_self_context(sent.strip())
+                if sent_clean:
+                    raw_blocks.append((section_mode, sent_clean))
+
+    for section_ctx, raw_text in raw_blocks:
+        norm_sent = (
+            raw_text
+            if raw_text == raw_text.lower()
+            else _strip_non_self_context(normalize_classification_text(raw_text))
+        )
+        if not norm_sent:
+            continue
+
+        if _NO_EXPERIENCE_RE.search(norm_sent):
+            has_no_experience = True
+            reasons.append("exp:explicit_no_experience_required")
+            continue
+
+        is_preferred_line = bool(_LINE_PREFERRED_MARKER_RE.search(norm_sent))
+        is_required_line = bool(_LINE_REQUIRED_MARKER_RE.search(norm_sent))
+
+        effective_mode = section_ctx
+        if is_preferred_line and not is_required_line:
+            effective_mode = "preferred"
+        elif is_required_line:
+            effective_mode = "required"
+
+        # Evita falsos positivos com idade da empresa ou frequência anual de benefícios
+        if not _COMPANY_AGE_OR_PTO_RE.search(norm_sent):
+            bachelor_alt = _DEGREE_ALT_YEARS_RE.search(norm_sent)
+            if bachelor_alt:
+                yrs_val = int(bachelor_alt.group(1))
+                if effective_mode == "preferred":
+                    preferred_years_list.append(yrs_val)
+                else:
+                    required_years_list.append(yrs_val)
+            else:
+                for match in _YEARS_CLAUSE_RE.finditer(norm_sent):
+                    yrs_val = int(match.group(1))
+                    trailing = match.group(2) or ""
+                    # Ignora "0 years with Masters" se não houve Bachelor ou > 30 anos (idade da empresa)
+                    if yrs_val > 25:
+                        continue
+                    has_exp_anchor = (
+                        "experience" in norm_sent
+                        or "experiencia" in norm_sent
+                        or "hands-on" in trailing
+                        or "hands on" in trailing
+                        or section_ctx in {"required", "preferred"}
+                    )
+                    if not has_exp_anchor:
+                        continue
+                    if yrs_val == 0 and "master" in trailing:
+                        continue
+                    if effective_mode == "preferred":
+                        preferred_years_list.append(yrs_val)
+                    else:
+                        required_years_list.append(yrs_val)
+
+        if _QUAL_EXP_REQUIRED_RE.search(norm_sent):
+            if effective_mode == "preferred":
+                has_qual_preferred = True
+            elif (
+                effective_mode == "required"
+                or is_required_line
+                or "qualifications" in norm_sent
+            ):
+                has_qual_required = True
+
+        # Extração de tecnologias em requisitos explícitos (sem converter listas "e.g." nem tags soltas)
+        is_non_req_context = (
+            "collaborate" in norm_sent
+            or "helping" in norm_sent
+            or "empower" in norm_sent
+            or "incidental" in norm_sent
+            or "esporadico" in norm_sent
+            or "nao e necessario" in norm_sent
+            or "nao precisa dominar" in norm_sent
+            or "nocoes de " in norm_sent
+        )
+        has_tech_alternatives = bool(
+            _LIST_ALT_TECH_RE.search(norm_sent)
+            or re.search(
+                r"\b(?:java|python|react|angular|vue|node\.?js|c\+\+|c#|golang|php|ruby|rust|typescript|javascript|aws|gcp|azure)\s+(?:or|ou)\b",
+                norm_sent,
+            )
+        )
+        if not is_non_req_context:
+            techs_in_line = _extract_techs_from_text(norm_sent)
+            if techs_in_line:
+                if effective_mode == "preferred":
+                    for tech in techs_in_line:
+                        if tech not in desirable_techs:
+                            desirable_techs.append(tech)
+                elif effective_mode == "required" and not has_tech_alternatives:
+                    for tech in techs_in_line:
+                        if tech not in mandatory_techs:
+                            mandatory_techs.append(tech)
+
+    min_req_years = max(required_years_list) if required_years_list else None
+    pref_years = max(preferred_years_list) if preferred_years_list else None
+
+    if min_req_years is not None and min_req_years > 0:
+        mode = ExperienceRequirementMode.REQUIRED.value
+        summary = f"Obrigatória: {min_req_years}+ anos de experiência"
+        reasons.append(f"exp:required_{min_req_years}plus_years")
+    elif has_no_experience:
+        mode = ExperienceRequirementMode.NONE_REQUIRED.value
+        min_req_years = 0
+        summary = "Sem exigência de experiência prévia"
+    elif has_qual_required:
+        mode = ExperienceRequirementMode.REQUIRED.value
+        summary = "Exige experiência prática (sem contagem mínima de anos)"
+        reasons.append("exp:required_qualitative")
+    elif pref_years is not None or has_qual_preferred:
+        mode = ExperienceRequirementMode.PREFERRED.value
+        summary = (
+            f"Desejável: {pref_years}+ anos de experiência"
+            if pref_years is not None
+            else "Experiência desejável / diferencial"
+        )
+        reasons.append("exp:preferred_only")
+    else:
+        mode = ExperienceRequirementMode.NOT_SPECIFIED.value
+        summary = None
+        reasons.append("exp:not_specified")
+
+    return ExperienceAssessment(
+        mode=mode,
+        min_years=min_req_years,
+        preferred_years=pref_years,
+        summary=summary,
+        mandatory_technologies=tuple(mandatory_techs),
+        desirable_technologies=tuple(desirable_techs),
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _classify_seniority_level(
+    *,
+    norm_title: str,
+    norm_desc: str,
+    tag_set: set[str],
+    meta_tokens: set[str],
+) -> tuple[str, str]:
+    """Classifica o nível profissional independentemente de contrato e sem presumir Senior quando omisso."""
+    combined_meta = tag_set | meta_tokens
+    title_has_staff = bool(_STAFF_PRINCIPAL_RE.search(norm_title))
+    title_has_mgmt = bool(_MANAGEMENT_RE.search(norm_title))
+    title_has_senior = bool(_SENIOR_TITLE_RE.search(norm_title))
+    title_has_mid = bool(_MID_LEVEL_TITLE_RE.search(norm_title))
+    title_has_junior = bool(_JUNIOR_STRICT_RE.search(norm_title))
+    title_has_entry = bool(_ENTRY_LEVEL_ONLY_RE.search(norm_title))
+    title_has_upper = title_has_staff or title_has_mgmt or title_has_senior or title_has_mid
+
+    if _INTERNSHIP_STRONG_RE.search(norm_title):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:title_internship")
+    if not title_has_upper and _INTERNSHIP_BODY_PHRASE_RE.search(norm_desc):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:body_internship")
+    if (
+        combined_meta & {"intern", "internship", "estagio", "apprentice", "working student"}
+        and not title_has_upper
+        and not title_has_junior
+        and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
+    ):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:meta_internship")
+
+    if title_has_staff:
+        return (SeniorityLevel.STAFF_PRINCIPAL.value, "seniority:title_staff_or_principal")
+    if title_has_mgmt:
+        return (SeniorityLevel.MANAGEMENT.value, "seniority:title_management_or_lead")
+    if title_has_senior:
+        return (SeniorityLevel.SENIOR.value, "seniority:title_senior")
+    if title_has_mid:
+        return (SeniorityLevel.MID_LEVEL.value, "seniority:title_mid_level")
+    if title_has_junior:
+        return (SeniorityLevel.JUNIOR.value, "seniority:title_junior")
+    if title_has_entry:
+        return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:title_entry_level")
+
+    # Sem marcador explícito no título: verifica auto-declaração clara na descrição ou metadados estruturados
+    if _MID_LEVEL_BODY_SELF_RE.search(norm_desc):
+        return (SeniorityLevel.MID_LEVEL.value, "seniority:body_mid_level")
+    if _SENIOR_BODY_SELF_RE.search(norm_desc):
+        return (SeniorityLevel.SENIOR.value, "seniority:body_senior")
+    if re.search(
+        r"(?<![a-z0-9])(?:is\s+an?\s+|as\s+a\s+|for\s+an?\s+|exceptional\s+)?"
+        r"(?:junior|jr\.?)\s+(?:[a-z0-9]+\s+){0,2}"
+        r"(?:developer|engineer|designer|analyst|programmer|dev|qa|tester|specialist|ui)(?![a-z0-9])",
+        norm_desc,
+    ):
+        return (SeniorityLevel.JUNIOR.value, "seniority:body_junior")
+    if _JUNIOR_BODY_PHRASE_RE.search(norm_desc):
+        return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:body_entry_level")
+
+    if meta_tokens & {"staff", "principal"}:
+        return (SeniorityLevel.STAFF_PRINCIPAL.value, "seniority:meta_staff_principal")
+    if meta_tokens & {"senior", "sr"}:
+        return (SeniorityLevel.SENIOR.value, "seniority:meta_senior")
+    if meta_tokens & {"mid", "mid-level", "mid level", "pleno"}:
+        return (SeniorityLevel.MID_LEVEL.value, "seniority:meta_mid_level")
+    if combined_meta & {"junior", "jr"} and not _EXPERIENCED_YEARS_RE.search(norm_desc):
+        return (SeniorityLevel.JUNIOR.value, "seniority:meta_or_tag_junior")
+    if combined_meta & {"entry-level", "entry level", "trainee", "graduate"} and not _EXPERIENCED_YEARS_RE.search(norm_desc):
+        return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:meta_or_tag_entry_level")
+
+    return (SeniorityLevel.UNKNOWN.value, "seniority:unspecified_unknown")
+
+
+_TECH_EXTRACTION_MAP: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("Java", re.compile(r"(?<![a-z0-9])java(?![a-z0-9])")),
+    ("Spring Boot", re.compile(r"(?<![a-z0-9])spring\s+boot(?![a-z0-9])")),
+    ("Python", re.compile(r"(?<![a-z0-9])python(?![a-z0-9])")),
+    ("FastAPI", re.compile(r"(?<![a-z0-9])fastapi(?![a-z0-9])")),
+    ("Django", re.compile(r"(?<![a-z0-9])django(?![a-z0-9])")),
+    ("Flask", re.compile(r"(?<![a-z0-9])flask(?![a-z0-9])")),
+    ("TypeScript", re.compile(r"(?<![a-z0-9])typescript(?![a-z0-9])")),
+    ("JavaScript", re.compile(r"(?<![a-z0-9])javascript(?![a-z0-9])")),
+    ("React", re.compile(r"(?<![a-z0-9])react(?:\.?js)?(?![a-z0-9])")),
+    ("Next.js", re.compile(r"(?<![a-z0-9])next\.?js(?![a-z0-9])")),
+    ("Angular", re.compile(r"(?<![a-z0-9])angular(?![a-z0-9])")),
+    ("Vue", re.compile(r"(?<![a-z0-9])(?:vue(?:\.?js)?|nuxt(?:\.?js)?)(?![a-z0-9])")),
+    ("Node.js", re.compile(r"(?<![a-z0-9])node\.?js(?![a-z0-9])")),
+    ("NestJS", re.compile(r"(?<![a-z0-9])nest\.?js(?![a-z0-9])")),
+    ("Golang", re.compile(r"(?<![a-z0-9])golang(?![a-z0-9])")),
+    ("C#", re.compile(r"(?<![a-z0-9])(?:c#|csharp|dot\s*net|\.net)(?![a-z0-9])")),
+    ("C++", re.compile(r"(?<![a-z0-9])c\+\+(?![a-z0-9])")),
+    ("PHP", re.compile(r"(?<![a-z0-9])(?:php|laravel)(?![a-z0-9])")),
+    ("Ruby", re.compile(r"(?<![a-z0-9])(?:ruby|ruby\s+on\s+rails)(?![a-z0-9])")),
+    ("Rust", re.compile(r"(?<![a-z0-9])rust(?![a-z0-9])")),
+    ("PostgreSQL", re.compile(r"(?<![a-z0-9])postgres(?:ql)?(?![a-z0-9])")),
+    ("MySQL", re.compile(r"(?<![a-z0-9])mysql(?![a-z0-9])")),
+    ("SQL", re.compile(r"(?<![a-z0-9])sql(?![a-z0-9])")),
+    ("Redis", re.compile(r"(?<![a-z0-9])redis(?![a-z0-9])")),
+    ("Docker", re.compile(r"(?<![a-z0-9])docker(?![a-z0-9])")),
+    ("Kubernetes", re.compile(r"(?<![a-z0-9])(?:kubernetes|k8s)(?![a-z0-9])")),
+    ("AWS", re.compile(r"(?<![a-z0-9])aws(?![a-z0-9])")),
+    ("GCP", re.compile(r"(?<![a-z0-9])(?:gcp|google\s+cloud)(?![a-z0-9])")),
+    ("Azure", re.compile(r"(?<![a-z0-9])azure(?![a-z0-9])")),
+    ("Terraform", re.compile(r"(?<![a-z0-9])terraform(?![a-z0-9])")),
+    ("Kafka", re.compile(r"(?<![a-z0-9])kafka(?![a-z0-9])")),
+    ("GraphQL", re.compile(r"(?<![a-z0-9])graphql(?![a-z0-9])")),
+    ("APIs REST", re.compile(r"(?<![a-z0-9])(?:rest(?:ful)?\s+apis?|apis?\s+rest(?:ful)?)(?![a-z0-9])")),
+    ("Salesforce", re.compile(r"(?<![a-z0-9])salesforce(?![a-z0-9])")),
+    ("Flutter", re.compile(r"(?<![a-z0-9])flutter(?![a-z0-9])")),
+    ("Kotlin", re.compile(r"(?<![a-z0-9])kotlin(?![a-z0-9])")),
+)
+
+_EXP_PREFERRED_HEADER_RE = re.compile(
+    r"^(?:#{1,4}\s*)?(?:\*\*)?(?:"
+    r"preferred(?:\s+qualifications|\s+experience|\s+skills)?|"
+    r"nice\s+to\s+have|nice-to-have|"
+    r"desirable|desejave(?:is|l)|diferencia(?:is|l)|"
+    r"bonus(?:\s+qualifications|\s+points)?|plus|optional|"
+    r"vai\s+ser\s+incrivel\s+se|seria\s+(?:incrivel|legal|um\s+plus)\s+se|"
+    r"e\s+um\s+diferencial|seria\s+um\s+diferencial"
+    r")\b"
+)
+_EXP_REQUIRED_HEADER_RE = re.compile(
+    r"^(?:#{1,4}\s*)?(?:\*\*)?(?:"
+    r"minimum\s+qualifications|basic\s+qualifications|"
+    r"required(?:\s+qualifications|\s+experience|\s+skills)?|"
+    r"mandatory(?:\s+requirements)?|"
+    r"requirements|requisitos(?:\s+obrigatorios)?|"
+    r"obrigatorios?|what\s+you(?:\s*'ll)?\s+bring|"
+    r"who\s+you\s+are|qualifications|must\s+have"
+    r")\b"
+)
+_EXP_NEUTRAL_HEADER_RE = re.compile(
+    r"^(?:#{1,4}\s*)?(?:\*\*)?(?:\d+\.\s*)?(?:"
+    r"about\s+(?:the\s+job|us)|sobre\s+a\s+empresa|"
+    r"responsibilities|(?:principais\s+)?responsabilidades|"
+    r"what\s+you(?:\s*'ll)?\s+do|no\s+dia\s+a\s+dia|"
+    r"benefits|beneficios|como\s+se\s+candidatar|how\s+to\s+apply|compensation|"
+    r"tecnologias\s+e\s+ambiente|nossa\s+empresa|contratacao|labels"
+    r")\b"
+)
+_NO_EXPERIENCE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"no\s+(?:previous\s+|prior\s+)?(?:[a-z0-9/-]+\s+){0,4}experience\s+(?:is\s+)?required|"
+    r"no\s+(?:previous\s+|prior\s+)?experience\s+(?:needed|necessary)|"
+    r"without\s+(?:prior\s+|previous\s+)?experience|"
+    r"(?:previous|prior)\s+experience[^.\n]{0,90}\bbut\s+not\s+required|"
+    r"experiencia\s+(?:profissional\s+|pratica\s+)?(?:anterior\s+|previa\s+)?nao\s+(?:e|sao)\s+(?:obrigatori[oa]s?|necessari[oa]s?|exigid[oa]s?)|"
+    r"sem\s+experiencia\s+(?:previa|necessaria|exigida|comprovada)?|"
+    r"nao\s+(?:exige|requer|necessita)\s+(?:de\s+)?experiencia"
+    r")(?![a-z0-9])"
+)
+_LINE_PREFERRED_MARKER_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"preferred|preferably|preferencialmente|nice\s+to\s+have|nice-to-have|desirable|bonus|"
+    r"is\s+a\s+plus|are\s+a\s+plus|would\s+be\s+a\s+plus|would\s+be\s+an\s+advantage|"
+    r"sera\s+um\s+diferencial|como\s+diferencial|diferencia(?:is|l)|desejave(?:is|l)|opcional"
+    r")(?![a-z0-9])"
+)
+_LINE_REQUIRED_MARKER_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"required|mandatory|must\s+have|minimum\s+of|at\s+least|"
+    r"obrigatori[oa]s?|exigid[oa]|imprescindivel|indispensavel|"
+    r"experiencia\s+(?:comprovada|solida|minima)|minimum\s+qualifications"
+    r")(?![a-z0-9])"
+)
+_COMPANY_AGE_OR_PTO_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?:for|over|nearly|more\s+than)\s+\d+\s+years[,\s]|"
+    r"^\d+\s+years[,\s]+[a-z0-9_-]+\s+has\b|"
+    r"our\s+team\s+has\b|"
+    r"\b(?:years?\s+old|years?\s+in\s+business|years?\s+ago|per\s+year|a\s+year|each\s+year|once\s+per\s+year|"
+    r"weeks?\s+pto|years[,\s]+we'?ve\s+delivered|anos\s+de\s+(?:historia|mercado|idade))"
+    r")(?![a-z0-9])"
+)
+_YEARS_CLAUSE_RE = re.compile(
+    r"(?<![a-z0-9])(\d{1,2})\s*(?:\+|-\s*\d+\+?|to\s+\d+\+?|a\s+\d+\+?)?\s*"
+    r"(?:years?|anos)\b(?:\s+(?:of|de)\s+|\s+)?([^.;\n]{0,70})"
+)
+_DEGREE_ALT_YEARS_RE = re.compile(
+    r"\b(\d{1,2})\s+years?\s+(?:of\s+)?(?:relevant\s+)?experience\s+with\s+(?:bachelor|bs|ba)\b"
+)
+_QUAL_EXP_REQUIRED_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"experience\s+(?:with|in|building|developing|writing|maintaining|managing|operating|deploying|testing)|"
+    r"experiencia\s+(?:com|em|no\s+desenvolvimento|na\s+construcao|pratica|previa|profissional|solida|comprovada)|"
+    r"proven\s+(?:track\s+record|experience)|hands-?on\s+experience"
+    r")(?![a-z0-9])"
+)
+_LIST_ALT_TECH_RE = re.compile(
+    r"(?<![a-z0-9])(?:e\.?\s*g\.?|such\s+as|como|one\s+or\s+more|um\s+ou\s+mais|entre\s+elas)(?![a-z0-9])"
+)
+_SENIOR_BODY_SELF_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?:looking\s+for|seeking|hiring|wait(?:ing)?\s+for)\s+(?:an?\s+|someone\s+)?"
+    r"(?:senior|sr\.?|experienced\s+senior)(?![a-z0-9])|"
+    r"someone\s+senior\s+enough|"
+    r"(?:vaga|perfil|desenvolvedor)\s+(?:para\s+)?(?:nivel\s+)?senior"
+    r")(?![a-z0-9])"
+)
+_MID_LEVEL_BODY_SELF_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?:buscamos|procuramos|vaga\s+para)\s+(?:uma?\s+pessoa\s+)?(?:desenvolvedora?|dev|engenheir[oa])(?:\s+[a-z]+){0,3}\s+pleno|"
+    r"nivel\s*:?\s*pleno|"
+    r"(?:is\s+an?\s+|seeking\s+an?\s+|looking\s+for\s+an?\s+)mid[- ]?level"
+    r")(?![a-z0-9])"
+)
 
 
 def _repair_mojibake(text: str) -> str:
@@ -716,11 +1185,13 @@ def classify_opportunity(
     tags: list[str] | None = None,
     description: str | None = None,
     requirements: list[str] | None = None,
+    metadata_levels: list[str] | None = None,
 ) -> ClassificationDecision:
     """
-    Classifica oportunidade (`opportunity_type`), regime contratual (`employment_type`)
-    e área profissional (`professional_area` + `secondary_areas`) de forma 100%
-    determinística e independente entre as três dimensões.
+    Classifica oportunidade (`opportunity_type`), senioridade (`seniority_level`),
+    experiência (`experience_*`), regime contratual (`employment_type`) e
+    área profissional (`professional_area` + `secondary_areas`) de forma determinística
+    e independente entre as dimensões.
     """
     norm_title = normalize_classification_text(title)
     if not norm_title:
@@ -731,10 +1202,13 @@ def classify_opportunity(
             reasons=("title:missing_or_empty",),
             professional_area=ProfessionalArea.UNKNOWN.value,
             secondary_areas=(),
+            seniority_level=SeniorityLevel.UNKNOWN.value,
+            experience_requirement_mode=ExperienceRequirementMode.NOT_SPECIFIED.value,
         )
 
     norm_tags = _normalize_tags(tags)
     tag_set = set(norm_tags)
+    meta_tokens = set(_normalize_tags(metadata_levels))
     norm_desc_raw = normalize_classification_text(description)
     norm_desc = _strip_non_self_context(norm_desc_raw)
 
@@ -744,6 +1218,17 @@ def classify_opportunity(
         description=description,
         requirements=requirements,
     )
+    exp_assessment = classify_experience_requirements(
+        title=title,
+        description=description,
+        requirements=requirements,
+    )
+    seniority_level, seniority_reason = _classify_seniority_level(
+        norm_title=norm_title,
+        norm_desc=norm_desc,
+        tag_set=tag_set,
+        meta_tokens=meta_tokens,
+    )
 
     title_is_senior_or_lead = bool(
         _LEADERSHIP_OR_SENIOR_RE.search(norm_title)
@@ -752,6 +1237,7 @@ def classify_opportunity(
     desc_has_senior_req = bool(
         _BOARD_CREDENTIAL_RE.search(norm_desc)
         or _EXPERIENCED_YEARS_RE.search(norm_desc)
+        or (exp_assessment.min_years is not None and exp_assessment.min_years >= 3)
         or re.search(
             r"(?<![a-z0-9])(?:looking\s+for\s+an?\s+|hiring\s+(?:\d+-\d+\s+)?|as\s+a\s+|seeking\s+an?\s+)"
             r"(?:senior|sr\.?|staff|principal|experienced|lead)\b",
@@ -759,7 +1245,7 @@ def classify_opportunity(
         )
     )
 
-    reasons: list[str] = []
+    reasons: list[str] = [seniority_reason, *exp_assessment.reasons]
 
     def _finalize(opp_type: str, confidence: str) -> ClassificationDecision:
         emp_type, emp_reasons = _detect_employment_type(
@@ -775,6 +1261,13 @@ def classify_opportunity(
             reasons=tuple(reasons + emp_reasons + area_reasons),
             professional_area=primary_area,
             secondary_areas=secondary_areas,
+            seniority_level=seniority_level,
+            experience_requirement_mode=exp_assessment.mode,
+            experience_min_years=exp_assessment.min_years,
+            experience_preferred_years=exp_assessment.preferred_years,
+            experience_summary=exp_assessment.summary,
+            required_technologies=exp_assessment.mandatory_technologies,
+            desirable_technologies=exp_assessment.desirable_technologies,
         )
 
     # 1. Estágio / Programa acadêmico

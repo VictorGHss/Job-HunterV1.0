@@ -249,6 +249,9 @@ export const api = {
       const search = new URLSearchParams();
       if (params.q && params.q.trim()) search.set("q", params.q.trim());
       if (params.type) search.set("type", params.type);
+      if (params.seniority) search.set("seniority", params.seniority);
+      if (params.compatibility)
+        search.set("compatibility", params.compatibility);
       if (params.work_mode) search.set("work_mode", params.work_mode);
       if (params.employment_type)
         search.set("employment_type", params.employment_type);

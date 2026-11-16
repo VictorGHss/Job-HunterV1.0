@@ -34,7 +34,9 @@ import type {
   Opportunity,
   OpportunitySourcePublic,
   OpportunityType,
+  OverallCompatibility,
   ProfessionalArea,
+  SeniorityLevel,
   WorkMode,
 } from "@/types/api";
 
@@ -103,6 +105,23 @@ const SOURCE_STATUS_LABELS: Record<ExternalSourceStatus, string> = {
   unknown: "Estado não confirmado",
 };
 
+const SENIORITY_LABELS: Record<SeniorityLevel, string> = {
+  internship: "Estágio",
+  entry_level: "Início de carreira / Entry-level",
+  junior: "Júnior",
+  mid_level: "Pleno",
+  senior: "Sênior",
+  staff_principal: "Staff / Principal",
+  management: "Liderança / Gestão",
+  unknown: "Senioridade não informada",
+};
+
+const OVERALL_COMPAT_LABELS: Record<OverallCompatibility, string> = {
+  compatible: "Compatível",
+  potential: "Potencialmente compatível",
+  incompatible: "Incompatível",
+};
+
 function formatDatePtBr(iso: string | null): string {
   if (!iso) return "Data não informada";
   try {
@@ -151,6 +170,8 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [workModeFilter, setWorkModeFilter] = useState<string>("");
   const [employmentFilter, setEmploymentFilter] = useState<string>("");
   const [areaFilter, setAreaFilter] = useState<string>("");
+  const [seniorityFilter, setSeniorityFilter] = useState<string>("");
+  const [compatibilityFilter, setCompatibilityFilter] = useState<string>("");
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
@@ -192,12 +213,17 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     setErrorMessage(null);
 
     const effectiveIncludeExcluded =
-      includeExcluded || (areaFilter !== "" && NON_DEV_AREAS.has(areaFilter));
+      includeExcluded ||
+      compatibilityFilter === "incompatible" ||
+      (areaFilter !== "" && NON_DEV_AREAS.has(areaFilter));
 
     api.opportunities
       .list({
         q: debouncedQuery || undefined,
         type: category,
+        seniority: (seniorityFilter as SeniorityLevel) || undefined,
+        compatibility:
+          (compatibilityFilter as OverallCompatibility) || undefined,
         work_mode: (workModeFilter as WorkMode) || undefined,
         employment_type: (employmentFilter as EmploymentType) || undefined,
         area: (areaFilter as ProfessionalArea) || undefined,
@@ -234,6 +260,8 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   }, [
     category,
     debouncedQuery,
+    seniorityFilter,
+    compatibilityFilter,
     workModeFilter,
     employmentFilter,
     areaFilter,
@@ -449,6 +477,47 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                 ))}
               </select>
             </div>
+
+            <div className="space-y-1">
+              <Label htmlFor={`seniority-${category}`}>Senioridade</Label>
+              <select
+                id={`seniority-${category}`}
+                value={seniorityFilter}
+                onChange={(e) => {
+                  setSeniorityFilter(e.target.value);
+                  setPage(1);
+                }}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+              >
+                <option value="">Todas</option>
+                <option value="internship">Estágio</option>
+                <option value="entry_level">Início de carreira</option>
+                <option value="junior">Júnior</option>
+                <option value="mid_level">Pleno</option>
+                <option value="senior">Sênior</option>
+                <option value="staff_principal">Staff / Principal</option>
+                <option value="management">Liderança / Gestão</option>
+                <option value="unknown">Não informada</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor={`compatibility-${category}`}>Compatibilidade</Label>
+              <select
+                id={`compatibility-${category}`}
+                value={compatibilityFilter}
+                onChange={(e) => {
+                  setCompatibilityFilter(e.target.value);
+                  setPage(1);
+                }}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+              >
+                <option value="">Elegíveis (Compatível / Potencial)</option>
+                <option value="compatible">Somente Compatíveis</option>
+                <option value="potential">Potencialmente Compatíveis</option>
+                <option value="incompatible">Incompatíveis</option>
+              </select>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
@@ -570,6 +639,9 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
             const salaryLabel = formatSalary(opp);
             const busy = actionBusyId === opp.id;
             const outboundUrl = opp.application_url || opp.source_url;
+            const overallCompat: OverallCompatibility =
+              opp.match.overall_compatibility ||
+              (opp.match.eligible ? "compatible" : "incompatible");
 
             return (
               <Card
@@ -599,6 +671,19 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                           {EMPLOYMENT_LABELS[opp.employment_type] ||
                             opp.employment_type}
                         </Badge>
+                        {opp.seniority_level && (
+                          <Badge
+                            variant={
+                              opp.seniority_level === "unknown"
+                                ? "outline"
+                                : "secondary"
+                            }
+                          >
+                            Nível:{" "}
+                            {SENIORITY_LABELS[opp.seniority_level] ||
+                              opp.seniority_level}
+                          </Badge>
+                        )}
                         {opp.professional_area && (
                           <Badge
                             variant={
@@ -612,6 +697,36 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                               "Outras Áreas"}
                           </Badge>
                         )}
+                        <Badge
+                          variant={
+                            overallCompat === "compatible"
+                              ? "success"
+                              : "outline"
+                          }
+                          className={
+                            overallCompat === "potential"
+                              ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                              : overallCompat === "incompatible"
+                                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                                : ""
+                          }
+                        >
+                          {overallCompat === "compatible" && (
+                            <CheckCircle2 className="mr-1 h-3 w-3" />
+                          )}
+                          {overallCompat === "potential" && (
+                            <AlertTriangle className="mr-1 h-3 w-3" />
+                          )}
+                          {overallCompat === "incompatible" && (
+                            <ShieldAlert className="mr-1 h-3 w-3" />
+                          )}
+                          {OVERALL_COMPAT_LABELS[overallCompat]}
+                        </Badge>
+                        {opp.experience_summary && (
+                          <Badge variant="outline">
+                            Experiência: {opp.experience_summary}
+                          </Badge>
+                        )}
                         {opp.professional_area === "unknown" && (
                           <Badge className="border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300">
                             <AlertTriangle className="mr-1 h-3 w-3" />
@@ -622,15 +737,6 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                           <Badge className="border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300">
                             <AlertTriangle className="mr-1 h-3 w-3" />
                             Elegibilidade geográfica não confirmada
-                          </Badge>
-                        )}
-                        {!opp.match.eligible && (
-                          <Badge
-                            variant="outline"
-                            className="border-destructive/40 bg-destructive/10 text-destructive"
-                          >
-                            <ShieldAlert className="mr-1 h-3 w-3" />
-                            Incompatível com preferências
                           </Badge>
                         )}
                       </div>
@@ -730,6 +836,38 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                       ))}
                     </div>
                   )}
+
+                  {(opp.match.required_technologies?.length ||
+                    opp.match.matched_skills?.length ||
+                    opp.match.desirable_technologies?.length) ? (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      {opp.match.required_technologies &&
+                        opp.match.required_technologies.length > 0 && (
+                          <span>
+                            <strong className="text-foreground">
+                              Requisitos técnicos:
+                            </strong>{" "}
+                            {opp.match.required_technologies.join(", ")}
+                          </span>
+                        )}
+                      {opp.match.matched_skills &&
+                        opp.match.matched_skills.length > 0 && (
+                          <span className="text-emerald-700 dark:text-emerald-300">
+                            <strong>No seu perfil:</strong>{" "}
+                            {opp.match.matched_skills.slice(0, 6).join(", ")}
+                          </span>
+                        )}
+                      {opp.match.desirable_technologies &&
+                        opp.match.desirable_technologies.length > 0 && (
+                          <span>
+                            <strong className="text-foreground">
+                              Diferenciais:
+                            </strong>{" "}
+                            {opp.match.desirable_technologies.slice(0, 4).join(", ")}
+                          </span>
+                        )}
+                    </div>
+                  ) : null}
 
                   {(opp.match.inclusion_reasons.length > 0 ||
                     opp.match.exclusion_reasons.length > 0 ||

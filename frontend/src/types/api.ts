@@ -241,6 +241,30 @@ export type OpportunityType =
   | "other"
   | "unknown";
 
+export type SeniorityLevel =
+  | "internship"
+  | "entry_level"
+  | "junior"
+  | "mid_level"
+  | "senior"
+  | "staff_principal"
+  | "management"
+  | "unknown";
+
+export type ExperienceRequirementMode =
+  | "not_specified"
+  | "none_required"
+  | "preferred"
+  | "required";
+
+export type OverallCompatibility = "compatible" | "potential" | "incompatible";
+
+export type DimensionCompatibility =
+  | "compatible"
+  | "potential"
+  | "incompatible"
+  | "unknown";
+
 export type WorkMode = "remote" | "hybrid" | "onsite" | "unknown";
 
 export type EmploymentType =
@@ -325,10 +349,19 @@ export interface OpportunitySourceLink {
 
 export interface OpportunityMatchEvaluation {
   eligible: boolean;
+  overall_compatibility?: OverallCompatibility;
   geographic_eligibility: "eligible" | "excluded" | "unknown";
   area_compatibility?: "compatible" | "incompatible" | "unknown";
+  contract_compatibility?: "compatible" | "incompatible" | "unknown";
+  seniority_compatibility?: DimensionCompatibility;
+  experience_compatibility?: DimensionCompatibility;
+  technical_compatibility?: DimensionCompatibility;
   matched_areas?: ProfessionalArea[];
   matched_technologies?: string[];
+  matched_skills?: string[];
+  required_technologies?: string[];
+  missing_required_technologies?: string[];
+  desirable_technologies?: string[];
   missing_priority_technologies?: string[];
   uncertainty_notes?: string[];
   inclusion_reasons: string[];
@@ -349,6 +382,11 @@ export interface Opportunity {
   company_name: string | null;
   description: string | null;
   opportunity_type: OpportunityType;
+  seniority_level?: SeniorityLevel;
+  experience_requirement_mode?: ExperienceRequirementMode;
+  experience_min_years?: number | null;
+  experience_preferred_years?: number | null;
+  experience_summary?: string | null;
   employment_type: EmploymentType;
   work_mode: WorkMode;
   professional_area?: ProfessionalArea;
@@ -392,6 +430,8 @@ export interface OpportunityListResponse {
 export interface OpportunityListParams {
   q?: string;
   type?: OpportunityType;
+  seniority?: SeniorityLevel;
+  compatibility?: OverallCompatibility;
   work_mode?: WorkMode;
   employment_type?: EmploymentType;
   area?: ProfessionalArea;
@@ -412,6 +452,11 @@ export interface ManualOpportunityCreatePayload {
   company_name?: string | null;
   description?: string | null;
   opportunity_type: OpportunityType;
+  seniority_level?: SeniorityLevel;
+  experience_requirement_mode?: ExperienceRequirementMode;
+  experience_min_years?: number | null;
+  experience_preferred_years?: number | null;
+  experience_summary?: string | null;
   employment_type: EmploymentType;
   work_mode: WorkMode;
   location_text?: string | null;

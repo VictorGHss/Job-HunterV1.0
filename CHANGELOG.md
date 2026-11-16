@@ -6,6 +6,22 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.6] - 2026-11-15 — Fase 02.6: Compatibilidade de Senioridade, Experiência e Requisitos Profissionais
+
+### Adicionado
+- **Separação de Senioridade e Experiência (`0006_seniority_experience`):**
+  - Novos enums `SeniorityLevel` (`internship`, `entry_level`, `junior`, `mid_level`, `senior`, `staff_principal`, `management`, `unknown`) e `ExperienceRequirementMode` (`not_specified`, `none_required`, `preferred`, `required`) persistidos em `opportunities` (`seniority_level`, `experience_requirement_mode`, `experience_min_years`, `experience_preferred_years`, `experience_summary`), mantendo `opportunity_type` e `employment_type` independentes (ex.: Freelance Júnior vs Freelance Sênior; Júnior PJ vs Júnior CLT).
+- **Extração Determinística de Experiência e Requisitos Obrigatórios vs Desejáveis (`classification.py`):**
+  - `classify_experience_requirements` analisa seções de requisitos obrigatórios, diferenciais desejáveis e declarações de isenção de experiência (`no previous experience required`, `experiência profissional anterior não é obrigatória`) sem inferir experiência por nome de tecnologia, tags isoladas, título do cargo, idade da empresa ou senioridade de colegas.
+- **Matching em Seis Dimensões e Habilidades do Candidato (`matching.py`):**
+  - `evaluate_opportunity_for_user` agora consome habilidades (`Skill`), experiências (`WorkExperience`), projetos (`ProfessionalProject`) e formação (`Education`) do usuário autenticado, calculando `overall_compatibility` (`compatible`, `potential`, `incompatible`) junto a `area_compatibility`, `geographic_eligibility`, `contract_compatibility`, `seniority_compatibility`, `experience_compatibility` e `technical_compatibility`.
+  - Vagas `senior`, `staff_principal`, `management` ou que exijam múltiplos anos acima da trajetória atual deixam de aparecer como compatíveis para perfil de entrada/júnior; vagas com informações omissas (`unknown`/`not_specified`) ou nível intermediário recebem status explícito `potential` com notas de incerteza.
+- **API, CLI e Interface (`OpportunityDiscoveryPage.tsx`):**
+  - Novos filtros `?seniority=` e `?compatibility=` em `GET /api/v1/opportunities`, badges claros de nível profissional, experiência e compatibilidade (`Compatível`, `Potencialmente compatível`, `Incompatível`) e exibição separada de requisitos técnicos vs habilidades encontradas no perfil.
+  - `reclassify-opportunities` atualizado para reclassificar senioridade e experiência de forma idempotente mantendo `opportunity_source_links` e `opportunity_user_states` intactos.
+
+---
+
 ## [0.2.5] - 2026-11-15 — Fase 02.5: Confiabilidade, Rastreabilidade e Ciclo de Vida das Oportunidades
 
 ### Adicionado

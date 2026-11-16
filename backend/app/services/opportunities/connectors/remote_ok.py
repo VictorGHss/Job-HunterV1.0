@@ -170,6 +170,11 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     source_status=ExternalSourceStatus.ACTIVE.value,
                     professional_area=decision.professional_area,
                     secondary_areas=list(decision.secondary_areas),
+                    seniority_level=decision.seniority_level,
+                    experience_requirement_mode=decision.experience_requirement_mode,
+                    experience_min_years=decision.experience_min_years,
+                    experience_preferred_years=decision.experience_preferred_years,
+                    experience_summary=decision.experience_summary,
                     raw_metadata={
                         "slug": sanitize_plain_text(item.get("slug")),
                         "source": "remote_ok",

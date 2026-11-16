@@ -240,10 +240,12 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                 title=raw_title,
                 tags=label_names,
                 description=description,
+                metadata_levels=label_names,
             )
 
             opp_type = decision.opportunity_type
             emp_type = decision.employment_type
+            seniority_level = decision.seniority_level
             primary_area = decision.professional_area
             secondary_areas = list(decision.secondary_areas)
 
@@ -251,6 +253,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
             if ("estágio" in labels_lower or "estagio" in labels_lower) and opp_type == OpportunityType.OTHER.value:
                 opp_type = OpportunityType.INTERNSHIP.value
                 emp_type = EmploymentType.INTERNSHIP.value
+                seniority_level = "internship"
             elif (
                 ("júnior" in labels_lower or "junior" in labels_lower)
                 and not (labels_lower & {"pleno", "sênior", "senior", "especialista"})
@@ -316,6 +319,11 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                     source_status=ExternalSourceStatus.ACTIVE.value,
                     professional_area=primary_area,
                     secondary_areas=secondary_areas,
+                    seniority_level=seniority_level,
+                    experience_requirement_mode=decision.experience_requirement_mode,
+                    experience_min_years=decision.experience_min_years,
+                    experience_preferred_years=decision.experience_preferred_years,
+                    experience_summary=decision.experience_summary,
                     raw_metadata={
                         "issue_number": raw_number,
                         "labels": label_names,

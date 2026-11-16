@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 02.5 — Confiabilidade, Rastreabilidade e Ciclo de Vida das Oportunidades
+- **Fase atual:** Fase 02.6 — Compatibilidade de Senioridade, Experiência e Requisitos Profissionais
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -52,7 +52,8 @@ job-hunter/
 │   │   │   ├── 0002_auth_rate_limiting.py
 │   │   │   ├── 0003_opportunity_discovery.py
 │   │   │   ├── 0004_professional_areas.py
-│   │   │   └── 0005_lifecycle_traceability.py
+│   │   │   ├── 0005_lifecycle_traceability.py
+│   │   │   └── 0006_seniority_experience_matching.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -184,8 +185,8 @@ A Fase 02 implementa conectores modulares para feeds públicos com termos verifi
   - **Himalayas (`himalayas`)**: API JSON pública oficial (`https://himalayas.app/jobs/api/search?q=software+developer`), sem chave, identificadores compostos `<company>/jobs/<slug>`, preservação integral de `applicationLink` (`?utm_source=api`) e controle de ciclo de vida via `expiryDate` (`20` oportunidades únicas).
   - **GitHub Backend BR (`github_backend_br`)** e **GitHub Frontend BR (`github_frontend_br`)**: repositórios comunitários brasileiros licenciados sob **MIT** (`backend-br/vagas` e `frontendbr/vagas`, observando que a licença MIT do repositório não suprime direitos sobre conteúdo de terceiros) consumidos via API REST oficial v3 do GitHub (`per_page=30`), com filtragem de PRs/issues `Stale`/avisos administrativos, revalidação de issues encerradas/removidas e **redação automática de PII** (e-mails e telefones pessoais) no corpo da vaga (`30` + `3` oportunidades únicas + `1` vínculo compartilhado entre ambos os repositórios).
   - **Catálogo consolidado após Fase 02.5 (`195` oportunidades únicas e `203` vínculos de publicação em `opportunity_source_links`, com `53` compatíveis com o perfil):** rastreabilidade normalizada de todas as fontes primárias e secundárias (`source_url`, `application_url`, `external_id`, `source_status`, `first_seen_at`, `last_seen_at`, `last_checked_at`), deduplicação segura sem falsos positivos por mero `(title, company_name)` e métricas auditáveis de sincronização (`received_count == valid_count + rejected_count` e `valid_count == inserted_count + updated_count + intra_source_duplicate_count + cross_source_duplicate_count`).
-  - **Classificação determinística tridimensional (`classification.py`)**: avalia de forma independente `opportunity_type`, `employment_type` e `professional_area` + `secondary_areas` (`software_development`, `backend`, `frontend`, `fullstack`, `data`, `artificial_intelligence`, `devops_cloud`, `api_integrations`, `infrastructure`, `technical_support`, `customer_support`, `marketing_sales`, `healthcare`, `administration`, `other`, `unknown`), bloqueando falsos positivos de tecnologias mencionadas incidentalmente em vagas de suporte, atendimento, marketing ou saúde.
-  - **Matching por área e relevância (`matching.py`)**: distingue área compatível, incompatível e não identificada (`unknown`), impede recomendação de suporte técnico/atendimento/marketing como desenvolvimento, mantém `employment_type=unknown` elegível mesmo com `block_clt=true` e permite filtrar por área na API (`GET /api/v1/opportunities?area=...`) e na interface.
+  - **Classificação determinística em múltiplas dimensões (`classification.py`)**: separa `opportunity_type` (frente de busca: `internship`, `junior`, `freelance`, `other`), `seniority_level` (`internship`, `entry_level`, `junior`, `mid_level`, `senior`, `staff_principal`, `management`, `unknown`), `employment_type` (`internship`, `clt`, `pj`, `freelance`, `temporary`, `other`, `unknown`), requisitos de experiência (`experience_requirement_mode`: `none_required`, `preferred`, `required`, `not_specified`, com `experience_min_years` e `experience_preferred_years` sem inferência pelo título ou por tags) e `professional_area` + `secondary_areas`, bloqueando falsos positivos de suporte/atendimento/vendas.
+  - **Matching multidimensional (`matching.py`)**: avalia área profissional, geografia, contrato, senioridade, requisitos de experiência e habilidades técnicas do perfil (`Skill`, `WorkExperience`, `ProfessionalProject`, `Education` e preferências), diferenciando claramente **Compatível** (`compatible`), **Potencialmente compatível** (`potential`) e **Incompatível** (`incompatible`) com filtros `?seniority=` e `?compatibility=` em `GET /api/v1/opportunities`.
 - **Fonte pausada temporariamente por conformidade:**
   - **Remotive (`remotive`)**: conector implementado e preservado no código (`https://remotive.com/api/remote-jobs?category=software-dev`, intervalo `21600s`), porém marcado com **`enabled_by_default=False`** (`enabled=false` no banco) até esclarecimento e autorização escrita sobre restrições nos Termos de Uso gerais de março de 2026 para agregação multiusuário. A execução de `sync-opportunities` (mesmo com `--force` ou `--source remotive`) recusa consultas HTTP contra fontes desabilitadas.
 - **Fontes auditadas e rejeitadas / pendentes na Fase 02.4:**

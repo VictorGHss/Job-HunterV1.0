@@ -82,8 +82,8 @@ Regras operacionais de habilitação:
 - Para habilitar uma fonte pausada no futuro após esclarecimento e aprovação escrita dos termos, atualize `enabled_by_default=True` no conector, defina `enabled=true` em `opportunity_sources` e execute `--dry-run` antes da sincronização real.
 - Primeira carga real registrada com `remote_ok`: **97 oportunidades coletadas e inseridas** (0 atualizações/erros).
 
-### Reclassificação segura e idempotente (Fases 02.2 e 02.3)
-Para reavaliar `opportunity_type`, `employment_type`, `professional_area` e `secondary_areas` em vagas externas já persistidas sem afetar cadastros manuais, estados do usuário, URLs ou histórico temporal:
+### Reclassificação segura e idempotente (Fases 02.2, 02.3 e 02.6)
+Para reavaliar `opportunity_type`, `seniority_level`, requisitos de experiência (`experience_requirement_mode`, `experience_min_years`, `experience_preferred_years`, `experience_summary`), `employment_type`, `professional_area` e `secondary_areas` em vagas externas já persistidas sem afetar cadastros manuais, estados do usuário, vínculo entre fontes (`opportunity_source_links`) ou histórico temporal:
 
 ```powershell
 # Simulação sem persistência

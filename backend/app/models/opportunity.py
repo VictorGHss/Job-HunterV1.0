@@ -35,6 +35,24 @@ class OpportunityType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SeniorityLevel(StrEnum):
+    INTERNSHIP = "internship"
+    ENTRY_LEVEL = "entry_level"
+    JUNIOR = "junior"
+    MID_LEVEL = "mid_level"
+    SENIOR = "senior"
+    STAFF_PRINCIPAL = "staff_principal"
+    MANAGEMENT = "management"
+    UNKNOWN = "unknown"
+
+
+class ExperienceRequirementMode(StrEnum):
+    NOT_SPECIFIED = "not_specified"
+    NONE_REQUIRED = "none_required"
+    PREFERRED = "preferred"
+    REQUIRED = "required"
+
+
 class WorkMode(StrEnum):
     REMOTE = "remote"
     HYBRID = "hybrid"
@@ -173,6 +191,27 @@ class Opportunity(Base, TimestampMixin):
         default=OpportunityType.UNKNOWN.value,
         index=True,
         nullable=False,
+    )
+    seniority_level: Mapped[str] = mapped_column(
+        String(32),
+        default=SeniorityLevel.UNKNOWN.value,
+        index=True,
+        nullable=False,
+    )
+    experience_requirement_mode: Mapped[str] = mapped_column(
+        String(32),
+        default=ExperienceRequirementMode.NOT_SPECIFIED.value,
+        index=True,
+        nullable=False,
+    )
+    experience_min_years: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    experience_preferred_years: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    experience_summary: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
     )
     employment_type: Mapped[str] = mapped_column(
         String(32),

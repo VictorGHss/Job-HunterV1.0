@@ -150,16 +150,19 @@ class HimalayasConnector(BaseOpportunityConnector):
                 title=raw_title,
                 tags=classifier_tags,
                 description=description,
+                metadata_levels=seniority_list,
             )
 
             opp_type = decision.opportunity_type
             emp_type = decision.employment_type
+            seniority_level = decision.seniority_level
 
             sen_low = " ".join(seniority_list).lower()
             emp_low = emp_raw.lower()
             if "intern" in emp_low or "intern" in sen_low:
                 opp_type = OpportunityType.INTERNSHIP.value
                 emp_type = EmploymentType.INTERNSHIP.value
+                seniority_level = "internship"
             elif (
                 ("entry-level" in sen_low or "entry level" in sen_low or "junior" in sen_low)
                 and "senior" not in sen_low
@@ -243,6 +246,11 @@ class HimalayasConnector(BaseOpportunityConnector):
                     source_status=ExternalSourceStatus.ACTIVE.value,
                     professional_area=decision.professional_area,
                     secondary_areas=list(decision.secondary_areas),
+                    seniority_level=seniority_level,
+                    experience_requirement_mode=decision.experience_requirement_mode,
+                    experience_min_years=decision.experience_min_years,
+                    experience_preferred_years=decision.experience_preferred_years,
+                    experience_summary=decision.experience_summary,
                     raw_metadata={
                         "guid": source_url,
                         "application_link": application_url or source_url,

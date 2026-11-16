@@ -233,16 +233,24 @@ def handle_reclassify_opportunities(args: argparse.Namespace) -> int:
     if report.before_area_counts is not None and report.after_area_counts is not None:
         print(f"Distribuicao de areas anterior: {report.before_area_counts}")
         print(f"Distribuicao de areas resultante: {report.after_area_counts}")
+    if report.before_seniority_counts is not None and report.after_seniority_counts is not None:
+        print(f"Distribuicao de senioridade anterior: {report.before_seniority_counts}")
+        print(f"Distribuicao de senioridade resultante: {report.after_seniority_counts}")
+    if report.before_experience_counts is not None and report.after_experience_counts is not None:
+        print(f"Distribuicao de experiencia anterior: {report.before_experience_counts}")
+        print(f"Distribuicao de experiencia resultante: {report.after_experience_counts}")
     for change in report.changes:
         if (
             change.old_opportunity_type != change.new_opportunity_type
             or change.new_employment_type != "unknown"
             or change.old_professional_area != change.new_professional_area
+            or change.old_seniority_level != change.new_seniority_level
+            or change.old_experience_mode != change.new_experience_mode
         ):
             print(
                 f"  - [{change.opportunity_id}] {change.title}: "
-                f"{change.old_opportunity_type}/{change.old_employment_type}/{change.old_professional_area} -> "
-                f"{change.new_opportunity_type}/{change.new_employment_type}/{change.new_professional_area}"
+                f"{change.old_opportunity_type}/{change.old_seniority_level}/{change.old_experience_mode}/{change.old_employment_type}/{change.old_professional_area} -> "
+                f"{change.new_opportunity_type}/{change.new_seniority_level}/{change.new_experience_mode}/{change.new_employment_type}/{change.new_professional_area}"
             )
     return 0
 

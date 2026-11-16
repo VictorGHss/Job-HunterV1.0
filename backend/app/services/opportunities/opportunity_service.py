@@ -11,7 +11,14 @@ from app.models.opportunity import (
     OpportunitySource,
     OpportunitySourceLink,
     OpportunityUserState,
+    SeniorityLevel,
     WorkMode,
+)
+from app.models.profile import (
+    Education,
+    ProfessionalProject,
+    Skill,
+    WorkExperience,
 )
 from app.models.user import User
 from app.schemas.opportunity import (
@@ -25,10 +32,11 @@ from app.schemas.opportunity import (
     OpportunityUserStateResponse,
     OpportunityUserStateUpdate,
 )
-from app.services.opportunities.classification import classify_professional_area
+from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.matching import (
     evaluate_opportunity_for_user,
     resolve_opportunity_areas,
+    resolve_opportunity_seniority_and_experience,
 )
 from app.services.opportunities.sanitization import (
     compute_opportunity_content_hash,
@@ -123,6 +131,20 @@ def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkRespo
     return result
 
 
+def _load_user_matching_context(db: Session, user_id: uuid.UUID):
+    skills = db.execute(select(Skill).where(Skill.user_id == user_id)).scalars().all()
+    experiences = db.execute(
+        select(WorkExperience).where(WorkExperience.user_id == user_id)
+    ).scalars().all()
+    educations = db.execute(
+        select(Education).where(Education.user_id == user_id)
+    ).scalars().all()
+    projects = db.execute(
+        select(ProfessionalProject).where(ProfessionalProject.user_id == user_id)
+    ).scalars().all()
+    return (skills, experiences, educations, projects)
+
+
 def _serialize_opportunity(
     opp: Opportunity,
     state: OpportunityUserState | None,
@@ -143,6 +165,9 @@ def _serialize_opportunity(
         else OpportunityUserStateResponse()
     )
     primary_area, secondary_areas = resolve_opportunity_areas(opp)
+    sen_level, exp_mode, exp_min, exp_pref, exp_sum, _, _ = (
+        resolve_opportunity_seniority_and_experience(opp)
+    )
     return OpportunityResponse(
         id=opp.id,
         is_manual=opp.created_by_user_id is not None and opp.source_id is None,
@@ -151,6 +176,11 @@ def _serialize_opportunity(
         company_name=opp.company_name,
         description=opp.description,
         opportunity_type=opp.opportunity_type,
+        seniority_level=sen_level,
+        experience_requirement_mode=exp_mode,
+        experience_min_years=exp_min,
+        experience_preferred_years=exp_pref,
+        experience_summary=exp_sum,
         employment_type=opp.employment_type,
         work_mode=opp.work_mode,
         professional_area=primary_area,
@@ -198,6 +228,8 @@ def _matches_query_filters(
     *,
     q: str | None,
     opportunity_type: str | None,
+    seniority_level: str | None = None,
+    compatibility: str | None = None,
     work_mode: str | None,
     employment_type: str | None,
     professional_area: str | None = None,
@@ -216,11 +248,21 @@ def _matches_query_filters(
         return False
     if not include_dismissed and is_dismissed:
         return False
-    if not include_excluded and not match.eligible:
+    if compatibility:
+        if match.overall_compatibility != compatibility:
+            return False
+    elif not include_excluded and not match.eligible:
         return False
 
     if opportunity_type:
         if opp.opportunity_type != opportunity_type:
+            return False
+
+    if seniority_level:
+        resolved_sen = (getattr(opp, "seniority_level", None) or "").strip()
+        if not resolved_sen or resolved_sen == SeniorityLevel.UNKNOWN.value:
+            resolved_sen = resolve_opportunity_seniority_and_experience(opp)[0]
+        if resolved_sen != seniority_level:
             return False
 
     if work_mode and opp.work_mode != work_mode:
@@ -308,6 +350,8 @@ def list_opportunities(
     *,
     q: str | None = None,
     opportunity_type: str | None = None,
+    seniority_level: str | None = None,
+    compatibility: str | None = None,
     work_mode: str | None = None,
     employment_type: str | None = None,
     professional_area: str | None = None,
@@ -324,6 +368,7 @@ def list_opportunities(
 ) -> OpportunityListResponse:
     ensure_default_sources(db)
     profile = get_or_create_profile(db, user)
+    skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
 
     stmt = (
         select(Opportunity)
@@ -347,6 +392,10 @@ def list_opportunities(
             opp,
             profile,
             target_category=opportunity_type,
+            skills=skills,
+            experiences=experiences,
+            educations=educations,
+            projects=projects,
         )
         if _matches_query_filters(
             opp,
@@ -354,6 +403,8 @@ def list_opportunities(
             match,
             q=q,
             opportunity_type=opportunity_type,
+            seniority_level=seniority_level,
+            compatibility=compatibility,
             work_mode=work_mode,
             employment_type=employment_type,
             professional_area=professional_area,
@@ -419,13 +470,21 @@ def get_opportunity_for_user(
         return None
 
     profile = get_or_create_profile(db, user)
+    skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
     state = db.execute(
         select(OpportunityUserState).where(
             OpportunityUserState.user_id == user.id,
             OpportunityUserState.opportunity_id == opp.id,
         )
     ).scalar_one_or_none()
-    match = evaluate_opportunity_for_user(opp, profile)
+    match = evaluate_opportunity_for_user(
+        opp,
+        profile,
+        skills=skills,
+        experiences=experiences,
+        educations=educations,
+        projects=projects,
+    )
     return _serialize_opportunity(opp, state, match)
 
 
@@ -455,17 +514,24 @@ def create_manual_opportunity(
         description=payload.description,
     )
 
+    decision_manual = classify_opportunity(
+        title=payload.title,
+        tags=payload.technologies,
+        description=payload.description,
+        requirements=payload.requirements,
+    )
     if payload.professional_area is not None and payload.professional_area.value != "unknown":
         primary_area = payload.professional_area.value
         secondary_areas = list(payload.secondary_areas or [])
     else:
-        primary_area, sec_tuple, _ = classify_professional_area(
-            title=payload.title,
-            tags=payload.technologies,
-            description=payload.description,
-            requirements=payload.requirements,
-        )
-        secondary_areas = list(sec_tuple)
+        primary_area = decision_manual.professional_area
+        secondary_areas = list(decision_manual.secondary_areas)
+
+    resolved_seniority = (
+        payload.seniority_level.value
+        if payload.seniority_level is not None
+        else decision_manual.seniority_level
+    )
 
     opp = Opportunity(
         source_id=None,
@@ -475,6 +541,11 @@ def create_manual_opportunity(
         company_name=payload.company_name,
         description=payload.description,
         opportunity_type=payload.opportunity_type.value,
+        seniority_level=resolved_seniority,
+        experience_requirement_mode=decision_manual.experience_requirement_mode,
+        experience_min_years=decision_manual.experience_min_years,
+        experience_preferred_years=decision_manual.experience_preferred_years,
+        experience_summary=decision_manual.experience_summary,
         employment_type=payload.employment_type.value,
         work_mode=payload.work_mode.value,
         professional_area=primary_area,
@@ -509,7 +580,15 @@ def create_manual_opportunity(
     db.refresh(opp)
 
     profile = get_or_create_profile(db, user)
-    match = evaluate_opportunity_for_user(opp, profile)
+    skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
+    match = evaluate_opportunity_for_user(
+        opp,
+        profile,
+        skills=skills,
+        experiences=experiences,
+        educations=educations,
+        projects=projects,
+    )
     return _serialize_opportunity(opp, None, match)
 
 
@@ -540,6 +619,7 @@ def update_manual_opportunity(
             field
             in {
                 "opportunity_type",
+                "seniority_level",
                 "employment_type",
                 "work_mode",
                 "source_status",
@@ -553,17 +633,22 @@ def update_manual_opportunity(
         else:
             setattr(opp, field, value)
 
-    if "professional_area" not in update_data and any(
-        k in update_data for k in ("title", "description", "technologies")
-    ):
-        primary_area, sec_tuple, _ = classify_professional_area(
+    if any(k in update_data for k in ("title", "description", "technologies")):
+        dec_upd = classify_opportunity(
             title=opp.title,
             tags=list(opp.technologies or []),
             description=opp.description,
             requirements=list(opp.requirements or []),
         )
-        opp.professional_area = primary_area
-        opp.secondary_areas = list(sec_tuple)
+        if "professional_area" not in update_data:
+            opp.professional_area = dec_upd.professional_area
+            opp.secondary_areas = list(dec_upd.secondary_areas)
+        if "seniority_level" not in update_data:
+            opp.seniority_level = dec_upd.seniority_level
+        opp.experience_requirement_mode = dec_upd.experience_requirement_mode
+        opp.experience_min_years = dec_upd.experience_min_years
+        opp.experience_preferred_years = dec_upd.experience_preferred_years
+        opp.experience_summary = dec_upd.experience_summary
 
     opp.content_hash = compute_opportunity_content_hash(
         title=opp.title,
@@ -578,13 +663,21 @@ def update_manual_opportunity(
     db.refresh(opp)
 
     profile = get_or_create_profile(db, user)
+    skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
     state = db.execute(
         select(OpportunityUserState).where(
             OpportunityUserState.user_id == user.id,
             OpportunityUserState.opportunity_id == opp.id,
         )
     ).scalar_one_or_none()
-    match = evaluate_opportunity_for_user(opp, profile)
+    match = evaluate_opportunity_for_user(
+        opp,
+        profile,
+        skills=skills,
+        experiences=experiences,
+        educations=educations,
+        projects=projects,
+    )
     return _serialize_opportunity(opp, state, match)
 
 

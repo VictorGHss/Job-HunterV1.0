@@ -572,6 +572,11 @@ def _upsert_opportunity(
             company_name=draft.company_name,
             description=draft.description,
             opportunity_type=draft.opportunity_type,
+            seniority_level=draft.seniority_level,
+            experience_requirement_mode=draft.experience_requirement_mode,
+            experience_min_years=draft.experience_min_years,
+            experience_preferred_years=draft.experience_preferred_years,
+            experience_summary=draft.experience_summary,
             employment_type=draft.employment_type,
             work_mode=draft.work_mode,
             professional_area=draft.professional_area,
@@ -691,6 +696,11 @@ def _upsert_opportunity(
     existing.company_name = draft.company_name
     existing.description = draft.description
     existing.opportunity_type = draft.opportunity_type
+    existing.seniority_level = draft.seniority_level
+    existing.experience_requirement_mode = draft.experience_requirement_mode
+    existing.experience_min_years = draft.experience_min_years
+    existing.experience_preferred_years = draft.experience_preferred_years
+    existing.experience_summary = draft.experience_summary
     existing.employment_type = draft.employment_type
     existing.work_mode = draft.work_mode
     existing.professional_area = draft.professional_area
@@ -1294,6 +1304,12 @@ class ReclassificationChange:
     new_professional_area: str = "unknown"
     old_secondary_areas: tuple[str, ...] = ()
     new_secondary_areas: tuple[str, ...] = ()
+    old_seniority_level: str = "unknown"
+    new_seniority_level: str = "unknown"
+    old_experience_mode: str = "not_specified"
+    new_experience_mode: str = "not_specified"
+    old_experience_min_years: int | None = None
+    new_experience_min_years: int | None = None
     reasons: tuple[str, ...] = ()
 
 
@@ -1309,6 +1325,10 @@ class ReclassificationReport:
     changes: tuple[ReclassificationChange, ...]
     before_area_counts: dict[str, int] | None = None
     after_area_counts: dict[str, int] | None = None
+    before_seniority_counts: dict[str, int] | None = None
+    after_seniority_counts: dict[str, int] | None = None
+    before_experience_counts: dict[str, int] | None = None
+    after_experience_counts: dict[str, int] | None = None
 
 
 def reclassify_opportunities(
@@ -1355,6 +1375,7 @@ def reclassify_opportunities(
     opportunities = (
         db.execute(
             select(Opportunity)
+            .options(selectinload(Opportunity.source))
             .where(
                 Opportunity.source_id.is_not(None),
                 Opportunity.source_id.in_(target_source_ids),
@@ -1369,24 +1390,39 @@ def reclassify_opportunities(
     after_counter: Counter[str] = Counter()
     before_area_counter: Counter[str] = Counter()
     after_area_counter: Counter[str] = Counter()
+    before_seniority_counter: Counter[str] = Counter()
+    after_seniority_counter: Counter[str] = Counter()
+    before_exp_counter: Counter[str] = Counter()
+    after_exp_counter: Counter[str] = Counter()
     changes: list[ReclassificationChange] = []
 
     for opp in opportunities:
         old_area = opp.professional_area or "unknown"
         old_sec = tuple(opp.secondary_areas or [])
+        old_sen = getattr(opp, "seniority_level", None) or "unknown"
+        old_exp_mode = getattr(opp, "experience_requirement_mode", None) or "not_specified"
+        old_exp_min = getattr(opp, "experience_min_years", None)
+        old_exp_pref = getattr(opp, "experience_preferred_years", None)
+        old_exp_sum = getattr(opp, "experience_summary", None)
         before_counter[opp.opportunity_type] += 1
         before_area_counter[old_area] += 1
+        before_seniority_counter[old_sen] += 1
+        before_exp_counter[old_exp_mode] += 1
 
         meta = opp.raw_metadata if isinstance(opp.raw_metadata, dict) else {}
         extra_tags: list[str] = []
+        meta_levels: list[str] = []
         if isinstance(meta.get("labels"), list):
             extra_tags.extend(str(x) for x in meta["labels"])
+            meta_levels.extend(str(x) for x in meta["labels"])
         if isinstance(meta.get("job_type"), list):
             extra_tags.extend(str(x) for x in meta["job_type"])
         if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
             extra_tags.append(str(meta["job_level"]))
+            meta_levels.append(str(meta["job_level"]))
         if isinstance(meta.get("seniority"), list):
             extra_tags.extend(str(x) for x in meta["seniority"])
+            meta_levels.extend(str(x) for x in meta["seniority"])
         if meta.get("employment_type_raw"):
             extra_tags.append(str(meta["employment_type_raw"]))
 
@@ -1395,10 +1431,33 @@ def reclassify_opportunities(
             tags=list(opp.technologies or []) + extra_tags,
             description=opp.description,
             requirements=list(opp.requirements or []),
+            metadata_levels=meta_levels,
         )
         new_opp_type = decision.opportunity_type
         new_emp_type = decision.employment_type
+        new_sen = decision.seniority_level
+        new_area = decision.professional_area
+        new_sec_areas = decision.secondary_areas
+        if new_area == "unknown" and opp.source is not None:
+            if opp.source.slug == "github_frontend_br":
+                new_area = "frontend"
+                if "software_development" not in new_sec_areas:
+                    new_sec_areas = (*new_sec_areas, "software_development")
+            elif opp.source.slug == "github_backend_br":
+                new_area = "backend"
+                if "software_development" not in new_sec_areas:
+                    new_sec_areas = (*new_sec_areas, "software_development")
         labels_low = {str(x).strip().lower() for x in (meta.get("labels") or [])}
+        meta_low = {str(x).strip().lower() for x in meta_levels}
+        if ("estágio" in labels_low or "estagio" in labels_low or "intern" in meta_low) and new_opp_type == "other":
+            new_opp_type = "internship"
+            new_emp_type = "internship"
+            new_sen = "internship"
+        elif (labels_low & {"júnior", "junior"} or meta_low & {"junior", "entry-level", "entry level"}) and not (
+            labels_low & {"pleno", "sênior", "senior", "especialista"}
+        ) and new_opp_type == "other":
+            new_opp_type = "junior"
+
         if "clt" in labels_low and "pj" not in labels_low:
             new_emp_type = "clt"
         elif "pj" in labels_low and "clt" not in labels_low:
@@ -1413,18 +1472,30 @@ def reclassify_opportunities(
                 new_emp_type = "temporary"
 
         after_counter[new_opp_type] += 1
-        after_area_counter[decision.professional_area] += 1
+        after_area_counter[new_area] += 1
+        after_seniority_counter[new_sen] += 1
+        after_exp_counter[decision.experience_requirement_mode] += 1
 
         if (
             new_opp_type,
             new_emp_type,
-            decision.professional_area,
-            decision.secondary_areas,
+            new_area,
+            new_sec_areas,
+            new_sen,
+            decision.experience_requirement_mode,
+            decision.experience_min_years,
+            decision.experience_preferred_years,
+            decision.experience_summary,
         ) != (
             opp.opportunity_type,
             opp.employment_type,
             old_area,
             old_sec,
+            old_sen,
+            old_exp_mode,
+            old_exp_min,
+            old_exp_pref,
+            old_exp_sum,
         ):
             changes.append(
                 ReclassificationChange(
@@ -1435,17 +1506,28 @@ def reclassify_opportunities(
                     old_employment_type=opp.employment_type,
                     new_employment_type=new_emp_type,
                     old_professional_area=old_area,
-                    new_professional_area=decision.professional_area,
+                    new_professional_area=new_area,
                     old_secondary_areas=old_sec,
-                    new_secondary_areas=decision.secondary_areas,
+                    new_secondary_areas=new_sec_areas,
+                    old_seniority_level=old_sen,
+                    new_seniority_level=new_sen,
+                    old_experience_mode=old_exp_mode,
+                    new_experience_mode=decision.experience_requirement_mode,
+                    old_experience_min_years=old_exp_min,
+                    new_experience_min_years=decision.experience_min_years,
                     reasons=decision.reasons,
                 )
             )
             if not dry_run:
                 opp.opportunity_type = new_opp_type
                 opp.employment_type = new_emp_type
-                opp.professional_area = decision.professional_area
-                opp.secondary_areas = list(decision.secondary_areas)
+                opp.professional_area = new_area
+                opp.secondary_areas = list(new_sec_areas)
+                opp.seniority_level = new_sen
+                opp.experience_requirement_mode = decision.experience_requirement_mode
+                opp.experience_min_years = decision.experience_min_years
+                opp.experience_preferred_years = decision.experience_preferred_years
+                opp.experience_summary = decision.experience_summary
 
     if not dry_run and changes:
         db.commit()
@@ -1461,4 +1543,8 @@ def reclassify_opportunities(
         changes=tuple(changes),
         before_area_counts=dict(sorted(before_area_counter.items())),
         after_area_counts=dict(sorted(after_area_counter.items())),
+        before_seniority_counts=dict(sorted(before_seniority_counter.items())),
+        after_seniority_counts=dict(sorted(after_seniority_counter.items())),
+        before_experience_counts=dict(sorted(before_exp_counter.items())),
+        after_experience_counts=dict(sorted(after_exp_counter.items())),
     )

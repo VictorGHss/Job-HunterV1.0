@@ -290,6 +290,11 @@ function buildMockOpportunity(overrides: Partial<Opportunity> = {}): Opportunity
     company_name: "Acme Cloud",
     description: "Build FastAPI services and PostgreSQL databases.",
     opportunity_type: "junior",
+    seniority_level: "junior",
+    experience_requirement_mode: "none_required",
+    experience_min_years: 0,
+    experience_preferred_years: null,
+    experience_summary: "Sem exigência de experiência prévia",
     employment_type: "pj",
     work_mode: "remote",
     professional_area: "backend",
@@ -322,7 +327,14 @@ function buildMockOpportunity(overrides: Partial<Opportunity> = {}): Opportunity
     },
     match: {
       eligible: true,
+      overall_compatibility: "compatible",
       geographic_eligibility: "eligible",
+      seniority_compatibility: "compatible",
+      experience_compatibility: "compatible",
+      technical_compatibility: "compatible",
+      matched_skills: ["Python", "PostgreSQL"],
+      required_technologies: ["Python"],
+      desirable_technologies: ["Docker"],
       inclusion_reasons: [
         "Categoria compatível com a frente de Desenvolvedor Júnior ativa.",
         "Elegibilidade remota compatível com o perfil (Worldwide).",
@@ -408,10 +420,23 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
       expect(screen.getByText("Junior Python Backend Developer")).toBeInTheDocument();
     });
     expect(screen.getByText(/Área: Backend/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nível: Júnior/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/^Compatível$/i).length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getByText(/Experiência: Sem exigência de experiência prévia/i)
+    ).toBeInTheDocument();
     expect(screen.getByText(/Especialidades secundárias:/i)).toBeInTheDocument();
     expect(
       screen.getAllByText(/APIs, Integrações e Automação/i).length
     ).toBeGreaterThanOrEqual(2);
+
+    const senioritySelect = screen.getByLabelText(/Senioridade/i);
+    fireEvent.change(senioritySelect, { target: { value: "junior" } });
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "junior", seniority: "junior" })
+      );
+    });
 
     const areaSelect = screen.getByLabelText(/Área profissional/i);
     fireEvent.change(areaSelect, { target: { value: "backend" } });

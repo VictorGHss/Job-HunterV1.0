@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.cli import main as cli_main
 from app.models.opportunity import (
     EmploymentType,
+    ExperienceRequirementMode,
     ExternalSourceStatus,
     Opportunity,
     OpportunitySource,
@@ -17,11 +18,16 @@ from app.models.opportunity import (
     OpportunityType,
     OpportunityUserState,
     ProfessionalArea,
+    SeniorityLevel,
     SyncRunStatus,
     WorkMode,
 )
+from app.models.profile import Skill, SkillProficiency, WorkExperience, ExperienceType
 from app.services.auth_service import create_user_account
-from app.services.opportunities.classification import classify_opportunity
+from app.services.opportunities.classification import (
+    classify_experience_requirements,
+    classify_opportunity,
+)
 from app.services.opportunities.connectors.base import (
     ConnectorFetchError,
     ConnectorPayloadError,
@@ -2096,6 +2102,512 @@ def test_phase025_traceability_dedup_precision_lifecycle_and_observability(
     assert sources_resp["github_backend_br"]["unique_opportunities_count"] == 4
     assert sources_resp["github_backend_br"]["open_opportunities_count"] == 3
     assert sources_resp["github_backend_br"]["closed_or_expired_count"] == 1
+
+
+def test_phase026_seniority_experience_technical_matching_and_reclassification(
+    db_session, make_client
+):
+    from datetime import date
+    import copy
+
+    # 1. Classificação independente de senioridade, contrato e experiência
+    # Estágio sem experiência
+    intern_no_exp = classify_opportunity(
+        title="Estagiário de Backend Python",
+        tags=["python", "intern"],
+        description="Vaga de estágio sem experiência prévia exigida. Aprender APIs REST com a equipe.",
+    )
+    assert intern_no_exp.opportunity_type == OpportunityType.INTERNSHIP.value
+    assert intern_no_exp.seniority_level == SeniorityLevel.INTERNSHIP.value
+    assert intern_no_exp.employment_type == EmploymentType.INTERNSHIP.value
+    assert (
+        intern_no_exp.experience_requirement_mode
+        == ExperienceRequirementMode.NONE_REQUIRED.value
+    )
+    assert intern_no_exp.experience_min_years == 0
+
+    # Desenvolvedor júnior PJ
+    jr_pj = classify_opportunity(
+        title="Desenvolvedor Java Júnior PJ",
+        tags=["java", "spring boot", "pj"],
+        description="Requisitos obrigatórios: experiência com Java e Spring Boot.",
+    )
+    assert jr_pj.opportunity_type == OpportunityType.JUNIOR.value
+    assert jr_pj.seniority_level == SeniorityLevel.JUNIOR.value
+    assert jr_pj.employment_type == EmploymentType.PJ.value
+    assert jr_pj.required_technologies == ("Java", "Spring Boot")
+
+    # Desenvolvedor pleno
+    pleno_dec = classify_opportunity(
+        title="Desenvolvedor Backend Pleno",
+        tags=["python"],
+        description="Requisitos: 3+ years of experience with Python.",
+    )
+    assert pleno_dec.opportunity_type == OpportunityType.OTHER.value
+    assert pleno_dec.seniority_level == SeniorityLevel.MID_LEVEL.value
+    assert pleno_dec.experience_requirement_mode == ExperienceRequirementMode.REQUIRED.value
+    assert pleno_dec.experience_min_years == 3
+
+    # Desenvolvedor sênior / Staff / Principal
+    senior_dec = classify_opportunity(
+        title="Desenvolvedor Backend Sênior",
+        description="Atuação em microsserviços.",
+    )
+    assert senior_dec.seniority_level == SeniorityLevel.SENIOR.value
+    # Não inventa anos de experiência apenas pelo título "Sênior"!
+    assert (
+        senior_dec.experience_requirement_mode
+        == ExperienceRequirementMode.NOT_SPECIFIED.value
+    )
+    assert senior_dec.experience_min_years is None
+
+    staff_dec = classify_opportunity(title="Staff Engineer - Distributed Systems")
+    assert staff_dec.seniority_level == SeniorityLevel.STAFF_PRINCIPAL.value
+
+    principal_dec = classify_opportunity(title="Principal Engineer - Backend Core")
+    assert principal_dec.seniority_level == SeniorityLevel.STAFF_PRINCIPAL.value
+
+    # Freelance Júnior vs Freelance Sênior (separação entre frente freelance e nível profissional!)
+    freela_jr = classify_opportunity(
+        title="Freelance Junior Python Developer",
+        description="Freelance remote project with FastAPI. No experience required.",
+    )
+    assert freela_jr.opportunity_type == OpportunityType.FREELANCE.value
+    assert freela_jr.employment_type == EmploymentType.FREELANCE.value
+    assert freela_jr.seniority_level == SeniorityLevel.JUNIOR.value
+    assert freela_jr.experience_min_years == 0
+
+    freela_sr = classify_opportunity(
+        title="Desenvolvedor Sênior Freelance Backend",
+        description="Independent contractor role with 5+ years of experience in Go.",
+    )
+    assert freela_sr.opportunity_type == OpportunityType.FREELANCE.value
+    assert freela_sr.employment_type == EmploymentType.FREELANCE.value
+    assert freela_sr.seniority_level == SeniorityLevel.SENIOR.value
+    assert freela_sr.experience_min_years == 5
+
+    # Vaga sem senioridade NÃO é classificada automaticamente como Sênior
+    no_sen = classify_opportunity(
+        title="Software Engineer",
+        tags=["java", "python", "docker"],
+        description="Join our product engineering team building web platforms.",
+    )
+    assert no_sen.opportunity_type == OpportunityType.OTHER.value
+    assert no_sen.seniority_level == SeniorityLevel.UNKNOWN.value
+    assert (
+        no_sen.experience_requirement_mode
+        == ExperienceRequirementMode.NOT_SPECIFIED.value
+    )
+    # Tags soltas ("java", "python", "docker") NUNCA viram requisitos obrigatórios!
+    assert no_sen.required_technologies == ()
+
+    # Experiência obrigatória vs experiência desejável (sem bloquear desejável!)
+    exp_pref = classify_experience_requirements(
+        title="Backend Developer",
+        description=(
+            "Responsibilities:\nBuild APIs.\n"
+            "Preferred qualifications:\nNice to have: 3+ years of experience with Kubernetes and AWS."
+        ),
+    )
+    assert exp_pref.mode == ExperienceRequirementMode.PREFERRED.value
+    assert exp_pref.min_years is None
+    assert exp_pref.preferred_years == 3
+    assert exp_pref.mandatory_technologies == ()
+    assert set(exp_pref.desirable_technologies) >= {"Kubernetes", "AWS"}
+
+    # Menção meramente incidental de tecnologia / colegas não cria requisito obrigatório nem área tech
+    support_incidental = classify_opportunity(
+        title="Technical Support Analyst",
+        tags=["java", "python"],
+        description="Help desk N1/N2. Collaborate closely with senior Kubernetes engineers.",
+    )
+    assert support_incidental.professional_area == ProfessionalArea.TECHNICAL_SUPPORT.value
+    assert support_incidental.required_technologies == ()
+
+    # 2. Matching completo com habilidades (incluindo Java), experiência, senioridade e filtros HTTP
+    user = create_user_account(
+        db_session,
+        email="phase026.dev@example.com",
+        display_name="Phase 026 Dev",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    profile = get_or_create_profile(db_session, user)
+    profile.country = "Brasil"
+    profile.city = "Curitiba"
+    profile.state = "PR"
+    profile.professional_title = "Desenvolvedor Backend Júnior (Java / Spring Boot)"
+    prefs = copy.deepcopy(profile.preferences)
+    prefs["internships"]["enabled"] = True
+    prefs["internships"]["priority_areas"] = ["Desenvolvimento Backend", "APIs e integrações"]
+    prefs["junior_developer"]["enabled"] = True
+    prefs["junior_developer"]["block_clt"] = True
+    prefs["junior_developer"]["accepted_contract_types"] = ["PJ", "Estágio", "Contrato Freelance"]
+    prefs["junior_developer"]["priority_areas"] = ["Desenvolvimento Backend", "Full Stack", "Java", "Python"]
+    prefs["freelance"]["enabled"] = True
+    prefs["freelance"]["scopes"] = ["Brasil", "Exterior (Internacional)"]
+    prefs["freelance"]["priority_categories"] = ["APIs", "Python"]
+    profile.preferences = prefs
+
+    # Candidato com skill Java (17/21) + Spring Boot + ~1.8 ano de atuação prática
+    sk_java = Skill(
+        user_id=user.id,
+        name="Java (17/21)",
+        category="Linguagens",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    sk_spring = Skill(
+        user_id=user.id,
+        name="Spring Boot",
+        category="Frameworks",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    sk_python = Skill(
+        user_id=user.id,
+        name="Python",
+        category="Linguagens",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    exp_rec = WorkExperience(
+        user_id=user.id,
+        company="Empresa Local",
+        role="Técnico de TI e Desenvolvimento",
+        description="Integração de APIs REST com Java e Spring Boot.",
+        start_date=date(2025, 1, 1),
+        is_current=True,
+        experience_type=ExperienceType.OTHER.value,
+        technologies=["Java", "Spring Boot"],
+        eligible_as_target_role=False,
+    )
+    db_session.add_all([sk_java, sk_spring, sk_python, exp_rec])
+    db_session.commit()
+
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    src = {s.slug: s for s in ensure_default_sources(db_session)}["github_backend_br"]
+    now = datetime.now(UTC)
+
+    # Conjunto representativo das 12 situações da Fase 02.6
+    opp_intern = Opportunity(
+        source_id=src.id,
+        external_id="p26-intern",
+        title="Estágio Desenvolvimento Backend Python",
+        description="Sem experiência prévia exigida.",
+        opportunity_type=OpportunityType.INTERNSHIP.value,
+        seniority_level=SeniorityLevel.INTERNSHIP.value,
+        experience_requirement_mode=ExperienceRequirementMode.NONE_REQUIRED.value,
+        experience_min_years=0,
+        experience_summary="Sem exigência de experiência prévia",
+        employment_type=EmploymentType.INTERNSHIP.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        secondary_areas=[ProfessionalArea.SOFTWARE_DEVELOPMENT.value],
+        eligible_countries=["Brasil"],
+        technologies=["Python"],
+        source_url="https://example.com/p26-intern",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-1",
+    )
+    opp_java_jr = Opportunity(
+        source_id=src.id,
+        external_id="p26-java-jr",
+        title="Desenvolvedor Java Júnior PJ",
+        description="Requisitos obrigatórios: 1+ year of experience building REST APIs with Java and Spring Boot.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.REQUIRED.value,
+        experience_min_years=1,
+        experience_summary="Obrigatória: 1+ anos de experiência",
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        secondary_areas=[ProfessionalArea.SOFTWARE_DEVELOPMENT.value],
+        eligible_countries=["Brasil"],
+        technologies=["Java", "Spring Boot"],
+        source_url="https://example.com/p26-java-jr",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-2",
+    )
+    opp_java_clt = Opportunity(
+        source_id=src.id,
+        external_id="p26-java-clt",
+        title="Desenvolvedor Java Júnior CLT",
+        description="Contratação CLT.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.NOT_SPECIFIED.value,
+        employment_type=EmploymentType.CLT.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["Brasil"],
+        technologies=["Java"],
+        source_url="https://example.com/p26-java-clt",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-3",
+    )
+    opp_pleno = Opportunity(
+        source_id=src.id,
+        external_id="p26-pleno",
+        title="Desenvolvedor Backend Pleno",
+        description="Preferred qualifications: 2+ years experience with Python.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.MID_LEVEL.value,
+        experience_requirement_mode=ExperienceRequirementMode.PREFERRED.value,
+        experience_preferred_years=2,
+        experience_summary="Desejável: 2+ anos de experiência",
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://example.com/p26-pleno",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-4",
+    )
+    opp_senior = Opportunity(
+        source_id=src.id,
+        external_id="p26-senior",
+        title="Senior Backend Software Engineer",
+        description="Requirements: 5+ years of experience in backend engineering.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.SENIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.REQUIRED.value,
+        experience_min_years=5,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://example.com/p26-senior",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-5",
+    )
+    opp_staff = Opportunity(
+        source_id=src.id,
+        external_id="p26-staff",
+        title="Staff Software Engineer",
+        description="Lead architecture.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.STAFF_PRINCIPAL.value,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/p26-staff",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-6",
+    )
+    opp_principal = Opportunity(
+        source_id=src.id,
+        external_id="p26-principal",
+        title="Principal Engineer",
+        description="Principal backend systems.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.STAFF_PRINCIPAL.value,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/p26-principal",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-7",
+    )
+    opp_freela_sr = Opportunity(
+        source_id=src.id,
+        external_id="p26-freela-sr",
+        title="Freelance Senior Salesforce Developer",
+        description="Requirements: 5+ years of experience with Salesforce.",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        seniority_level=SeniorityLevel.SENIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.REQUIRED.value,
+        experience_min_years=5,
+        employment_type=EmploymentType.FREELANCE.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        eligible_countries=["Brazil"],
+        technologies=["Salesforce"],
+        source_url="https://example.com/p26-freela-sr",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-8",
+    )
+    opp_freela_jr = Opportunity(
+        source_id=src.id,
+        external_id="p26-freela-jr",
+        title="Freelance Junior Python API Developer",
+        description="Build Python integrations.",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.NONE_REQUIRED.value,
+        experience_min_years=0,
+        employment_type=EmploymentType.FREELANCE.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.API_INTEGRATIONS.value,
+        secondary_areas=[ProfessionalArea.BACKEND.value],
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://example.com/p26-freela-jr",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-9",
+    )
+    opp_unspecified = Opportunity(
+        source_id=src.id,
+        external_id="p26-unspecified",
+        title="Software Engineer",
+        description="Build modern web apps.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        experience_requirement_mode=ExperienceRequirementMode.NOT_SPECIFIED.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://example.com/p26-unspecified",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-10",
+    )
+    opp_usa = Opportunity(
+        source_id=src.id,
+        external_id="p26-usa",
+        title="Junior Python Engineer (USA)",
+        description="Entry-level backend.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["USA only"],
+        source_url="https://example.com/p26-usa",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-11",
+    )
+    opp_rust_req = Opportunity(
+        source_id=src.id,
+        external_id="p26-rust-req",
+        title="Junior Systems Developer",
+        description="Requirements:\nMandatory experience with Rust and Golang.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        experience_requirement_mode=ExperienceRequirementMode.NONE_REQUIRED.value,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["Brasil"],
+        technologies=["Rust", "Golang"],
+        source_url="https://example.com/p26-rust-req",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-12",
+    )
+    # Registro antigo que será reclassificado via reclassify_opportunities
+    opp_stale_class = Opportunity(
+        source_id=src.id,
+        external_id="p26-reclassify-me",
+        title="Desenvolvedor(a) Back-end Sênior",
+        description="Requisitos obrigatórios: 6+ anos de experiência em Java e PostgreSQL.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        experience_requirement_mode=ExperienceRequirementMode.NOT_SPECIFIED.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        eligible_countries=["Brasil"],
+        source_url="https://example.com/p26-reclassify",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="hp26-13",
+    )
+
+    all_opps = [
+        opp_intern,
+        opp_java_jr,
+        opp_java_clt,
+        opp_pleno,
+        opp_senior,
+        opp_staff,
+        opp_principal,
+        opp_freela_sr,
+        opp_freela_jr,
+        opp_unspecified,
+        opp_usa,
+        opp_rust_req,
+        opp_stale_class,
+    ]
+    db_session.add_all(all_opps)
+    db_session.commit()
+
+    client = make_client(("10.10.0.99", 50000))
+    login_and_get_csrf(client, "phase026.dev@example.com", "StrongPassword123!")
+
+    # API retorna compatíveis (Estágio, Java Jr PJ, Freelance Jr), potenciais (Pleno, Software Engineer s/ nível)
+    # e exclui Senior, Staff, Principal, Freelance Senior, CLT bloqueado, USA only e requisito obrigatório de Rust+Golang!
+    resp_default = client.get("/api/v1/opportunities?page_size=50").json()
+    default_ext_ids = {item["external_id"]: item for item in resp_default["items"]}
+    assert "p26-intern" in default_ext_ids
+    assert default_ext_ids["p26-intern"]["match"]["overall_compatibility"] == "compatible"
+    assert "p26-java-jr" in default_ext_ids
+    assert default_ext_ids["p26-java-jr"]["match"]["overall_compatibility"] == "compatible"
+    assert default_ext_ids["p26-java-jr"]["match"]["technical_compatibility"] == "compatible"
+    assert "Java" in default_ext_ids["p26-java-jr"]["match"]["matched_skills"]
+    assert "p26-freela-jr" in default_ext_ids
+    assert default_ext_ids["p26-freela-jr"]["match"]["overall_compatibility"] == "compatible"
+
+    assert "p26-pleno" in default_ext_ids
+    assert default_ext_ids["p26-pleno"]["match"]["overall_compatibility"] == "potential"
+    assert "p26-unspecified" in default_ext_ids
+    assert default_ext_ids["p26-unspecified"]["match"]["overall_compatibility"] == "potential"
+
+    for blocked_ext in (
+        "p26-senior",
+        "p26-staff",
+        "p26-principal",
+        "p26-freela-sr",
+        "p26-java-clt",
+        "p26-usa",
+        "p26-rust-req",
+    ):
+        assert blocked_ext not in default_ext_ids
+
+    # Filtros por compatibilidade e senioridade na API
+    only_compat = client.get("/api/v1/opportunities?compatibility=compatible&page_size=50").json()
+    assert {i["external_id"] for i in only_compat["items"]} == {
+        "p26-intern",
+        "p26-java-jr",
+        "p26-freela-jr",
+    }
+
+    only_incompat_sr = client.get(
+        "/api/v1/opportunities?compatibility=incompatible&seniority=senior&page_size=50"
+    ).json()
+    assert {i["external_id"] for i in only_incompat_sr["items"]} >= {"p26-senior", "p26-freela-sr"}
+
+    # Reclassificação idempotente (dry-run e real)
+    dry_rep = reclassify_opportunities(db_session, dry_run=True)
+    assert dry_rep.updated_count >= 1
+    assert db_session.get(Opportunity, opp_stale_class.id).seniority_level == "unknown"
+
+    real_rep = reclassify_opportunities(db_session, dry_run=False)
+    assert real_rep.updated_count >= 1
+    db_session.expire_all()
+    reclassified = db_session.get(Opportunity, opp_stale_class.id)
+    assert reclassified.seniority_level == SeniorityLevel.SENIOR.value
+    assert reclassified.experience_requirement_mode == ExperienceRequirementMode.REQUIRED.value
+    assert reclassified.experience_min_years == 6
+
+    second_rep = reclassify_opportunities(db_session, dry_run=False)
+    assert second_rep.updated_count == 0
+
 
 
 

@@ -8,7 +8,10 @@ from app.models.opportunity import (
     SourceType,
     WorkMode,
 )
-from app.services.opportunities.classification import classify_professional_area
+from app.services.opportunities.classification import (
+    classify_opportunity,
+    classify_professional_area,
+)
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     ConnectorPayloadError,
@@ -160,11 +163,13 @@ class RemotiveConnector(BaseOpportunityConnector):
                 sanitize_plain_text(item.get("salary"), max_length=120)
             )
             description = sanitize_external_html_text(item.get("description"))
-            primary_area, secondary_areas, _ = classify_professional_area(
+            decision = classify_opportunity(
                 title=raw_title,
                 tags=technologies,
                 description=description,
             )
+            primary_area = decision.professional_area
+            secondary_areas = decision.secondary_areas
 
             drafts.append(
                 NormalizedOpportunityDraft(
@@ -195,6 +200,11 @@ class RemotiveConnector(BaseOpportunityConnector):
                     source_status=ExternalSourceStatus.ACTIVE.value,
                     professional_area=primary_area,
                     secondary_areas=list(secondary_areas),
+                    seniority_level=decision.seniority_level,
+                    experience_requirement_mode=decision.experience_requirement_mode,
+                    experience_min_years=decision.experience_min_years,
+                    experience_preferred_years=decision.experience_preferred_years,
+                    experience_summary=decision.experience_summary,
                     raw_metadata={
                         "category": sanitize_plain_text(item.get("category")),
                         "job_type": sanitize_plain_text(item.get("job_type")),

@@ -1,19 +1,34 @@
+from datetime import date
 import re
-from typing import Any
+from typing import Any, Sequence
 
 from app.models.opportunity import (
     EmploymentType,
+    ExperienceRequirementMode,
     Opportunity,
     OpportunityType,
     ProfessionalArea,
+    SeniorityLevel,
     WorkMode,
 )
-from app.models.profile import ProfessionalProfile, default_career_preferences
+from app.models.profile import (
+    Education,
+    EducationStatus,
+    ProfessionalProfile,
+    ProfessionalProject,
+    Skill,
+    WorkExperience,
+    default_career_preferences,
+)
 from app.schemas.opportunity import OpportunityMatchEvaluation
 from app.services.opportunities.classification import (
     PROFESSIONAL_AREA_LABELS_PT,
+    SENIORITY_LABELS_PT,
     TECH_TARGET_AREAS,
+    classify_experience_requirements,
+    classify_opportunity,
     classify_professional_area,
+    normalize_classification_text,
 )
 
 _WORLDWIDE_TOKENS = {
@@ -48,6 +63,45 @@ _NON_TECH_PRIMARY_AREAS = frozenset(
         ProfessionalArea.OTHER.value,
     }
 )
+
+_TECH_ALIASES: dict[str, tuple[str, ...]] = {
+    "java": ("java",),
+    "spring boot": ("spring boot", "spring"),
+    "python": ("python",),
+    "fastapi": ("fastapi",),
+    "django": ("django",),
+    "flask": ("flask",),
+    "typescript": ("typescript", "ts"),
+    "javascript": ("javascript", "js"),
+    "react": ("react", "reactjs", "react.js"),
+    "next.js": ("next.js", "nextjs", "next js"),
+    "angular": ("angular",),
+    "vue": ("vue", "vuejs", "vue.js", "nuxt", "nuxtjs"),
+    "node.js": ("node.js", "nodejs", "node js", "node"),
+    "nestjs": ("nestjs", "nest.js"),
+    "golang": ("golang", "go"),
+    "c#": ("c#", "csharp", ".net", "dotnet", "dot net"),
+    "c++": ("c++",),
+    "php": ("php", "laravel"),
+    "ruby": ("ruby", "ruby on rails"),
+    "rust": ("rust",),
+    "postgresql": ("postgresql", "postgres"),
+    "mysql": ("mysql",),
+    "sql": ("sql",),
+    "redis": ("redis",),
+    "docker": ("docker",),
+    "kubernetes": ("kubernetes", "k8s"),
+    "aws": ("aws", "amazon web services"),
+    "gcp": ("gcp", "google cloud"),
+    "azure": ("azure",),
+    "terraform": ("terraform",),
+    "kafka": ("kafka", "apache kafka"),
+    "graphql": ("graphql",),
+    "apis rest": ("apis rest", "api rest", "rest", "restful", "apis restful"),
+    "salesforce": ("salesforce",),
+    "flutter": ("flutter",),
+    "kotlin": ("kotlin",),
+}
 
 
 def _contains_term(haystack: str, term: str) -> bool:
@@ -109,6 +163,71 @@ def resolve_opportunity_areas(opportunity: Opportunity) -> tuple[str, list[str]]
         requirements=list(opportunity.requirements or []),
     )
     return (primary, list(secondary))
+
+
+def resolve_opportunity_seniority_and_experience(
+    opportunity: Opportunity,
+) -> tuple[str, str, int | None, int | None, str | None, tuple[str, ...], tuple[str, ...]]:
+    """
+    Retorna `(seniority_level, experience_requirement_mode, min_years, preferred_years,
+    experience_summary, required_technologies, desirable_technologies)` da oportunidade,
+    reavaliando deterministicamente se o objeto em memória ainda estiver sem os novos campos.
+    """
+    exp_eval = classify_experience_requirements(
+        title=opportunity.title,
+        description=opportunity.description,
+        requirements=list(opportunity.requirements or []),
+    )
+    stored_sen = (getattr(opportunity, "seniority_level", None) or "").strip()
+    stored_mode = (getattr(opportunity, "experience_requirement_mode", None) or "").strip()
+
+    if stored_sen and stored_sen != SeniorityLevel.UNKNOWN.value:
+        sen = stored_sen
+        mode = stored_mode or exp_eval.mode
+        min_yrs = getattr(opportunity, "experience_min_years", None)
+        pref_yrs = getattr(opportunity, "experience_preferred_years", None)
+        summary = getattr(opportunity, "experience_summary", None) or exp_eval.summary
+        if stored_mode == ExperienceRequirementMode.NOT_SPECIFIED.value and exp_eval.mode != ExperienceRequirementMode.NOT_SPECIFIED.value:
+            mode = exp_eval.mode
+            min_yrs = exp_eval.min_years
+            pref_yrs = exp_eval.preferred_years
+            summary = exp_eval.summary
+        return (
+            sen,
+            mode,
+            min_yrs,
+            pref_yrs,
+            summary,
+            exp_eval.mandatory_technologies,
+            exp_eval.desirable_technologies,
+        )
+
+    meta = getattr(opportunity, "raw_metadata", None) or {}
+    meta_levels: list[str] = []
+    if isinstance(meta, dict):
+        if isinstance(meta.get("labels"), list):
+            meta_levels.extend(str(x) for x in meta["labels"])
+        if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
+            meta_levels.append(str(meta["job_level"]))
+        if isinstance(meta.get("seniority"), list):
+            meta_levels.extend(str(x) for x in meta["seniority"])
+
+    decision = classify_opportunity(
+        title=opportunity.title,
+        tags=list(opportunity.technologies or []),
+        description=opportunity.description,
+        requirements=list(opportunity.requirements or []),
+        metadata_levels=meta_levels,
+    )
+    return (
+        decision.seniority_level,
+        decision.experience_requirement_mode,
+        decision.experience_min_years,
+        decision.experience_preferred_years,
+        decision.experience_summary,
+        decision.required_technologies,
+        decision.desirable_technologies,
+    )
 
 
 def _derive_desired_areas(priority_terms: list[str], all_prefs: dict[str, Any]) -> set[str]:
@@ -253,15 +372,290 @@ def _language_matches(opp_language: str, preferred_languages: list[str]) -> bool
     return False
 
 
+def _estimate_candidate_profile_stage(
+    profile: ProfessionalProfile,
+    prefs: dict[str, Any],
+    skills: Sequence[Skill] | None,
+    experiences: Sequence[WorkExperience] | None,
+    educations: Sequence[Education] | None,
+    projects: Sequence[ProfessionalProject] | None,
+) -> tuple[float, float, int, set[str], bool, bool]:
+    """
+    Calcula de forma determinística e sem inventar fatos:
+    - `confirmed_target_years`: anos em experiências elegíveis como cargo alvo
+    - `practical_years`: anos totais de experiência prática em tecnologia/trabalho
+    - `candidate_ceiling_rank`: nível máximo compatível com perfil/preferências
+      (1=internship, 2=junior/entry_level, 3=mid_level, 4=senior+)
+    - `candidate_skill_tokens`: conjunto normalizado de tecnologias/habilidades declaradas
+    - `has_student_status`: se há formação em andamento para estágio
+    - `has_explicit_skills`: se o usuário já possui skills cadastradas ou apenas preferências
+    """
+    today = date.today()
+    target_months = 0
+    total_months = 0
+    skill_tokens: set[str] = set()
+
+    def _collect_tokens(raw_text: str | None) -> None:
+        if not raw_text:
+            return
+        norm = normalize_classification_text(raw_text)
+        # Remove versões entre parênteses para reconhecer ex.: "Java (17/21)" -> "java"
+        stripped_parens = re.sub(r"\([^)]*\)", " ", norm).strip()
+        for chunk in {norm, stripped_parens}:
+            if chunk:
+                skill_tokens.add(chunk)
+        for canonical, aliases in _TECH_ALIASES.items():
+            for alias in aliases:
+                if _contains_term(norm, alias):
+                    skill_tokens.add(canonical)
+                    break
+
+    _collect_tokens(profile.professional_title)
+    _collect_tokens(profile.professional_summary)
+
+    has_explicit_skills = bool(skills)
+    if skills:
+        for sk in skills:
+            _collect_tokens(sk.name)
+            _collect_tokens(sk.notes)
+
+    if experiences:
+        for exp in experiences:
+            if exp.start_date is not None:
+                end_dt = today if (exp.is_current or exp.end_date is None) else exp.end_date
+                months = max(
+                    0,
+                    (end_dt.year - exp.start_date.year) * 12
+                    + (end_dt.month - exp.start_date.month),
+                )
+                total_months += months
+                if exp.eligible_as_target_role or exp.experience_type in {
+                    "junior",
+                    "pj",
+                    "clt",
+                    "freelance",
+                }:
+                    target_months += months
+            _collect_tokens(exp.role)
+            _collect_tokens(exp.description)
+            for t in (exp.technologies or []) + (exp.related_skills or []):
+                _collect_tokens(t)
+
+    if projects:
+        for proj in projects:
+            _collect_tokens(proj.name)
+            _collect_tokens(proj.description)
+            for t in proj.technologies or []:
+                _collect_tokens(t)
+
+    for section in ("internships", "junior_developer", "freelance"):
+        sec_dict = prefs.get(section) or {}
+        for item in (sec_dict.get("priority_areas") or []) + (
+            sec_dict.get("priority_categories") or []
+        ):
+            _collect_tokens(str(item))
+
+    has_student_status = False
+    if educations:
+        for edu in educations:
+            if edu.education_status == EducationStatus.IN_PROGRESS.value:
+                has_student_status = True
+
+    confirmed_target_years = round(target_months / 12.0, 2)
+    practical_years = round(total_months / 12.0, 2)
+
+    title_norm = normalize_classification_text(profile.professional_title)
+    if any(k in title_norm for k in ("staff", "principal", "architect", "head of", "director", "manager")):
+        ceiling_rank = 5
+    elif "senior" in title_norm or confirmed_target_years >= 4.0:
+        ceiling_rank = 4
+    elif "pleno" in title_norm or "mid" in title_norm or confirmed_target_years >= 2.0:
+        ceiling_rank = 3
+    else:
+        # Perfil de entrada (estágio / júnior / início de carreira / freelance compatível)
+        ceiling_rank = 2
+
+    return (
+        confirmed_target_years,
+        practical_years,
+        ceiling_rank,
+        skill_tokens,
+        has_student_status,
+        has_explicit_skills,
+    )
+
+
+def _skill_matches_tech(tech_label: str, candidate_tokens: set[str]) -> bool:
+    norm = normalize_classification_text(tech_label)
+    if norm in candidate_tokens:
+        return True
+    aliases = _TECH_ALIASES.get(norm, (norm,))
+    for alias in aliases:
+        if alias in candidate_tokens:
+            return True
+        for tok in candidate_tokens:
+            if _contains_term(tok, alias):
+                return True
+    return False
+
+
+def _evaluate_seniority_dimension(
+    seniority_level: str,
+    ceiling_rank: int,
+    practical_years: float,
+    prefs: dict[str, Any],
+) -> tuple[str, list[str], list[str], list[str]]:
+    inclusions: list[str] = []
+    exclusions: list[str] = []
+    uncertainties: list[str] = []
+    label = SENIORITY_LABELS_PT.get(seniority_level, seniority_level)
+
+    if seniority_level == SeniorityLevel.INTERNSHIP.value:
+        if not prefs["internships"].get("enabled", True):
+            exclusions.append("Nível Estágio desabilitado nas preferências do perfil.")
+            return ("incompatible", inclusions, exclusions, uncertainties)
+        if ceiling_rank >= 4:
+            exclusions.append("Vaga de Estágio abaixo da senioridade consolidada do perfil.")
+            return ("incompatible", inclusions, exclusions, uncertainties)
+        inclusions.append(f"Senioridade compatível com o perfil ({label}).")
+        return ("compatible", inclusions, exclusions, uncertainties)
+
+    if seniority_level in {SeniorityLevel.ENTRY_LEVEL.value, SeniorityLevel.JUNIOR.value}:
+        if ceiling_rank >= 4:
+            return ("potential", inclusions, exclusions, uncertainties)
+        inclusions.append(f"Senioridade compatível com o momento do perfil ({label}).")
+        return ("compatible", inclusions, exclusions, uncertainties)
+
+    if seniority_level == SeniorityLevel.MID_LEVEL.value:
+        if ceiling_rank >= 3:
+            inclusions.append(f"Senioridade compatível ({label}).")
+            return ("compatible", inclusions, exclusions, uncertainties)
+        if practical_years >= 1.5:
+            uncertainties.append(
+                f"Vaga de nível {label}; exige avaliação frente ao perfil júnior/entrada."
+            )
+            return ("potential", inclusions, exclusions, uncertainties)
+        exclusions.append(
+            f"Senioridade incompatível: vaga requer nível {label}, acima da fase atual do perfil."
+        )
+        return ("incompatible", inclusions, exclusions, uncertainties)
+
+    if seniority_level in {
+        SeniorityLevel.SENIOR.value,
+        SeniorityLevel.STAFF_PRINCIPAL.value,
+        SeniorityLevel.MANAGEMENT.value,
+    }:
+        rank_needed = 4 if seniority_level == SeniorityLevel.SENIOR.value else 5
+        if ceiling_rank >= rank_needed:
+            inclusions.append(f"Senioridade compatível ({label}).")
+            return ("compatible", inclusions, exclusions, uncertainties)
+        exclusions.append(
+            f"Senioridade incompatível: vaga exige nível {label}, inadequado para perfil de entrada/júnior."
+        )
+        return ("incompatible", inclusions, exclusions, uncertainties)
+
+    uncertainties.append(
+        "Senioridade da vaga não foi especificada pela fonte; requer avaliação do candidato."
+    )
+    return ("unknown", inclusions, exclusions, uncertainties)
+
+
+def _evaluate_experience_dimension(
+    exp_mode: str,
+    min_years: int | None,
+    preferred_years: int | None,
+    seniority_level: str,
+    confirmed_target_years: float,
+    practical_years: float,
+) -> tuple[str, list[str], list[str], list[str]]:
+    inclusions: list[str] = []
+    exclusions: list[str] = []
+    uncertainties: list[str] = []
+
+    if exp_mode == ExperienceRequirementMode.NONE_REQUIRED.value:
+        inclusions.append("A vaga informa expressamente que não exige experiência prévia.")
+        return ("compatible", inclusions, exclusions, uncertainties)
+
+    if exp_mode == ExperienceRequirementMode.REQUIRED.value:
+        if min_years is not None:
+            if confirmed_target_years >= min_years or (
+                practical_years >= min_years and min_years <= 2
+            ):
+                inclusions.append(
+                    f"Requisito mínimo de experiência compatível ({min_years}+ ano(s))."
+                )
+                return ("compatible", inclusions, exclusions, uncertainties)
+            if min_years == 1 and practical_years >= 0.5:
+                inclusions.append(
+                    "Requisito inicial de experiência (1+ ano) alinhado à experiência prática."
+                )
+                return ("compatible", inclusions, exclusions, uncertainties)
+            if min_years <= 2 and practical_years >= 1.25:
+                uncertainties.append(
+                    f"A vaga solicita {min_years} ano(s) de experiência; perfil possui experiência prática aproximada e requer avaliação."
+                )
+                return ("potential", inclusions, exclusions, uncertainties)
+            if min_years == 1 and practical_years == 0.0:
+                uncertainties.append(
+                    "A vaga menciona 1 ano de experiência e o perfil não possui tempo datado suficiente; avaliar requisitos."
+                )
+                return ("potential", inclusions, exclusions, uncertainties)
+            exclusions.append(
+                f"Requisito obrigatório de {min_years}+ anos de experiência excede a trajetória atual do perfil."
+            )
+            return ("incompatible", inclusions, exclusions, uncertainties)
+
+        # Experiência qualitativa obrigatória (sem contagem explícita de anos)
+        if practical_years >= 1.0:
+            uncertainties.append(
+                "A vaga exige experiência prática obrigatória sem especificar número de anos; validar aderência antes da candidatura."
+            )
+            return ("potential", inclusions, exclusions, uncertainties)
+        uncertainties.append(
+            "A vaga solicita experiência prática prévia; validar compatibilidade."
+        )
+        return ("potential", inclusions, exclusions, uncertainties)
+
+    if exp_mode == ExperienceRequirementMode.PREFERRED.value:
+        pref_note = (
+            f"Experiência indicada apenas como desejável ({preferred_years}+ anos), não obrigatória."
+            if preferred_years is not None
+            else "Experiência citada apenas como desejável ou diferencial."
+        )
+        inclusions.append(pref_note)
+        return ("compatible", inclusions, exclusions, uncertainties)
+
+    # Experience not specified
+    if seniority_level in {
+        SeniorityLevel.INTERNSHIP.value,
+        SeniorityLevel.ENTRY_LEVEL.value,
+        SeniorityLevel.JUNIOR.value,
+    }:
+        inclusions.append(
+            "Nível de entrada compatível e sem exigência numérica de experiência prévia."
+        )
+        return ("compatible", inclusions, exclusions, uncertainties)
+
+    uncertainties.append(
+        "Tempo de experiência exigido não foi informado explicitamente pela vaga."
+    )
+    return ("unknown", inclusions, exclusions, uncertainties)
+
+
 def evaluate_opportunity_for_user(
     opportunity: Opportunity,
     profile: ProfessionalProfile,
     *,
     target_category: str | None = None,
+    skills: Sequence[Skill] | None = None,
+    experiences: Sequence[WorkExperience] | None = None,
+    educations: Sequence[Education] | None = None,
+    projects: Sequence[ProfessionalProject] | None = None,
 ) -> OpportunityMatchEvaluation:
     """
-    Avalia compatibilidade de forma 100% determinística e explicável considerando
-    área profissional, senioridade/categoria, contrato, restrições e geografia.
+    Avalia compatibilidade de forma 100% determinística e explicável considerando seis
+    dimensões independentes: área profissional, geografia, contrato, senioridade,
+    requisitos de experiência e compatibilidade técnica com as habilidades do candidato.
     """
     defaults = default_career_preferences()
     prefs: dict[str, Any] = dict(defaults)
@@ -329,40 +723,46 @@ def evaluate_opportunity_for_user(
         else:
             inclusions.append("Categoria compatível com a frente de Freelancers ativa.")
 
-    # 3. Contrato e bloqueio CLT (sem confundir estágio ou unknown com CLT)
+    # 3. Contrato e bloqueio CLT
+    contract_compatibility = "unknown"
     if opportunity.employment_type == EmploymentType.UNKNOWN.value:
         uncertainty_notes.append("Tipo de contrato não informado pela fonte original.")
-
-    if category == OpportunityType.JUNIOR.value:
+    elif category == OpportunityType.JUNIOR.value:
         jr_prefs = prefs["junior_developer"]
+        contract_blocked = False
         if jr_prefs.get("block_clt", False) and (
             opportunity.employment_type == EmploymentType.CLT.value
         ):
             exclusions.append(
                 "Regra block_clt ativa: oportunidades classificadas como CLT são excluídas."
             )
+            contract_blocked = True
 
         accepted = jr_prefs.get("accepted_contract_types") or []
-        if accepted and opportunity.employment_type != EmploymentType.UNKNOWN.value:
+        if accepted:
             normalized_accepted = {_normalize_contract_label(item) for item in accepted}
             if opportunity.employment_type not in normalized_accepted:
                 exclusions.append(
                     f"Contrato '{opportunity.employment_type}' fora das modalidades aceitas ({', '.join(accepted)})."
                 )
-            else:
+                contract_blocked = True
+            elif not contract_blocked:
                 inclusions.append(
                     f"Modalidade contratual aceita ({opportunity.employment_type})."
                 )
-    elif opportunity.employment_type != EmploymentType.UNKNOWN.value:
+        contract_compatibility = "incompatible" if contract_blocked else "compatible"
+    else:
         if (
-             prefs["junior_developer"].get("block_clt", False)
+            prefs["junior_developer"].get("block_clt", False)
             and opportunity.employment_type == EmploymentType.CLT.value
         ):
             exclusions.append(
                 "Regra block_clt ativa: oportunidades classificadas como CLT são excluídas."
             )
+            contract_compatibility = "incompatible"
         else:
             inclusions.append(f"Contrato informado: {opportunity.employment_type}.")
+            contract_compatibility = "compatible"
 
     # 4. Áreas excluídas, área profissional da vaga e aderência de domínio
     substantive_text = " ".join(
@@ -453,7 +853,6 @@ def evaluate_opportunity_for_user(
     if geo_status == "unknown":
         uncertainty_notes.append("Elegibilidade geográfica não confirmada na origem.")
 
-    # Escopo freelance (Brasil vs Exterior)
     if category == OpportunityType.FREELANCE.value:
         scopes = [s.lower() for s in (prefs["freelance"].get("scopes") or [])]
         if scopes and geo_status == "eligible":
@@ -477,7 +876,47 @@ def evaluate_opportunity_for_user(
                 f"Idioma informado ({opportunity.language}) não está entre os preferidos ({', '.join(preferred_languages)})."
             )
 
-    # 7. Tecnologias / áreas prioritárias nos dados substantivos (apenas quando a área não for incompatível)
+    # 7. Senioridade, Experiência e Habilidades Técnicas do Candidato
+    (
+        confirmed_target_years,
+        practical_years,
+        ceiling_rank,
+        candidate_tokens,
+        _has_student_status,
+        has_explicit_skills,
+    ) = _estimate_candidate_profile_stage(
+        profile, prefs, skills, experiences, educations, projects
+    )
+    (
+        seniority_level,
+        exp_mode,
+        exp_min_years,
+        exp_pref_years,
+        _exp_summary,
+        required_techs_tuple,
+        desirable_techs_tuple,
+    ) = resolve_opportunity_seniority_and_experience(opportunity)
+
+    seniority_compat, sen_inc, sen_exc, sen_unc = _evaluate_seniority_dimension(
+        seniority_level, ceiling_rank, practical_years, prefs
+    )
+    inclusions.extend(sen_inc)
+    exclusions.extend(sen_exc)
+    uncertainty_notes.extend(sen_unc)
+
+    exp_compat, exp_inc, exp_exc, exp_unc = _evaluate_experience_dimension(
+        exp_mode,
+        exp_min_years,
+        exp_pref_years,
+        seniority_level,
+        confirmed_target_years,
+        practical_years,
+    )
+    inclusions.extend(exp_inc)
+    exclusions.extend(exp_exc)
+    uncertainty_notes.extend(exp_unc)
+
+    # 8. Tecnologias prioritárias (preferências) separadas de requisitos obrigatórios (requisitos da vaga)
     matched_priorities: list[str] = []
     title_only_priorities: list[str] = []
     missing_priorities: list[str] = []
@@ -494,6 +933,59 @@ def evaluate_opportunity_for_user(
             title_only_priorities.append(term)
         else:
             missing_priorities.append(term)
+
+    required_techs = list(required_techs_tuple)
+    desirable_techs = list(desirable_techs_tuple)
+    matched_required: list[str] = []
+    missing_required: list[str] = []
+
+    if required_techs:
+        for req_tech in required_techs:
+            if _skill_matches_tech(req_tech, candidate_tokens):
+                matched_required.append(req_tech)
+            else:
+                missing_required.append(req_tech)
+
+    matched_skills: list[str] = list(matched_required)
+    for tag in list(opportunity.technologies or []) + desirable_techs:
+        if _skill_matches_tech(tag, candidate_tokens) and tag not in matched_skills:
+            matched_skills.append(tag)
+
+    technical_compatibility = "unknown"
+    if area_compatibility == "incompatible":
+        technical_compatibility = "incompatible"
+    elif required_techs:
+        if not candidate_tokens and not has_explicit_skills:
+            technical_compatibility = "unknown"
+            uncertainty_notes.append(
+                f"A vaga exige {', '.join(required_techs[:4])}; preencha habilidades no perfil para validar aderência técnica."
+            )
+        elif not missing_required:
+            technical_compatibility = "compatible"
+            inclusions.append(
+                f"Requisitos técnicos obrigatórios atendidos pelo perfil: {', '.join(matched_required[:5])}."
+            )
+        elif len(matched_required) == 0 or (len(matched_required) < len(required_techs) / 2):
+            technical_compatibility = "incompatible"
+            exclusions.append(
+                f"Requisito técnico obrigatório não identificado no perfil: {', '.join(missing_required[:5])}."
+            )
+        else:
+            technical_compatibility = "potential"
+            uncertainty_notes.append(
+                f"Atende parcialmente aos requisitos obrigatórios; revisar: {', '.join(missing_required[:4])}."
+            )
+    else:
+        # Sem requisitos técnicos obrigatórios extraídos da descrição: tags nunca viram bloqueio
+        if matched_skills or matched_priorities:
+            technical_compatibility = "compatible"
+        elif opportunity.technologies:
+            technical_compatibility = "potential"
+            uncertainty_notes.append(
+                "Sem requisito técnico obrigatório explícito; validar afinidade com as tecnologias listadas."
+            )
+        else:
+            technical_compatibility = "unknown"
 
     if area_compatibility == "compatible":
         if matched_priorities:
@@ -517,15 +1009,52 @@ def evaluate_opportunity_for_user(
                 "A vaga não lista tecnologias explícitas para confirmar stack prioritária."
             )
 
-    eligible = len(exclusions) == 0 and area_compatibility == "compatible"
+    # 9. Consolidação das 6 dimensões em overall_compatibility e eligible
+    has_hard_exclusion = (
+        len(exclusions) > 0
+        or area_compatibility != "compatible"
+        or seniority_compat == "incompatible"
+        or exp_compat == "incompatible"
+        or technical_compatibility == "incompatible"
+        or contract_compatibility == "incompatible"
+        or geo_status == "excluded"
+    )
+    has_uncertainty_or_potential = (
+        geo_status == "unknown"
+        or seniority_compat in {"potential", "unknown"}
+        or exp_compat in {"potential", "unknown"}
+        or technical_compatibility in {"potential", "unknown"}
+        or contract_compatibility == "unknown"
+        or opp_status in {"unknown", "unconfirmed", "source_unavailable"}
+    )
+
+    if has_hard_exclusion:
+        overall_compatibility = "incompatible"
+        eligible = False
+    elif has_uncertainty_or_potential:
+        overall_compatibility = "potential"
+        eligible = True
+    else:
+        overall_compatibility = "compatible"
+        eligible = True
+
     return OpportunityMatchEvaluation(
         eligible=eligible,
+        overall_compatibility=overall_compatibility,
         geographic_eligibility=geo_status,
         area_compatibility=area_compatibility,
+        contract_compatibility=contract_compatibility,
+        seniority_compatibility=seniority_compat,
+        experience_compatibility=exp_compat,
+        technical_compatibility=technical_compatibility,
         matched_areas=matched_areas,
         matched_technologies=matched_priorities if area_compatibility == "compatible" else [],
+        matched_skills=matched_skills if area_compatibility == "compatible" else [],
+        required_technologies=required_techs,
+        missing_required_technologies=missing_required,
+        desirable_technologies=desirable_techs,
         missing_priority_technologies=missing_priorities[:5] if not matched_priorities else [],
-        uncertainty_notes=uncertainty_notes,
-        inclusion_reasons=inclusions,
-        exclusion_reasons=exclusions,
+        uncertainty_notes=list(dict.fromkeys(uncertainty_notes)),
+        inclusion_reasons=list(dict.fromkeys(inclusions)),
+        exclusion_reasons=list(dict.fromkeys(exclusions)),
     )
