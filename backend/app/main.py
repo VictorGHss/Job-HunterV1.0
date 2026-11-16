@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import auth, health, opportunities, profile
+from app.api.routes import applications, auth, health, opportunities, profile
 from app.core.config import settings
 
 logger = logging.getLogger("job_hunter")
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     application.include_router(auth.router, prefix=api_prefix)
     application.include_router(profile.router, prefix=api_prefix)
     application.include_router(opportunities.router, prefix=api_prefix)
+    application.include_router(applications.router, prefix=api_prefix)
 
     return application
 

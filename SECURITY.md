@@ -98,6 +98,14 @@ Este documento registra as decisões arquiteturais de segurança implementadas n
 - **Governança Explícita de Habilitação, Rastreabilidade e Ciclo de Vida (Fases 02.1 a 02.5):**
   - `SourceDefinition` declara explicitamente `enabled_by_default` e `disabled_reason`. Fontes sem conformidade confirmada para agregação multiusuário (atualmente `remotive`, aguardando esclarecimento/autorização escrita sobre os Termos de Uso gerais de março/2026) permanecem desabilitadas por padrão (`enabled=false`).
   - `ensure_default_sources` aplica bloqueios padrão de conformidade no banco sem nunca reativar automaticamente fontes desabilitadas manualmente pelo operador.
+
+---
+
+## 8. Isolamento e Integridade do Pipeline de Candidaturas (Fase 03.1)
+
+- **Propriedade Estrita (`user_id`):** Candidaturas (`applications`) e histórico (`application_status_history`) pertencem exclusivamente ao usuário proprietário, retornando `404 Not Found` uniforme para qualquer acesso, alteração ou vinculação a oportunidade privada de terceiros.
+- **Imutabilidade do Catálogo Externo e Snapshots:** Criar, atualizar, mover ou excluir candidaturas nunca altera registros da tabela `opportunities`. A remoção de uma oportunidade privada vinculada aplica `ON DELETE SET NULL`, preservando integralmente o histórico e os snapshots do processo seletivo.
+- **Proteção Contra Remoção Silenciosa de Histórico:** Candidaturas já enviadas, encerradas ou com histórico de transições recusam exclusão por padrão (`409 Conflict`), exigindo confirmação explícita (`confirm_history_deletion=true`). Todos os textos e URLs passam por `sanitize_plain_text`, `sanitize_external_html_text` e `validate_safe_external_url`.
   - `sync_sources` impede qualquer requisição HTTP externa quando `source.enabled == False` ou `enabled_by_default == False`, recusando `--source <slug>` explicitamente com erro e garantindo que `--force` ignore somente o intervalo mínimo entre coletas.
   - **Rastreabilidade Normalizada e Preservação de Links (`opportunity_source_links`):** Nenhuma deduplicação apaga ou sobrescreve URLs originais de publicação ou candidatura (`applicationLink` da Himalayas com `?utm_source=api`, links diretos da Jobicy e Remote OK sem `nofollow`, e URLs de issues no GitHub). Todas as ocorrências primárias e secundárias são persistidas individualmente em `opportunity_source_links`.
   - **Direitos sobre Conteúdo de Terceiros e LGPD/PII (`github_backend_br` e `github_frontend_br`):** A licença MIT dos repositórios comunitários aplica-se à estrutura do repositório, não suprimindo direitos de terceiros nem proteção de dados pessoais; por isso, e-mails e telefones pessoais em issues abertas sofrem redação obrigatória (`redact_contact_pii`) antes da persistência e o candidato é sempre direcionado à issue oficial no GitHub.

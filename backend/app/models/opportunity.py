@@ -301,6 +301,10 @@ class Opportunity(Base, TimestampMixin):
         back_populates="opportunity",
         cascade="all, delete-orphan",
     )
+    applications = relationship(
+        "Application",
+        back_populates="opportunity",
+    )
 
 
 class OpportunitySourceLink(Base, TimestampMixin):

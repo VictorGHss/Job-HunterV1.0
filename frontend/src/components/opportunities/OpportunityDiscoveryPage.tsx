@@ -8,6 +8,7 @@ import {
   ChevronRight,
   ExternalLink,
   EyeOff,
+  FileCheck2,
   Filter,
   Loader2,
   MapPin,
@@ -46,6 +47,7 @@ interface OpportunityDiscoveryPageProps {
   subtitle: string;
   refreshTrigger?: number;
   onOpenManualModal: (defaultCategory: OpportunityType) => void;
+  onOpenApplications?: (applicationId?: string) => void;
   preferencesSummary?: React.ReactNode;
 }
 
@@ -122,6 +124,18 @@ const OVERALL_COMPAT_LABELS: Record<OverallCompatibility, string> = {
   incompatible: "Incompatível",
 };
 
+const APPLICATION_STAGE_LABELS: Record<string, string> = {
+  interested: "Interesse",
+  preparing: "Preparação",
+  applied: "Candidatura enviada",
+  assessment: "Teste técnico",
+  interview: "Entrevista",
+  offer: "Proposta",
+  accepted: "Aprovado",
+  rejected: "Rejeitado",
+  withdrawn: "Desistência",
+};
+
 function formatDatePtBr(iso: string | null): string {
   if (!iso) return "Data não informada";
   try {
@@ -157,6 +171,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   subtitle,
   refreshTrigger = 0,
   onOpenManualModal,
+  onOpenApplications,
   preferencesSummary,
 }) => {
   const [items, setItems] = useState<Opportunity[]>([]);
@@ -193,6 +208,10 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
 
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [trackingMessage, setTrackingMessage] = useState<{
+    text: string;
+    applicationId?: string;
+  } | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -336,6 +355,40 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
       }
     } catch {
       setErrorMessage("Não foi possível atualizar o descarte da vaga.");
+    } finally {
+      setActionBusyId(null);
+    }
+  }
+
+  async function handleTrackApplication(opp: Opportunity) {
+    setActionBusyId(opp.id);
+    setErrorMessage(null);
+    setTrackingMessage(null);
+    try {
+      const created = await api.applications.create({
+        opportunity_id: opp.id,
+      });
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === opp.id
+            ? {
+                ...item,
+                tracked_application_id: created.id,
+                tracked_application_status: created.status,
+              }
+            : item
+        )
+      );
+      setTrackingMessage({
+        text: `Candidatura para "${opp.title}" adicionada ao pipeline em "${created.status_label}".`,
+        applicationId: created.id,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : "Não foi possível iniciar o acompanhamento desta candidatura.";
+      setErrorMessage(msg);
     } finally {
       setActionBusyId(null);
     }
@@ -627,6 +680,24 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
         </div>
       )}
 
+      {trackingMessage && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-xs">
+          <span className="font-medium text-foreground">
+            {trackingMessage.text}
+          </span>
+          {onOpenApplications && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onOpenApplications(trackingMessage.applicationId)}
+            >
+              Abrir no Kanban
+            </Button>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <Card>
           <CardContent className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
@@ -787,6 +858,38 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
+                      {opp.tracked_application_id ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            onOpenApplications?.(opp.tracked_application_id || undefined)
+                          }
+                        >
+                          <FileCheck2 className="mr-1.5 h-4 w-4 text-primary" />
+                          No pipeline:{" "}
+                          {APPLICATION_STAGE_LABELS[
+                            opp.tracked_application_status || ""
+                          ] || "Ativa"}
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="default"
+                          disabled={busy}
+                          onClick={() => handleTrackApplication(opp)}
+                        >
+                          <FileCheck2 className="mr-1.5 h-4 w-4" />
+                          {opp.closed_applications_count &&
+                          opp.closed_applications_count > 0
+                            ? "Acompanhar nova candidatura"
+                            : "Acompanhar candidatura"}
+                        </Button>
+                      )}
+
                       <Button
                         type="button"
                         size="sm"

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import type {
   FullProfileBundle,
   Opportunity,
@@ -622,6 +622,268 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
     await waitFor(() => {
       expect(
         screen.getByText(/Nenhuma oportunidade encontrada com os filtros atuais/i)
+      ).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Job Hunter Frontend - Fase 03.1 Pipeline de Candidaturas", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+  });
+
+  it("acompanha vaga do catálogo, renderiza Kanban/indicadores, sinaliza prazo vencido e faz reversão em falha de movimentação", async () => {
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
+
+    const oppJr = buildMockOpportunity();
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [oppJr],
+      total: 1,
+      page: 1,
+      page_size: 10,
+      total_pages: 1,
+    });
+
+    const createdFromOpp = {
+      id: "app-opp-1",
+      opportunity_id: "opp-1",
+      opportunity_source_status: "active",
+      company_name: "Acme Cloud",
+      role_title: "Junior Python Backend Developer",
+      personal_summary: "Build FastAPI services.",
+      source_name: "Remote OK",
+      source_url: "https://remoteok.com/remote-jobs/junior-python-109001",
+      application_url: "https://remoteok.com/remote-jobs/junior-python-109001",
+      location_text: "Worldwide",
+      employment_type: "pj" as const,
+      work_mode: "remote" as const,
+      seniority_level: "junior" as const,
+      status: "interested" as const,
+      status_label: "Interesse",
+      is_closed: false,
+      applied_at: null,
+      interview_at: null,
+      assessment_deadline_at: null,
+      expected_response_at: null,
+      next_action: "Preparar portfólio",
+      next_action_due_at: "2020-01-01T12:00:00Z",
+      next_deadline_at: "2020-01-01T12:00:00Z",
+      next_deadline_label: "Próxima ação",
+      notes: "Vaga aderente.",
+      closed_at: null,
+      created_at: "2026-11-16T00:00:00Z",
+      updated_at: "2026-11-16T00:10:00Z",
+      status_history: [
+        {
+          id: "h-1",
+          from_status: null,
+          from_status_label: null,
+          to_status: "interested",
+          to_status_label: "Interesse",
+          note: "Candidatura criada a partir de oportunidade do catálogo.",
+          changed_at: "2026-11-16T00:00:00Z",
+        },
+      ],
+    };
+
+    const closedItem = {
+      ...createdFromOpp,
+      id: "app-closed-1",
+      opportunity_id: null,
+      role_title: "Estágio Backend Encerrado",
+      company_name: "Beta Co",
+      status: "rejected" as const,
+      status_label: "Rejeitado",
+      is_closed: true,
+      next_deadline_at: null,
+      next_deadline_label: null,
+      closed_at: "2026-11-10T12:00:00Z",
+    };
+
+    const createAppSpy = vi
+      .spyOn(api.applications, "create")
+      .mockResolvedValue(createdFromOpp);
+
+    vi.spyOn(api.applications, "kanban").mockResolvedValue({
+      columns: [
+        {
+          status: "interested",
+          label: "Interesse",
+          is_closed: false,
+          count: 1,
+          items: [createdFromOpp],
+        },
+        {
+          status: "preparing",
+          label: "Preparação",
+          is_closed: false,
+          count: 0,
+          items: [],
+        },
+        {
+          status: "applied",
+          label: "Candidatura enviada",
+          is_closed: false,
+          count: 0,
+          items: [],
+        },
+        {
+          status: "assessment",
+          label: "Teste técnico",
+          is_closed: false,
+          count: 0,
+          items: [],
+        },
+        {
+          status: "interview",
+          label: "Entrevista",
+          is_closed: false,
+          count: 0,
+          items: [],
+        },
+        {
+          status: "offer",
+          label: "Proposta",
+          is_closed: false,
+          count: 0,
+          items: [],
+        },
+      ],
+      closed_columns: [
+        {
+          status: "accepted",
+          label: "Aprovado",
+          is_closed: true,
+          count: 0,
+          items: [],
+        },
+        {
+          status: "rejected",
+          label: "Rejeitado",
+          is_closed: true,
+          count: 1,
+          items: [closedItem],
+        },
+        {
+          status: "withdrawn",
+          label: "Desistência",
+          is_closed: true,
+          count: 0,
+          items: [],
+        },
+      ],
+      closed_items: [closedItem],
+      indicators: {
+        total_count: 2,
+        active_count: 1,
+        applied_count: 0,
+        assessment_count: 0,
+        interview_count: 0,
+        offer_count: 0,
+        accepted_count: 0,
+        rejected_count: 1,
+        withdrawn_count: 0,
+        closed_count: 1,
+        status_counts: {
+          interested: 1,
+          preparing: 0,
+          applied: 0,
+          assessment: 0,
+          interview: 0,
+          offer: 0,
+          accepted: 0,
+          rejected: 1,
+          withdrawn: 0,
+        },
+      },
+      labels: {
+        interested: "Interesse",
+        preparing: "Preparação",
+        applied: "Candidatura enviada",
+        assessment: "Teste técnico",
+        interview: "Entrevista",
+        offer: "Proposta",
+        accepted: "Aprovado",
+        rejected: "Rejeitado",
+        withdrawn: "Desistência",
+      },
+    });
+
+    vi.spyOn(api.applications, "changeStatus").mockRejectedValueOnce(
+      new ApiError("Falha simulada de servidor", 500)
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    // 1. Navega para Desenvolvedor Júnior e acompanha vaga do catálogo
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Acompanhar candidatura/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Acompanhar candidatura/i })
+    );
+    await waitFor(() => {
+      expect(createAppSpy).toHaveBeenCalledWith({ opportunity_id: "opp-1" });
+      expect(
+        screen.getByRole("button", { name: /No pipeline: Interesse/i })
+      ).toBeInTheDocument();
+    });
+
+    // 2. Navega para Candidaturas e valida Kanban, prazo vencido, encerradas separadas e reversão em erro 500
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Candidaturas$/i })[0]
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("Junior Python Backend Developer").length
+      ).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.getByText(/Candidaturas ativas/i)).toBeInTheDocument();
+    expect(
+      screen.getByTestId("closed-applications-section")
+    ).toHaveTextContent("Estágio Backend Encerrado");
+    expect(screen.getAllByText(/Prazo vencido/i).length).toBeGreaterThanOrEqual(
+      1
+    );
+
+    // Simula falha de movimentação e valida reversão otimista + exibição de erro
+    const desktopColSelect = screen.getByLabelText(
+      /Mover etapa de Junior Python Backend Developer/i
+    );
+    fireEvent.change(desktopColSelect, { target: { value: "applied" } });
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Falha simulada de servidor/i)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByLabelText(/Mover etapa de Junior Python Backend Developer/i)
+      ).toHaveValue("interested");
+    });
+
+    // Abre detalhes e verifica histórico de movimentações
+    fireEvent.click(screen.getAllByRole("button", { name: /Abrir detalhes/i })[0]);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Histórico de Movimentações \(1\)/i)
       ).toBeInTheDocument();
     });
   });

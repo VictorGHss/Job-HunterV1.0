@@ -6,6 +6,20 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.3.1] - 2026-11-16 — Fase 03.1: Pipeline de Gestão de Candidaturas
+
+### Adicionado
+- **Modelo de Candidaturas e Histórico (`0007_applications_pipeline`):**
+  - Novas tabelas `applications` e `application_status_history` isoladas por `user_id` (`ON DELETE CASCADE`), com vínculo opcional `opportunity_id` (`ON DELETE SET NULL`) e snapshots completos da vaga (`company_name`, `role_title`, `personal_summary`, `source_name`, `source_url`, `application_url`, `location_text`, `employment_type`, `work_mode`, `seniority_level`).
+  - Nove etapas oficiais com rótulos em português: `interested` (`Interesse`), `preparing` (`Preparação`), `applied` (`Candidatura enviada`), `assessment` (`Teste técnico`), `interview` (`Entrevista`), `offer` (`Proposta`), além dos estados encerrados `accepted` (`Aprovado`), `rejected` (`Rejeitado`) e `withdrawn` (`Desistência`).
+- **API de Candidaturas e Indicadores (`applications.py`, `application_service.py`):**
+  - Endpoints autenticados e protegidos por CSRF sob `/api/v1/applications` (`GET`, `POST`, `GET /kanban`, `GET /indicators`, `GET /{id}`, `PUT/PATCH /{id}`, `PATCH /{id}/status`, `DELETE /{id}`), prevenção de duplicidade ativa (`409 Conflict`) com suporte a nova candidatura após encerramento, preservação de imutabilidade das oportunidades externas, proteção contra exclusão silenciosa de processos com histórico (`confirm_history_deletion`) e validação anti-SSRF/XSS.
+- **Integração com Catálogo e Interface Kanban (`ApplicationsPipelinePage.tsx`, `OpportunityDiscoveryPage.tsx`):**
+  - Ação **Acompanhar candidatura** nos cards de oportunidades (exibindo etapa em andamento ou opção de nova candidatura após encerramento, sem envio automático).
+  - Seção **Candidaturas** com indicadores reais, quadro Kanban responsivo (6 colunas no desktop e pills por etapa no mobile), seção separada para encerradas, destaques de prazo futuro/vencido, formulário manual e painel detalhado com datas, próximos passos, anotações e histórico de movimentações.
+
+---
+
 ## [0.2.6.1] - 2026-11-16 — Fase 02.6.1: Correções de Senioridade, Experiência e Independência Dimensional
 
 ### Corrigido

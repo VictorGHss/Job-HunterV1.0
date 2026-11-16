@@ -1,4 +1,12 @@
 import type {
+  ApplicationCreatePayload,
+  ApplicationIndicators,
+  ApplicationItem,
+  ApplicationKanbanResponse,
+  ApplicationListResponse,
+  ApplicationStatus,
+  ApplicationStatusChangePayload,
+  ApplicationUpdatePayload,
   AuthSessionResponse,
   Education,
   EducationPayload,
@@ -292,6 +300,79 @@ export const api = {
       return request<OpportunityUserState>(`/opportunities/${id}/state`, {
         method: "PATCH",
         body: JSON.stringify(payload),
+      });
+    },
+  },
+  applications: {
+    kanban(q?: string): Promise<ApplicationKanbanResponse> {
+      const query = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+      return request<ApplicationKanbanResponse>(`/applications/kanban${query}`);
+    },
+    indicators(): Promise<ApplicationIndicators> {
+      return request<ApplicationIndicators>("/applications/indicators");
+    },
+    list(
+      params: {
+        status?: ApplicationStatus;
+        include_closed?: boolean;
+        closed_only?: boolean;
+        opportunity_id?: string;
+        q?: string;
+        sort?: "updated_desc" | "created_desc" | "deadline_asc";
+        page?: number;
+        page_size?: number;
+      } = {}
+    ): Promise<ApplicationListResponse> {
+      const search = new URLSearchParams();
+      if (params.status) search.set("status", params.status);
+      if (params.include_closed !== undefined)
+        search.set("include_closed", String(params.include_closed));
+      if (params.closed_only !== undefined)
+        search.set("closed_only", String(params.closed_only));
+      if (params.opportunity_id)
+        search.set("opportunity_id", params.opportunity_id);
+      if (params.q && params.q.trim()) search.set("q", params.q.trim());
+      if (params.sort) search.set("sort", params.sort);
+      if (params.page) search.set("page", String(params.page));
+      if (params.page_size) search.set("page_size", String(params.page_size));
+      const query = search.toString();
+      return request<ApplicationListResponse>(
+        query ? `/applications?${query}` : "/applications"
+      );
+    },
+    get(id: string): Promise<ApplicationItem> {
+      return request<ApplicationItem>(`/applications/${id}`);
+    },
+    create(payload: ApplicationCreatePayload): Promise<ApplicationItem> {
+      return request<ApplicationItem>("/applications", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    update(
+      id: string,
+      payload: ApplicationUpdatePayload
+    ): Promise<ApplicationItem> {
+      return request<ApplicationItem>(`/applications/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    },
+    changeStatus(
+      id: string,
+      payload: ApplicationStatusChangePayload
+    ): Promise<ApplicationItem> {
+      return request<ApplicationItem>(`/applications/${id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    remove(id: string, confirmHistoryDeletion = false): Promise<void> {
+      const suffix = confirmHistoryDeletion
+        ? "?confirm_history_deletion=true"
+        : "";
+      return request<void>(`/applications/${id}${suffix}`, {
+        method: "DELETE",
       });
     },
   },

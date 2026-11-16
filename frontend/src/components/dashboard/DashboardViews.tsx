@@ -6,15 +6,14 @@ import {
   CheckCircle2,
   Clock,
   Code2,
-  FileCheck2,
   FolderGit2,
   Globe2,
   GraduationCap,
   Languages,
   MapPin,
-  ShieldAlert,
   Wrench,
 } from "lucide-react";
+import { ApplicationsPipelinePage } from "@/components/applications/ApplicationsPipelinePage";
 import { Badge, VerificationBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -358,11 +357,13 @@ export function InternshipsSectionView({
   onNavigate,
   refreshTrigger = 0,
   onOpenManualModal = () => undefined,
+  onOpenApplications,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
   refreshTrigger?: number;
   onOpenManualModal?: (category: OpportunityType) => void;
+  onOpenApplications?: (applicationId?: string) => void;
 }) {
   const prefs = bundle.profile.preferences.internships;
   const preferencesCard = (
@@ -434,6 +435,7 @@ export function InternshipsSectionView({
       subtitle="Oportunidades coletadas e manuais avaliadas de forma determinística conforme seu perfil."
       refreshTrigger={refreshTrigger}
       onOpenManualModal={onOpenManualModal}
+      onOpenApplications={onOpenApplications}
       preferencesSummary={preferencesCard}
     />
   );
@@ -444,11 +446,13 @@ export function JuniorDeveloperSectionView({
   onNavigate,
   refreshTrigger = 0,
   onOpenManualModal = () => undefined,
+  onOpenApplications,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
   refreshTrigger?: number;
   onOpenManualModal?: (category: OpportunityType) => void;
+  onOpenApplications?: (applicationId?: string) => void;
 }) {
   const prefs = bundle.profile.preferences.junior_developer;
   const preferencesCard = (
@@ -517,6 +521,7 @@ export function JuniorDeveloperSectionView({
       subtitle="Filtragem contratual, geográfica e técnica aplicada no servidor para vagas júnior."
       refreshTrigger={refreshTrigger}
       onOpenManualModal={onOpenManualModal}
+      onOpenApplications={onOpenApplications}
       preferencesSummary={preferencesCard}
     />
   );
@@ -527,11 +532,13 @@ export function FreelancersSectionView({
   onNavigate,
   refreshTrigger = 0,
   onOpenManualModal = () => undefined,
+  onOpenApplications,
 }: {
   bundle: FullProfileBundle;
   onNavigate: (section: NavSection) => void;
   refreshTrigger?: number;
   onOpenManualModal?: (category: OpportunityType) => void;
+  onOpenApplications?: (applicationId?: string) => void;
 }) {
   const freelance = bundle.profile.preferences.freelance;
   const restrictions = bundle.profile.preferences.source_restrictions;
@@ -605,74 +612,27 @@ export function FreelancersSectionView({
       subtitle="Descoberta de contratos remotos e cadastro manual de projetos freelance."
       refreshTrigger={refreshTrigger}
       onOpenManualModal={onOpenManualModal}
+      onOpenApplications={onOpenApplications}
       preferencesSummary={preferencesCard}
     />
   );
 }
 
 export function ApplicationsSectionView({
-  bundle,
+  initialApplicationId = null,
+  onClearInitialApplication,
   onNavigate,
 }: {
-  bundle: FullProfileBundle;
+  bundle?: FullProfileBundle;
+  initialApplicationId?: string | null;
+  onClearInitialApplication?: () => void;
   onNavigate: (section: NavSection) => void;
 }) {
-  const { validation_summary } = bundle;
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2 text-primary text-xs font-semibold">
-            <FileCheck2 className="h-4 w-4" />
-            Governança & Preparação de Candidaturas
-          </div>
-          <CardTitle>Central de Candidaturas Supervisionadas</CardTitle>
-          <CardDescription>
-            Na Fase 01 estabelecemos a fonte única de verdade do seu perfil
-            profissional. A geração de currículos e propostas será conectada nas
-            próximas fases respeitando estritamente os fatos confirmados.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-2">
-            <div className="flex items-center gap-2 font-semibold text-sm">
-              <ShieldAlert className="h-4 w-4 text-primary" />
-              Salvaguardas Invioláveis do Job Hunter
-            </div>
-            <ul className="text-xs text-muted-foreground space-y-1.5">
-              <li>
-                1. A IA <strong>nunca</strong> inventará experiências,
-                tecnologias, resultados, competências, cursos ou qualificações.
-              </li>
-              <li>
-                2. Somente registros com status{" "}
-                <strong>Confirmado pelo usuário</strong> poderão ser utilizados
-                como fatos em currículos e propostas.
-              </li>
-              <li>
-                3. Nenhum teste seletivo será executado automaticamente e
-                nenhuma candidatura será enviada sem aprovação humana explícita.
-              </li>
-            </ul>
-          </div>
-
-          <div className="rounded-lg border border-border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <p className="text-sm font-semibold">
-                Status atual do seu dossiê profissional
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {validation_summary.confirmed_count} item(ns) confirmado(s) e{" "}
-                {validation_summary.pending_or_draft_count} item(ns) aguardando
-                revisão/confirmação.
-              </p>
-            </div>
-            <Button onClick={() => onNavigate("perfil")}>
-              Revisar e Confirmar Dados do Perfil
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+    <ApplicationsPipelinePage
+      initialApplicationId={initialApplicationId}
+      onClearInitialApplication={onClearInitialApplication}
+      onNavigateProfile={() => onNavigate("perfil")}
+    />
   );
 }

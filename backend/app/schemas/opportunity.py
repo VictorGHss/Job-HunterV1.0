@@ -143,6 +143,10 @@ class OpportunityResponse(BaseModel):
     source_links: list[OpportunitySourceLinkResponse] = Field(default_factory=list)
     user_state: OpportunityUserStateResponse
     match: OpportunityMatchEvaluation
+    tracked_application_id: uuid.UUID | None = None
+    tracked_application_status: str | None = None
+    closed_applications_count: int = 0
+    last_closed_application_status: str | None = None
 
 
 class OpportunityListResponse(BaseModel):

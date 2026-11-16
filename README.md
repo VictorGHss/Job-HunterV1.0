@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 02.6.1 — Correções de Senioridade, Experiência e Independência Dimensional
+- **Fase atual:** Fase 03.1 — Pipeline de Gestão de Candidaturas
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -53,12 +53,14 @@ job-hunter/
 │   │   │   ├── 0003_opportunity_discovery.py
 │   │   │   ├── 0004_professional_areas.py
 │   │   │   ├── 0005_lifecycle_traceability.py
-│   │   │   └── 0006_seniority_experience_matching.py
+│   │   │   ├── 0006_seniority_experience_matching.py
+│   │   │   └── 0007_applications_pipeline.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
 │   │   ├── api/
 │   │   │   ├── routes/
+│   │   │   │   ├── applications.py
 │   │   │   │   ├── auth.py
 │   │   │   │   ├── health.py
 │   │   │   │   ├── opportunities.py
@@ -71,10 +73,12 @@ job-hunter/
 │   │   │   ├── base.py
 │   │   │   └── session.py
 │   │   ├── models/
+│   │   │   ├── application.py
 │   │   │   ├── opportunity.py
 │   │   │   ├── profile.py
 │   │   │   └── user.py
 │   │   ├── schemas/
+│   │   │   ├── application.py
 │   │   │   ├── auth.py
 │   │   │   ├── opportunity.py
 │   │   │   └── profile.py
@@ -85,12 +89,14 @@ job-hunter/
 │   │   │   │   ├── opportunity_service.py
 │   │   │   │   ├── sanitization.py
 │   │   │   │   └── sync_service.py
+│   │   │   ├── application_service.py
 │   │   │   ├── auth_service.py
 │   │   │   └── profile_service.py
 │   │   ├── cli.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
+│   │   ├── test_applications_phase03.py
 │   │   ├── test_foundation_phase01.py
 │   │   └── test_opportunities_phase02.py
 │   ├── alembic.ini
@@ -218,7 +224,14 @@ docker exec job-hunter-backend python -m app.cli reclassify-opportunities --sour
 
 Oportunidades brasileiras locais, estágios acadêmicos ou freelas recebidos fora dos feeds podem ser cadastrados de forma privada pelo botão **Adicionar Oportunidade** ou via **Web Share Target (PWA)** no navegador/Android, sem raspagem automática de HTML pelo servidor.
 
-### 4.6. Encerrando o Ambiente
+### 4.6. Pipeline de Gestão de Candidaturas (Fase 03.1)
+A partir de qualquer vaga do catálogo (**Acompanhar candidatura**) ou diretamente na seção **Candidaturas** (cadastro manual avulso):
+- **Etapas Kanban (PT-BR):** `Interesse` (`interested`), `Preparação` (`preparing`), `Candidatura enviada` (`applied`), `Teste técnico` (`assessment`), `Entrevista` (`interview`) e `Proposta` (`offer`), mantendo os desfechos encerrados (`Aprovado`, `Rejeitado`, `Desistência`) em seção separada sem poluir o quadro ativo (com navegação em abas no mobile).
+- **Snapshots e Histórico Imutável:** preserva empresa, cargo, fonte, localidade, links, regime, modalidade e senioridade no momento do vínculo (`ON DELETE SET NULL` caso a oportunidade privada original seja removida), além de gravar atomicamente toda transição em `application_status_history`.
+- **Prevenção de Duplicação e Reaplicação:** impede múltiplas candidaturas ativas para a mesma oportunidade pelo mesmo usuário (`409 Conflict`), permitindo abrir uma nova tentativa quando o processo anterior estiver encerrado.
+- **Indicadores Reais e Controle Humano:** calcula métricas por etapa no backend (`GET /api/v1/applications/kanban` e `GET /api/v1/applications/indicators`), registra datas de envio, entrevista, teste técnico, retorno esperado e próxima ação, sem nenhum envio automático.
+
+### 4.7. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

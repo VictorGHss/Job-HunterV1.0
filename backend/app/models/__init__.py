@@ -1,3 +1,11 @@
+from app.models.application import (
+    ACTIVE_APPLICATION_STATUSES,
+    APPLICATION_STATUS_LABELS_PT,
+    CLOSED_APPLICATION_STATUSES,
+    Application,
+    ApplicationStatus,
+    ApplicationStatusHistory,
+)
 from app.models.opportunity import (
     EmploymentType,
     ExperienceRequirementMode,
@@ -32,7 +40,13 @@ from app.models.user import AccountStatus, AuthRateLimit, User, UserSession
 
 __all__ = [
     "AccountStatus",
+    "ACTIVE_APPLICATION_STATUSES",
+    "APPLICATION_STATUS_LABELS_PT",
+    "Application",
+    "ApplicationStatus",
+    "ApplicationStatusHistory",
     "AuthRateLimit",
+    "CLOSED_APPLICATION_STATUSES",
     "Education",
     "EducationStatus",
     "EmploymentType",

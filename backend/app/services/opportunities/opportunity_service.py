@@ -5,6 +5,11 @@ from datetime import UTC, datetime
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.application import (
+    ACTIVE_APPLICATION_STATUSES,
+    CLOSED_APPLICATION_STATUSES,
+    Application,
+)
 from app.models.opportunity import (
     EmploymentType,
     ExternalSourceStatus,
@@ -147,10 +152,63 @@ def _load_user_matching_context(db: Session, user_id: uuid.UUID):
     return (skills, experiences, educations, projects)
 
 
+def _load_user_application_tracking(
+    db: Session,
+    user_id: uuid.UUID,
+    opportunity_ids: list[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, tuple[uuid.UUID | None, str | None, int, str | None]]:
+    """Mapeia cada `opportunity_id` para candidatura ativa e histórico encerrado do usuário."""
+    stmt = (
+        select(Application)
+        .where(
+            Application.user_id == user_id,
+            Application.opportunity_id.is_not(None),
+        )
+        .order_by(Application.updated_at.desc())
+    )
+    if opportunity_ids is not None:
+        if not opportunity_ids:
+            return {}
+        stmt = stmt.where(Application.opportunity_id.in_(opportunity_ids))
+
+    rows = db.execute(stmt).scalars().all()
+    grouped: dict[uuid.UUID, dict[str, object]] = {}
+    for row in rows:
+        if row.opportunity_id is None:
+            continue
+        bucket = grouped.setdefault(
+            row.opportunity_id,
+            {
+                "active_id": None,
+                "active_status": None,
+                "closed_count": 0,
+                "last_closed_status": None,
+            },
+        )
+        if row.status in ACTIVE_APPLICATION_STATUSES and bucket["active_id"] is None:
+            bucket["active_id"] = row.id
+            bucket["active_status"] = row.status
+        elif row.status in CLOSED_APPLICATION_STATUSES:
+            bucket["closed_count"] = int(bucket["closed_count"]) + 1
+            if bucket["last_closed_status"] is None:
+                bucket["last_closed_status"] = row.status
+
+    return {
+        opp_id: (
+            data["active_id"],  # type: ignore[misc]
+            data["active_status"],  # type: ignore[misc]
+            int(data["closed_count"]),  # type: ignore[arg-type]
+            data["last_closed_status"],  # type: ignore[misc]
+        )
+        for opp_id, data in grouped.items()
+    }
+
+
 def _serialize_opportunity(
     opp: Opportunity,
     state: OpportunityUserState | None,
     match: OpportunityMatchEvaluation,
+    tracking: tuple[uuid.UUID | None, str | None, int, str | None] | None = None,
 ) -> OpportunityResponse:
     source_dto = (
         OpportunitySourcePublicResponse.model_validate(opp.source)
@@ -213,6 +271,10 @@ def _serialize_opportunity(
         source_links=_serialize_source_links(opp),
         user_state=state_dto,
         match=match,
+        tracked_application_id=tracking[0] if tracking else None,
+        tracked_application_status=tracking[1] if tracking else None,
+        closed_applications_count=tracking[2] if tracking else 0,
+        last_closed_application_status=tracking[3] if tracking else None,
     )
 
 
@@ -466,9 +528,15 @@ def list_opportunities(
     start = (safe_page - 1) * page_size
     end = start + page_size
 
+    page_rows = evaluated[start:end]
+    tracking_by_opp_id = _load_user_application_tracking(
+        db,
+        user.id,
+        opportunity_ids=[opp.id for opp, _, _ in page_rows],
+    )
     items = [
-        _serialize_opportunity(opp, state, match)
-        for opp, state, match in evaluated[start:end]
+        _serialize_opportunity(opp, state, match, tracking_by_opp_id.get(opp.id))
+        for opp, state, match in page_rows
     ]
 
     return OpportunityListResponse(
@@ -515,7 +583,8 @@ def get_opportunity_for_user(
         educations=educations,
         projects=projects,
     )
-    return _serialize_opportunity(opp, state, match)
+    tracking_map = _load_user_application_tracking(db, user.id, opportunity_ids=[opp.id])
+    return _serialize_opportunity(opp, state, match, tracking_map.get(opp.id))
 
 
 def create_manual_opportunity(
@@ -711,7 +780,8 @@ def update_manual_opportunity(
         educations=educations,
         projects=projects,
     )
-    return _serialize_opportunity(opp, state, match)
+    tracking_map = _load_user_application_tracking(db, user.id, opportunity_ids=[opp.id])
+    return _serialize_opportunity(opp, state, match, tracking_map.get(opp.id))
 
 
 def update_opportunity_user_state(

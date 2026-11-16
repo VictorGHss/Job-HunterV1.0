@@ -194,6 +194,9 @@ def test_alembic_migrations_up_and_down(tmp_path: Path):
         "skills",
         "languages",
         "professional_projects",
+        "opportunities",
+        "applications",
+        "application_status_history",
         "alembic_version",
     }
     assert expected_tables.issubset(tables)

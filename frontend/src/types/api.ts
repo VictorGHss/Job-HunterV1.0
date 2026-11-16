@@ -417,6 +417,10 @@ export interface Opportunity {
   source_links?: OpportunitySourceLink[];
   user_state: OpportunityUserState;
   match: OpportunityMatchEvaluation;
+  tracked_application_id?: string | null;
+  tracked_application_status?: string | null;
+  closed_applications_count?: number;
+  last_closed_application_status?: string | null;
 }
 
 export interface OpportunityListResponse {
@@ -471,4 +475,149 @@ export interface OpportunityUserStateUpdatePayload {
   is_saved?: boolean;
   is_dismissed?: boolean;
   mark_viewed?: boolean;
+}
+
+export type ApplicationStatus =
+  | "interested"
+  | "preparing"
+  | "applied"
+  | "assessment"
+  | "interview"
+  | "offer"
+  | "accepted"
+  | "rejected"
+  | "withdrawn";
+
+export interface ApplicationStatusHistoryItem {
+  id: string;
+  from_status: ApplicationStatus | string | null;
+  from_status_label: string | null;
+  to_status: ApplicationStatus | string;
+  to_status_label: string;
+  note: string | null;
+  changed_at: string;
+}
+
+export interface ApplicationItem {
+  id: string;
+  opportunity_id: string | null;
+  opportunity_source_status: string | null;
+  company_name: string | null;
+  role_title: string;
+  personal_summary: string | null;
+  source_name: string | null;
+  source_url: string | null;
+  application_url: string | null;
+  location_text: string | null;
+  employment_type: EmploymentType;
+  work_mode: WorkMode;
+  seniority_level: SeniorityLevel;
+  status: ApplicationStatus;
+  status_label: string;
+  is_closed: boolean;
+  applied_at: string | null;
+  interview_at: string | null;
+  assessment_deadline_at: string | null;
+  expected_response_at: string | null;
+  next_action: string | null;
+  next_action_due_at: string | null;
+  next_deadline_at: string | null;
+  next_deadline_label: string | null;
+  notes: string | null;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  status_history: ApplicationStatusHistoryItem[];
+}
+
+export interface ApplicationListResponse {
+  items: ApplicationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ApplicationIndicators {
+  total_count: number;
+  active_count: number;
+  applied_count: number;
+  assessment_count: number;
+  interview_count: number;
+  offer_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  withdrawn_count: number;
+  closed_count: number;
+  status_counts: Record<string, number>;
+}
+
+export interface ApplicationKanbanColumn {
+  status: ApplicationStatus;
+  label: string;
+  is_closed: boolean;
+  count: number;
+  items: ApplicationItem[];
+}
+
+export interface ApplicationKanbanResponse {
+  columns: ApplicationKanbanColumn[];
+  closed_columns: ApplicationKanbanColumn[];
+  closed_items: ApplicationItem[];
+  indicators: ApplicationIndicators;
+  labels: Record<string, string>;
+}
+
+export interface ApplicationCreatePayload {
+  opportunity_id?: string | null;
+  role_title?: string | null;
+  company_name?: string | null;
+  personal_summary?: string | null;
+  source_name?: string | null;
+  source_url?: string | null;
+  application_url?: string | null;
+  location_text?: string | null;
+  employment_type?: EmploymentType;
+  work_mode?: WorkMode;
+  seniority_level?: SeniorityLevel;
+  status?: ApplicationStatus;
+  applied_at?: string | null;
+  interview_at?: string | null;
+  assessment_deadline_at?: string | null;
+  expected_response_at?: string | null;
+  next_action?: string | null;
+  next_action_due_at?: string | null;
+  notes?: string | null;
+  status_note?: string | null;
+}
+
+export interface ApplicationUpdatePayload {
+  role_title?: string;
+  company_name?: string | null;
+  personal_summary?: string | null;
+  source_name?: string | null;
+  source_url?: string | null;
+  application_url?: string | null;
+  location_text?: string | null;
+  employment_type?: EmploymentType;
+  work_mode?: WorkMode;
+  seniority_level?: SeniorityLevel;
+  applied_at?: string | null;
+  interview_at?: string | null;
+  assessment_deadline_at?: string | null;
+  expected_response_at?: string | null;
+  next_action?: string | null;
+  next_action_due_at?: string | null;
+  notes?: string | null;
+}
+
+export interface ApplicationStatusChangePayload {
+  status: ApplicationStatus;
+  note?: string | null;
+  applied_at?: string | null;
+  interview_at?: string | null;
+  assessment_deadline_at?: string | null;
+  expected_response_at?: string | null;
+  next_action?: string | null;
+  next_action_due_at?: string | null;
 }

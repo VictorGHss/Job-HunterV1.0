@@ -112,11 +112,11 @@ export function AppShell({
                   Job Hunter
                 </span>
                 <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-semibold text-primary">
-                  Fase 02
+                  Fase 03.1
                 </span>
               </div>
               <p className="text-xs text-muted-foreground hidden sm:block">
-                Motor de descoberta de oportunidades & Perfil central
+                Descoberta, pipeline de candidaturas & Perfil central
               </p>
             </div>
           </div>

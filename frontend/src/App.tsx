@@ -44,6 +44,14 @@ export function JobHunterApp() {
     description?: string;
   } | null>(null);
   const [discoveryRefreshNonce, setDiscoveryRefreshNonce] = useState(0);
+  const [focusedApplicationId, setFocusedApplicationId] = useState<
+    string | null
+  >(null);
+
+  function handleOpenApplications(applicationId?: string) {
+    setFocusedApplicationId(applicationId || null);
+    setActiveSection("candidaturas");
+  }
 
   const loadBundle = useCallback(async () => {
     const data = await api.profile.getBundle();
@@ -148,6 +156,7 @@ export function JobHunterApp() {
             onNavigate={setActiveSection}
             refreshTrigger={discoveryRefreshNonce}
             onOpenManualModal={handleOpenManualModal}
+            onOpenApplications={handleOpenApplications}
           />
         )}
         {activeSection === "junior" && (
@@ -156,6 +165,7 @@ export function JobHunterApp() {
             onNavigate={setActiveSection}
             refreshTrigger={discoveryRefreshNonce}
             onOpenManualModal={handleOpenManualModal}
+            onOpenApplications={handleOpenApplications}
           />
         )}
         {activeSection === "freelancers" && (
@@ -164,11 +174,14 @@ export function JobHunterApp() {
             onNavigate={setActiveSection}
             refreshTrigger={discoveryRefreshNonce}
             onOpenManualModal={handleOpenManualModal}
+            onOpenApplications={handleOpenApplications}
           />
         )}
         {activeSection === "candidaturas" && (
           <ApplicationsSectionView
             bundle={bundle}
+            initialApplicationId={focusedApplicationId}
+            onClearInitialApplication={() => setFocusedApplicationId(null)}
             onNavigate={setActiveSection}
           />
         )}
