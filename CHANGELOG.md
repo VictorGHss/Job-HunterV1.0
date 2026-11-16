@@ -6,6 +6,18 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.3.1.1] - 2026-11-16 — Fase 03.1.1: Hardening de Concorrência do Pipeline
+
+### Corrigido / Endurecido
+- **Restrição Única Parcial no Banco (`0008_active_app_uniq`):**
+  - Criado o índice único parcial `uq_active_application_per_user_opp` em `applications (user_id, opportunity_id)` com predicado `opportunity_id IS NOT NULL AND status IN ('interested', 'preparing', 'applied', 'assessment', 'interview', 'offer')`, compatível com PostgreSQL 16 e SQLite, preservando múltiplos processos encerrados, candidaturas avulsas (`opportunity_id IS NULL`) e usuários distintos.
+- **Tratamento Seguro de `IntegrityError` e Rollback (`application_service.py`):**
+  - Adicionados `_is_active_application_unique_violation` e `_handle_commit_integrity_error` (capturando apenas violações de `uq_active_application_per_user_opp` via código/constraint PostgreSQL `23505` ou colunas do índice SQLite), executando `rollback()` antes de consultar qualquer atributo ORM ou relançar `ApplicationDuplicateError` -> HTTP `409 Conflict`, preservando integridade de sessão e evitando mascarar outras constraints.
+- **Testes de Concorrência Real e Migração (`test_applications_phase03.py`):**
+  - Cobertura determinística com duas sessões independentes em threads sincronizadas por `threading.Barrier` para criação e reabertura concorrente, inspeção de predicado no PostgreSQL 16 e SQLite e teste dedicado de `upgrade`/`downgrade` `0007 -> 0008 -> 0007` com dados preservados.
+
+---
+
 ## [0.3.1] - 2026-11-16 — Fase 03.1: Pipeline de Gestão de Candidaturas
 
 ### Adicionado

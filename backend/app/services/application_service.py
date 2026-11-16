@@ -4,10 +4,12 @@ from collections import Counter
 from datetime import UTC, datetime
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.application import (
     ACTIVE_APPLICATION_STATUSES,
+    ACTIVE_APPLICATION_UNIQUE_INDEX_NAME,
     APPLICATION_STATUS_LABELS_PT,
     CLOSED_APPLICATION_STATUSES,
     Application,
@@ -63,6 +65,101 @@ class ApplicationDuplicateError(ValueError):
 
 class ApplicationHistoryProtectedError(ValueError):
     """Impede exclusão silenciosa de candidatura com histórico relevante sem confirmação explícita."""
+
+
+def _query_active_duplicate(
+    db: Session,
+    user_id: uuid.UUID,
+    opportunity_id: uuid.UUID,
+    *,
+    exclude_application_id: uuid.UUID | None = None,
+) -> Application | None:
+    stmt = select(Application).where(
+        Application.user_id == user_id,
+        Application.opportunity_id == opportunity_id,
+        Application.status.in_(ACTIVE_APPLICATION_STATUSES),
+    )
+    if exclude_application_id is not None:
+        stmt = stmt.where(Application.id != exclude_application_id)
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def _find_active_duplicate(
+    db: Session,
+    user_id: uuid.UUID,
+    opportunity_id: uuid.UUID,
+    *,
+    exclude_application_id: uuid.UUID | None = None,
+) -> Application | None:
+    return _query_active_duplicate(
+        db,
+        user_id,
+        opportunity_id,
+        exclude_application_id=exclude_application_id,
+    )
+
+
+def _is_active_application_unique_violation(exc: IntegrityError) -> bool:
+    """
+    Identifica exclusivamente violações do índice único parcial
+    `uq_active_application_per_user_opp` no PostgreSQL ou SQLite,
+    preservando outras constraints (FK, NOT NULL, etc.).
+    """
+    orig = exc.orig
+    if orig is None:
+        return False
+
+    # PostgreSQL (psycopg / psycopg2)
+    pgcode = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    diag = getattr(orig, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None) if diag is not None else None
+    if pgcode == "23505":
+        if constraint_name is not None:
+            return constraint_name == ACTIVE_APPLICATION_UNIQUE_INDEX_NAME
+        return ACTIVE_APPLICATION_UNIQUE_INDEX_NAME in str(orig)
+
+    # SQLite: "UNIQUE constraint failed: applications.user_id, applications.opportunity_id"
+    msg_low = str(orig).lower()
+    if ACTIVE_APPLICATION_UNIQUE_INDEX_NAME in msg_low:
+        return True
+    if (
+        "unique constraint failed" in msg_low
+        and "applications.user_id" in msg_low
+        and "applications.opportunity_id" in msg_low
+    ):
+        return True
+
+    return False
+
+
+def _handle_commit_integrity_error(
+    db: Session,
+    exc: IntegrityError,
+    *,
+    user_id: uuid.UUID,
+    opportunity_id: uuid.UUID | None,
+    exclude_application_id: uuid.UUID | None = None,
+) -> None:
+    db.rollback()
+    if opportunity_id is None or not _is_active_application_unique_violation(exc):
+        raise exc
+
+    existing = _query_active_duplicate(
+        db,
+        user_id,
+        opportunity_id,
+        exclude_application_id=exclude_application_id,
+    )
+    existing_id = existing.id if existing is not None else uuid.UUID(int=0)
+    status_label = (
+        APPLICATION_STATUS_LABELS_PT.get(existing.status, existing.status)
+        if existing is not None
+        else "ativa"
+    )
+    raise ApplicationDuplicateError(
+        f"Já existe uma candidatura ativa para esta oportunidade na etapa '{status_label}'.",
+        existing_application_id=existing_id,
+    ) from exc
 
 
 def _ensure_utc(value: datetime | None) -> datetime | None:
@@ -205,7 +302,9 @@ def create_application(
     payload: ApplicationCreate,
 ) -> ApplicationResponse:
     now = datetime.now(UTC)
+    owner_user_id = user.id
     opp: Opportunity | None = None
+    opp_id: uuid.UUID | None = None
 
     if payload.opportunity_id is not None:
         opp = db.execute(
@@ -215,7 +314,7 @@ def create_application(
                 Opportunity.id == payload.opportunity_id,
                 or_(
                     Opportunity.source_id.is_not(None),
-                    Opportunity.created_by_user_id == user.id,
+                    Opportunity.created_by_user_id == owner_user_id,
                 ),
             )
         ).scalar_one_or_none()
@@ -223,15 +322,10 @@ def create_application(
             raise ApplicationOpportunityNotFoundError(
                 "Oportunidade referenciada não encontrada para acompanhamento."
             )
+        opp_id = opp.id
 
-        existing_active = db.execute(
-            select(Application).where(
-                Application.user_id == user.id,
-                Application.opportunity_id == opp.id,
-                Application.status.in_(ACTIVE_APPLICATION_STATUSES),
-            )
-        ).scalar_one_or_none()
-        if existing_active is not None:
+        existing_active = _find_active_duplicate(db, owner_user_id, opp_id)
+        if existing_active is not None and payload.status.value in ACTIVE_APPLICATION_STATUSES:
             status_label = APPLICATION_STATUS_LABELS_PT.get(
                 existing_active.status, existing_active.status
             )
@@ -317,9 +411,11 @@ def create_application(
         applied_at = now
     closed_at = now if initial_status in CLOSED_APPLICATION_STATUSES else None
 
+    app_row_id = uuid.uuid4()
     app_row = Application(
-        user_id=user.id,
-        opportunity_id=opp.id if opp is not None else None,
+        id=app_row_id,
+        user_id=owner_user_id,
+        opportunity_id=opp_id,
         company_name=company_name,
         role_title=role_title,
         personal_summary=personal_summary,
@@ -340,26 +436,34 @@ def create_application(
         notes=payload.notes,
         closed_at=closed_at,
     )
-    db.add(app_row)
-    db.flush()
+    try:
+        db.add(app_row)
+        db.flush()
 
-    initial_history = ApplicationStatusHistory(
-        application_id=app_row.id,
-        user_id=user.id,
-        from_status=None,
-        to_status=initial_status,
-        note=payload.status_note or (
-            "Candidatura criada a partir de oportunidade do catálogo."
-            if opp is not None
-            else "Candidatura criada manualmente."
-        ),
-        changed_at=now,
-        created_at=now,
-    )
-    db.add(initial_history)
-    db.commit()
+        initial_history = ApplicationStatusHistory(
+            application_id=app_row_id,
+            user_id=owner_user_id,
+            from_status=None,
+            to_status=initial_status,
+            note=payload.status_note or (
+                "Candidatura criada a partir de oportunidade do catálogo."
+                if opp_id is not None
+                else "Candidatura criada manualmente."
+            ),
+            changed_at=now,
+            created_at=now,
+        )
+        db.add(initial_history)
+        db.commit()
+    except IntegrityError as exc:
+        _handle_commit_integrity_error(
+            db,
+            exc,
+            user_id=owner_user_id,
+            opportunity_id=opp_id,
+        )
 
-    created = _get_owned_application(db, user, app_row.id)
+    created = _get_owned_application(db, user, app_row_id)
     assert created is not None
     return _serialize_application(created)
 
@@ -562,32 +666,36 @@ def change_application_status(
     application_id: uuid.UUID,
     payload: ApplicationStatusChangeRequest,
 ) -> ApplicationResponse | None:
+    owner_user_id = user.id
     app_row = _get_owned_application(db, user, application_id)
     if app_row is None:
         return None
 
     now = datetime.now(UTC)
+    app_row_id = app_row.id
+    opp_id = app_row.opportunity_id
     previous_status = app_row.status
     target_status = payload.status.value
 
     if (
         previous_status in CLOSED_APPLICATION_STATUSES
         and target_status in ACTIVE_APPLICATION_STATUSES
-        and app_row.opportunity_id is not None
+        and opp_id is not None
     ):
-        other_active = db.execute(
-            select(Application).where(
-                Application.user_id == user.id,
-                Application.opportunity_id == app_row.opportunity_id,
-                Application.id != app_row.id,
-                Application.status.in_(ACTIVE_APPLICATION_STATUSES),
-            )
-        ).scalar_one_or_none()
+        other_active = _find_active_duplicate(
+            db,
+            owner_user_id,
+            opp_id,
+            exclude_application_id=app_row_id,
+        )
         if other_active is not None:
             raise ApplicationDuplicateError(
                 "Já existe outra candidatura ativa para esta oportunidade.",
                 existing_application_id=other_active.id,
             )
+        # Garante que app_row permaneça carregado mesmo que a consulta prévia dê rollback no teste
+        app_row = _get_owned_application(db, user, application_id)
+        assert app_row is not None
 
     app_row.status = target_status
     if payload.applied_at is not None:
@@ -616,8 +724,8 @@ def change_application_status(
 
     if previous_status != target_status or payload.note:
         history_entry = ApplicationStatusHistory(
-            application_id=app_row.id,
-            user_id=user.id,
+            application_id=app_row_id,
+            user_id=owner_user_id,
             from_status=previous_status,
             to_status=target_status,
             note=payload.note,
@@ -626,7 +734,17 @@ def change_application_status(
         )
         db.add(history_entry)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        _handle_commit_integrity_error(
+            db,
+            exc,
+            user_id=owner_user_id,
+            opportunity_id=opp_id,
+            exclude_application_id=app_row_id,
+        )
+
     refreshed = _get_owned_application(db, user, application_id)
     assert refreshed is not None
     return _serialize_application(refreshed)

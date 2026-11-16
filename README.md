@@ -54,7 +54,8 @@ job-hunter/
 │   │   │   ├── 0004_professional_areas.py
 │   │   │   ├── 0005_lifecycle_traceability.py
 │   │   │   ├── 0006_seniority_experience_matching.py
-│   │   │   └── 0007_applications_pipeline.py
+│   │   │   ├── 0007_applications_pipeline.py
+│   │   │   └── 0008_active_app_uniq.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -228,7 +229,7 @@ Oportunidades brasileiras locais, estágios acadêmicos ou freelas recebidos for
 A partir de qualquer vaga do catálogo (**Acompanhar candidatura**) ou diretamente na seção **Candidaturas** (cadastro manual avulso):
 - **Etapas Kanban (PT-BR):** `Interesse` (`interested`), `Preparação` (`preparing`), `Candidatura enviada` (`applied`), `Teste técnico` (`assessment`), `Entrevista` (`interview`) e `Proposta` (`offer`), mantendo os desfechos encerrados (`Aprovado`, `Rejeitado`, `Desistência`) em seção separada sem poluir o quadro ativo (com navegação em abas no mobile).
 - **Snapshots e Histórico Imutável:** preserva empresa, cargo, fonte, localidade, links, regime, modalidade e senioridade no momento do vínculo (`ON DELETE SET NULL` caso a oportunidade privada original seja removida), além de gravar atomicamente toda transição em `application_status_history`.
-- **Prevenção de Duplicação e Reaplicação:** impede múltiplas candidaturas ativas para a mesma oportunidade pelo mesmo usuário (`409 Conflict`), permitindo abrir uma nova tentativa quando o processo anterior estiver encerrado.
+- **Prevenção de Duplicação e Reaplicação (`0008_active_app_uniq`):** além da verificação prévia na camada de serviço, um índice único parcial no banco (`uq_active_application_per_user_opp` em PostgreSQL 16 e SQLite sobre `(user_id, opportunity_id)` para `opportunity_id IS NOT NULL` e status ativos) impede race conditions concorrentes, realizando `rollback()` limpo e retornando `409 Conflict`, enquanto preserva candidaturas avulsas (`opportunity_id = NULL`) e permite nova tentativa após encerramento.
 - **Indicadores Reais e Controle Humano:** calcula métricas por etapa no backend (`GET /api/v1/applications/kanban` e `GET /api/v1/applications/indicators`), registra datas de envio, entrevista, teste técnico, retorno esperado e próxima ação, sem nenhum envio automático.
 
 ### 4.7. Encerrando o Ambiente

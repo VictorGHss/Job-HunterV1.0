@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, utc_now
@@ -49,11 +49,26 @@ APPLICATION_STATUS_LABELS_PT: dict[str, str] = {
 }
 
 
+ACTIVE_APPLICATION_UNIQUE_INDEX_NAME = "uq_active_application_per_user_opp"
+ACTIVE_APPLICATION_PREDICATE_SQL = (
+    "opportunity_id IS NOT NULL AND status IN "
+    "('interested', 'preparing', 'applied', 'assessment', 'interview', 'offer')"
+)
+
+
 class Application(Base, TimestampMixin):
     __tablename__ = "applications"
     __table_args__ = (
         Index("ix_applications_user_status", "user_id", "status"),
         Index("ix_applications_user_opportunity_status", "user_id", "opportunity_id", "status"),
+        Index(
+            ACTIVE_APPLICATION_UNIQUE_INDEX_NAME,
+            "user_id",
+            "opportunity_id",
+            unique=True,
+            postgresql_where=text(ACTIVE_APPLICATION_PREDICATE_SQL),
+            sqlite_where=text(ACTIVE_APPLICATION_PREDICATE_SQL),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
