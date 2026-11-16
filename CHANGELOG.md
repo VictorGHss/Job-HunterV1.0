@@ -6,6 +6,18 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.4] - 2026-11-15 — Fase 02.4: Expansão de Fontes e Cobertura de Oportunidades
+
+### Adicionado
+- **Novos Conectores Públicos Autorizados (`jobicy`, `himalayas`, `github_backend_br`, `github_frontend_br`):**
+  - `JobicyConnector` (`https://jobicy.com/api/v2/remote-jobs?count=50&industry=dev`, intervalo `3600s`) com deduplicação de clones multi-país no próprio lote e mapeamento de `jobLevel`/`jobType`.
+  - `HimalayasConnector` (`https://himalayas.app/jobs/api/search?q=software+developer`, intervalo `3600s`) preservando `applicationLink` oficial, descartando vagas expiradas (`expiryDate`) e mapeando `locationRestrictions` vazias como `Worldwide`.
+  - `GitHubBackendBRConnector` (`backend-br/vagas`) e `GitHubFrontendBRConnector` (`frontendbr/vagas`) consumindo a API REST oficial v3 do GitHub sob licença MIT (`3600s`), com filtro de PRs/issues `Stale`/avisos administrativos, extração de modalidade/localidade (`[Remoto]`, `[Híbrido]`) e redação automática de PII (`redact_contact_pii`).
+- **Deduplicação Entre Fontes (`sync_service.py`):**
+  - `_find_existing_opportunity` e `_upsert_opportunity` identificam vagas duplicadas entre fontes distintas por `application_url`, `source_url` ou par normalizado `(title, company_name)`, preservando atribuição e URLs canônicas da fonte original e registrando `also_seen_in_sources`.
+
+---
+
 ## [0.2.3] - 2026-11-15 — Fase 02.3: Classificação por Área Profissional e Relevância do Matching
 
 ### Adicionado

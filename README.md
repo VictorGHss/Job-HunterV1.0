@@ -176,17 +176,23 @@ A importação é transacional e idempotente: valida o JSON estritamente (`schem
 ### 4.5. Sincronização de Oportunidades Públicas e Cadastro Manual
 A Fase 02 implementa conectores modulares para feeds públicos com termos verificados e compatíveis, além de captura manual privada e recebimento de links via Web Share Target (PWA):
 
-- **Fonte ativa e habilitada:**
-  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, `enabled=true`, intervalo mínimo padrão de `3600s` (1h), com atribuição visível, links diretos **sem `rel="nofollow"`** e sem uso não autorizado de logotipo, conforme FAQ/termos oficiais (`https://remoteok.com/terms`). Primeira carga real executada em 2026-11-15 persistiu **97 oportunidades** no PostgreSQL local; após auditoria e reclassificação das Fases 02.2 e 02.3, o catálogo encontra-se distribuído em **`87 other`**, **`5 junior`**, **`3 freelance`** e **`2 internship`** (regimes contratuais: `83 unknown`, `5 freelance`, `4 pj`, `3 temporary`, `2 internship`; áreas profissionais primárias: `22 administration`, `19 marketing_sales`, `13 software_development`, `9 artificial_intelligence`, `7 customer_support`, `6 devops_cloud`, `4 frontend`, `3 fullstack`, `3 healthcare`, `3 other`, `3 technical_support`, `2 data`, `1 api_integrations`, `1 backend`, `1 infrastructure`, `0 unknown`).
+- **Fontes ativas e habilitadas (`enabled=true`, intervalo mínimo `3600s`):**
+  - **Remote OK (`remote_ok`)**: feed JSON público sem chave (`https://remoteok.com/api`), atribuição visível e links diretos **sem `rel="nofollow"`** (`99` oportunidades ativas no catálogo local).
+  - **Jobicy (`jobicy`)**: API v2 pública oficial (`https://jobicy.com/api/v2/remote-jobs?count=50&industry=dev`), sem chave, limite oficial `<= 1 req/h`, com deduplicação de clones multi-país no próprio lote (`43` oportunidades ativas).
+  - **Himalayas (`himalayas`)**: API JSON pública oficial (`https://himalayas.app/jobs/api/search?q=software+developer`), sem chave, preservando `applicationLink` oficial e descartando vagas expiradas via `expiryDate` (`17` oportunidades ativas).
+  - **GitHub Backend BR (`github_backend_br`)** e **GitHub Frontend BR (`github_frontend_br`)**: repositórios comunitários brasileiros licenciados sob **MIT** (`backend-br/vagas` e `frontendbr/vagas`) consumidos exclusivamente via API REST oficial v3 do GitHub (`per_page=30`), com filtragem de PRs/issues `Stale`/avisos administrativos e **redação automática de PII** (e-mails e telefones pessoais) no corpo da vaga (`30` + `3` oportunidades ativas).
+  - **Catálogo consolidado após Fase 02.4 (`192` oportunidades no PostgreSQL `jobhunter`):** `169 other`, `13 junior`, `7 freelance`, `3 internship`, com deduplicação intra-fonte e cross-source (`also_seen_in_sources`) preservando atribuição e URLs canônicas da primeira fonte.
   - **Classificação determinística tridimensional (`classification.py`)**: avalia de forma independente `opportunity_type`, `employment_type` e `professional_area` + `secondary_areas` (`software_development`, `backend`, `frontend`, `fullstack`, `data`, `artificial_intelligence`, `devops_cloud`, `api_integrations`, `infrastructure`, `technical_support`, `customer_support`, `marketing_sales`, `healthcare`, `administration`, `other`, `unknown`), bloqueando falsos positivos de tecnologias mencionadas incidentalmente em vagas de suporte, atendimento, marketing ou saúde.
   - **Matching por área e relevância (`matching.py`)**: distingue área compatível, incompatível e não identificada (`unknown`), impede recomendação de suporte técnico/atendimento/marketing como desenvolvimento, mantém `employment_type=unknown` elegível mesmo com `block_clt=true` e permite filtrar por área na API (`GET /api/v1/opportunities?area=...`) e na interface.
 - **Fonte pausada temporariamente por conformidade:**
   - **Remotive (`remotive`)**: conector implementado e preservado no código (`https://remotive.com/api/remote-jobs?category=software-dev`, intervalo `21600s`), porém marcado com **`enabled_by_default=False`** (`enabled=false` no banco) até esclarecimento e autorização escrita sobre restrições nos Termos de Uso gerais de março de 2026 para agregação multiusuário. A execução de `sync-opportunities` (mesmo com `--force` ou `--source remotive`) recusa consultas HTTP contra fontes desabilitadas.
-- **Fontes avaliadas e não integradas nesta etapa:**
-  - **Gupy**: API oficial (`api.gupy.io`) exige token Bearer corporativo por empresa recrutadora, não sendo feed público livre.
-  - **Arbeitnow**: termos gerais restringem redistribuição comercial sem autorização explícita; mantida pendente de revisão jurídica caso evolua para SaaS.
-  - **Jobicy**: API v2 pública (`1 req/h`) mapeada como candidata futura complementar.
-  - **Workana**: desabilitada por restrição do perfil do usuário e política anti-scraping.
+- **Fontes auditadas e rejeitadas / pendentes na Fase 02.4:**
+  - **Arbeitnow**: termos (Seção 11) reservam revogação arbitrária e restringem redistribuição/exibição pública sem licença explícita; vagas majoritariamente presenciais na Alemanha.
+  - **Adzuna**: exige cadastro de `app_id`/`app_key` e proíbe uso comercial/SaaS no tier gratuito sem contrato comercial.
+  - **Jooble**: exige aprovação de `api_key` vinculada a domínio e veta armazenamento em banco fora de busca ao vivo.
+  - **The Muse**: requer registro de chave para limites de produção e foca em vagas presenciais/híbridas nos EUA.
+  - **Gupy**: API oficial (`api.gupy.io`) exige token Bearer corporativo por empresa recrutadora.
+  - **Workana**: desabilitada por restrição do perfil do usuário (`workana_enabled=false`) e política anti-scraping.
 
 **Como habilitar uma fonte futuramente (após validação dos termos / autorização escrita):**
 1. Alterar `enabled_by_default=True` no `SourceDefinition` do conector correspondente e remover ou atualizar `disabled_reason`.

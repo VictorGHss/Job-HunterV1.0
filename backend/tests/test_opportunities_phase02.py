@@ -25,6 +25,13 @@ from app.services.opportunities.connectors.base import (
     ConnectorFetchError,
     ConnectorPayloadError,
 )
+from app.services.opportunities.connectors.github_vagas import (
+    GitHubBackendBRConnector,
+    GitHubFrontendBRConnector,
+    redact_contact_pii,
+)
+from app.services.opportunities.connectors.himalayas import HimalayasConnector
+from app.services.opportunities.connectors.jobicy import JobicyConnector
 from app.services.opportunities.connectors.remote_ok import RemoteOKConnector
 from app.services.opportunities.connectors.remotive import RemotiveConnector
 from app.services.opportunities.matching import evaluate_opportunity_for_user
@@ -572,8 +579,19 @@ def test_api_opportunities_privacy_immutability_filters_pagination_and_states(
     assert sources_resp.status_code == 200
     sources_json = sources_resp.json()
     sources_by_slug = {s["slug"]: s for s in sources_json}
-    assert set(sources_by_slug.keys()) == {"remote_ok", "remotive"}
+    assert set(sources_by_slug.keys()) == {
+        "remote_ok",
+        "jobicy",
+        "himalayas",
+        "github_backend_br",
+        "github_frontend_br",
+        "remotive",
+    }
     assert sources_by_slug["remote_ok"]["enabled"] is True
+    assert sources_by_slug["jobicy"]["enabled"] is True
+    assert sources_by_slug["himalayas"]["enabled"] is True
+    assert sources_by_slug["github_backend_br"]["enabled"] is True
+    assert sources_by_slug["github_frontend_br"]["enabled"] is True
     assert sources_by_slug["remotive"]["enabled"] is False
 
     # Listagem padrão com filtro + paginação limitada
@@ -1488,4 +1506,223 @@ def test_phase023_matching_relevance_support_exclusion_and_api_area_filter(
         "/api/v1/opportunities?type=junior&area=customer_support&include_excluded=true"
     ).json()
     assert [i["title"] for i in jr_cust_query["items"]] == ["Travel Support Specialist"]
+
+
+def test_phase024_new_connectors_normalization_pii_redaction_and_cross_source_dedup(
+    db_session,
+):
+    future_epoch = int((datetime.now(UTC) + timedelta(days=30)).timestamp())
+    expired_epoch = int((datetime.now(UTC) - timedelta(days=2)).timestamp())
+
+    # 1. Jobicy: parsing, deduplicação de clones multi-país no mesmo lote e 429 Retry-After
+    jobicy_payload = {
+        "jobs": [
+            {
+                "id": 90101,
+                "url": "https://jobicy.com/jobs/90101-junior-python-backend-developer",
+                "jobSlug": "90101-junior-python-backend-developer",
+                "jobTitle": "Junior Python Backend Engineer",
+                "companyName": "Acme Cloud",
+                "jobIndustry": ["Software Development", "Python"],
+                "jobType": ["Contract"],
+                "jobGeo": "Anywhere",
+                "jobLevel": "Junior",
+                "jobDescription": "<p>Build FastAPI and PostgreSQL microservices.</p>",
+                "pubDate": "2026-11-14T10:00:00+00:00",
+                "salaryMin": 48000,
+                "salaryMax": 62000,
+                "salaryCurrency": "USD",
+                "salaryPeriod": "annual",
+            },
+            {
+                "id": 90102,
+                "url": "https://jobicy.com/jobs/90102-senior-fullstack-uk",
+                "jobTitle": "Senior Full Stack Engineer | UK | Remote",
+                "companyName": "CloneCorp",
+                "jobIndustry": ["Software Development"],
+                "jobType": ["Full-Time"],
+                "jobGeo": "Germany, Ireland, UK",
+                "jobLevel": "Senior",
+                "jobDescription": "<p>React and Java Spring Boot.</p>",
+                "pubDate": "2026-11-14T11:00:00+00:00",
+            },
+            {
+                "id": 90103,
+                "url": "https://jobicy.com/jobs/90103-senior-fullstack-de",
+                "jobTitle": "Senior Full Stack Engineer | Germany | Remote",
+                "companyName": "CloneCorp",
+                "jobIndustry": ["Software Development"],
+                "jobType": ["Full-Time"],
+                "jobGeo": "Germany, Ireland, UK",
+                "jobLevel": "Senior",
+                "jobDescription": "<p>React and Java Spring Boot.</p>",
+                "pubDate": "2026-11-14T11:00:00+00:00",
+            },
+        ]
+    }
+    jobicy_sleeps: list[float] = []
+    jobicy_calls = {"count": 0}
+
+    def jobicy_handler(_: httpx.Request) -> httpx.Response:
+        jobicy_calls["count"] += 1
+        if jobicy_calls["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "2"})
+        return httpx.Response(200, json=jobicy_payload)
+
+    jobicy_conn = JobicyConnector(
+        transport=httpx.MockTransport(jobicy_handler),
+        sleep_fn=lambda s: jobicy_sleeps.append(s),
+    )
+    jobicy_drafts = jobicy_conn.collect()
+    assert jobicy_calls["count"] == 2
+    assert jobicy_sleeps == [2.0]
+    # O clone multi-país 90103 é deduplicado no próprio lote
+    assert len(jobicy_drafts) == 2
+    assert jobicy_drafts[0].opportunity_type == OpportunityType.JUNIOR.value
+    assert jobicy_drafts[0].employment_type == EmploymentType.PJ.value
+    assert jobicy_drafts[0].professional_area == ProfessionalArea.BACKEND.value
+    assert jobicy_drafts[0].eligible_countries == ["Worldwide"]
+
+    # 2. Himalayas: preserva applicationLink, descarta vaga expirada e mapeia locationRestrictions=[]
+    himalayas_payload = {
+        "jobs": [
+            {
+                "guid": "https://himalayas.app/companies/acme/jobs/ai-integration-intern",
+                "title": "AI & API Integration Intern",
+                "companyName": "BetaAI",
+                "employmentType": "Intern",
+                "seniority": ["Entry-level"],
+                "locationRestrictions": [],
+                "categories": ["Artificial-Intelligence", "Python", "FastAPI"],
+                "description": "<p>Paid software engineering internship building LLM API integrations.</p>",
+                "pubDate": 1794600000,
+                "expiryDate": future_epoch,
+                "applicationLink": "https://jobs.example.com/apply/beta-ai-intern",
+            },
+            {
+                "guid": "https://himalayas.app/companies/old/jobs/expired-role",
+                "title": "Expired Software Developer",
+                "companyName": "OldCo",
+                "employmentType": "Full Time",
+                "seniority": ["Junior"],
+                "locationRestrictions": ["Brazil"],
+                "categories": ["Python"],
+                "description": "<p>Expired role.</p>",
+                "pubDate": 1700000000,
+                "expiryDate": expired_epoch,
+                "applicationLink": "https://jobs.example.com/apply/expired",
+            },
+        ]
+    }
+    himalayas_conn = HimalayasConnector(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=himalayas_payload)),
+        sleep_fn=lambda _: None,
+    )
+    him_drafts = himalayas_conn.collect()
+    assert len(him_drafts) == 1
+    assert him_drafts[0].opportunity_type == OpportunityType.INTERNSHIP.value
+    assert him_drafts[0].employment_type == EmploymentType.INTERNSHIP.value
+    assert him_drafts[0].application_url == "https://jobs.example.com/apply/beta-ai-intern"
+    assert him_drafts[0].eligible_countries == ["Worldwide"]
+
+    # 3. GitHub Vagas BR: ignora PRs e Stale, redige PII (e-mail/telefone) e extrai Júnior/PJ/CLT
+    gh_issues_payload = [
+        {
+            "number": 12493,
+            "state": "open",
+            "title": "[Remoto] Desenvolvedor(a) Back-end Júnior - Python & FastAPI - MKdigital",
+            "html_url": "https://github.com/backend-br/vagas/issues/12493",
+            "created_at": "2026-11-15T10:00:00Z",
+            "labels": [
+                {"name": "PJ"},
+                {"name": "Júnior"},
+                {"name": "Python"},
+                {"name": "FastAPI"},
+                {"name": "PostgreSQL"},
+                {"name": "Remoto"},
+                {"name": "verificada"},
+            ],
+            "body": "Envie currículo para recrutador.privado@empresa.com.br ou WhatsApp (11) 98765-4321. Stack Python, FastAPI e PostgreSQL.",
+        },
+        {
+            "number": 12499,
+            "state": "open",
+            "title": "PR indevido no endpoint de issues",
+            "html_url": "https://github.com/backend-br/vagas/pull/12499",
+            "pull_request": {"url": "https://api.github.com/repos/backend-br/vagas/pulls/12499"},
+            "labels": [],
+            "body": "Não deve ser importado.",
+        },
+        {
+            "number": 12000,
+            "state": "open",
+            "title": "[Remoto] Vaga Antiga Stale",
+            "html_url": "https://github.com/backend-br/vagas/issues/12000",
+            "labels": [{"name": "Stale"}],
+            "body": "Vaga antiga.",
+        },
+    ]
+    gh_back_conn = GitHubBackendBRConnector(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=gh_issues_payload)),
+        sleep_fn=lambda _: None,
+    )
+    gh_drafts = gh_back_conn.collect()
+    assert len(gh_drafts) == 1
+    gh_jr = gh_drafts[0]
+    assert gh_jr.opportunity_type == OpportunityType.JUNIOR.value
+    assert gh_jr.employment_type == EmploymentType.PJ.value
+    assert gh_jr.professional_area == ProfessionalArea.BACKEND.value
+    assert gh_jr.country == "Brasil"
+    assert "recrutador.privado@empresa.com.br" not in (gh_jr.description or "")
+    assert "98765-4321" not in (gh_jr.description or "")
+    assert "[e-mail na issue original]" in (gh_jr.description or "")
+    assert "verificada" not in gh_jr.technologies
+    assert "FastAPI" in gh_jr.technologies
+    assert redact_contact_pii("Contato: Fulano@teste.org / +55 21 99888-7766") == (
+        "Contato: [e-mail na issue original] / [contato na issue original]"
+    )
+
+    # 4. Deduplicação cross-source + isolamento de falha de uma fonte durante sync_sources
+    ok_conn = RemoteOKConnector(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json=sample_remote_ok_payload())
+        ),
+        sleep_fn=lambda _: None,
+    )
+    failing_fe_conn = GitHubFrontendBRConnector(
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)),
+        max_retries=0,
+        sleep_fn=lambda _: None,
+    )
+    summaries = sync_sources(
+        db_session,
+        force=True,
+        connector_overrides={
+            "remote_ok": ok_conn,
+            "jobicy": jobicy_conn,
+            "himalayas": himalayas_conn,
+            "github_backend_br": gh_back_conn,
+            "github_frontend_br": failing_fe_conn,
+        },
+    )
+    by_slug = {s.source_slug: s for s in summaries}
+    # Por ordem alfabética de slug, jobicy executa antes de remote_ok:
+    # jobicy insere 2 vagas ("Junior Python Backend Engineer" na "Acme Cloud" e "Senior Full Stack Engineer"),
+    # e remote_ok insere 1 ("Backend Engineering Intern") e deduplica 1 cross-source contra jobicy!
+    assert by_slug["jobicy"].status == SyncRunStatus.SUCCESS.value
+    assert by_slug["jobicy"].inserted_count == 2
+    assert by_slug["remote_ok"].status == SyncRunStatus.SUCCESS.value
+    assert by_slug["remote_ok"].inserted_count == 1
+    assert by_slug["remote_ok"].updated_count == 1
+    assert by_slug["himalayas"].inserted_count == 1
+    assert by_slug["github_backend_br"].inserted_count == 1
+    assert by_slug["github_frontend_br"].status == SyncRunStatus.FAILED.value
+
+    deduped_acme = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "90101")
+    ).scalar_one()
+    # Preserva URL e atribuição originais da primeira fonte que inseriu (Jobicy) e registra Remote OK em also_seen_in_sources
+    assert deduped_acme.source_url == "https://jobicy.com/jobs/90101-junior-python-backend-developer"
+    assert "remote_ok" in deduped_acme.raw_metadata.get("also_seen_in_sources", [])
+
 

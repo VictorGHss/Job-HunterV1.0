@@ -14,18 +14,31 @@ from app.models.opportunity import (
     SyncRunStatus,
 )
 from app.schemas.opportunity import SyncRunSummary
-from app.services.opportunities.classification import classify_opportunity
+from app.services.opportunities.classification import (
+    classify_opportunity,
+    normalize_classification_text,
+)
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     ConnectorError,
     NormalizedOpportunityDraft,
 )
+from app.services.opportunities.connectors.github_vagas import (
+    GitHubBackendBRConnector,
+    GitHubFrontendBRConnector,
+)
+from app.services.opportunities.connectors.himalayas import HimalayasConnector
+from app.services.opportunities.connectors.jobicy import JobicyConnector
 from app.services.opportunities.connectors.remote_ok import RemoteOKConnector
 from app.services.opportunities.connectors.remotive import RemotiveConnector
 from app.services.opportunities.sanitization import compute_opportunity_content_hash
 
 CONNECTOR_CLASSES: dict[str, type[BaseOpportunityConnector]] = {
     RemoteOKConnector.definition.slug: RemoteOKConnector,
+    JobicyConnector.definition.slug: JobicyConnector,
+    HimalayasConnector.definition.slug: HimalayasConnector,
+    GitHubBackendBRConnector.definition.slug: GitHubBackendBRConnector,
+    GitHubFrontendBRConnector.definition.slug: GitHubFrontendBRConnector,
     RemotiveConnector.definition.slug: RemotiveConnector,
 }
 
@@ -95,13 +108,67 @@ def _find_existing_opportunity(
     if opp is not None:
         return opp
 
-    # 3. Deduplicação complementar: hash estável dos dados relevantes
-    return db.execute(
+    # 3. Deduplicação complementar: hash estável dos dados relevantes na mesma fonte
+    opp = db.execute(
         select(Opportunity).where(
             Opportunity.source_id == source_id,
             Opportunity.content_hash == content_hash,
         )
     ).scalar_one_or_none()
+    if opp is not None:
+        return opp
+
+    # 4. Deduplicação entre fontes externas (cross-source): URL de candidatura, URL da fonte
+    # ou assinatura normalizada de (título, empresa) quando empresa é informada.
+    if draft.application_url:
+        opp = (
+            db.execute(
+                select(Opportunity).where(
+                    Opportunity.source_id.is_not(None),
+                    Opportunity.application_url == draft.application_url,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if opp is not None:
+            return opp
+
+    opp = (
+        db.execute(
+            select(Opportunity).where(
+                Opportunity.source_id.is_not(None),
+                Opportunity.source_url == draft.source_url,
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if opp is not None:
+        return opp
+
+    if draft.company_name and draft.company_name.strip():
+        norm_draft_title = normalize_classification_text(draft.title)
+        norm_draft_company = normalize_classification_text(draft.company_name)
+        if norm_draft_title and norm_draft_company:
+            candidates = (
+                db.execute(
+                    select(Opportunity).where(
+                        Opportunity.source_id.is_not(None),
+                        Opportunity.company_name.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for cand in candidates:
+                if (
+                    normalize_classification_text(cand.company_name) == norm_draft_company
+                    and normalize_classification_text(cand.title) == norm_draft_title
+                ):
+                    return cand
+
+    return None
 
 
 def _upsert_opportunity(
@@ -162,6 +229,25 @@ def _upsert_opportunity(
         db.add(opp)
         db.flush()
         return (opp, True)
+
+    # Se a oportunidade já existe em OUTRA fonte externa, preserva a atribuição, source_id
+    # e URLs canônicas da fonte original, enriquecendo apenas metadados complementares.
+    if existing.source_id != source.id:
+        existing.last_seen_at = now
+        existing.last_status_check_at = now
+        existing.missing_sync_count = 0
+        merged_techs = list(existing.technologies or [])
+        for tech in draft.technologies or []:
+            if tech not in merged_techs:
+                merged_techs.append(tech)
+        existing.technologies = merged_techs
+        meta = dict(existing.raw_metadata or {})
+        also_seen = list(meta.get("also_seen_in_sources") or [])
+        if source.slug not in also_seen:
+            also_seen.append(source.slug)
+        meta["also_seen_in_sources"] = also_seen
+        existing.raw_metadata = meta
+        return (existing, False)
 
     existing.external_id = draft.external_id
     existing.title = draft.title
@@ -254,6 +340,9 @@ def sync_sources(
     sources = db.execute(query).scalars().all()
     if source_slug and not sources:
         raise ValueError(f"Fonte '{source_slug}' não encontrada no catálogo.")
+
+    if connector_overrides is not None and not source_slug:
+        sources = [s for s in sources if s.slug in connector_overrides]
 
     summaries: list[SyncRunSummary] = []
 
@@ -558,18 +647,47 @@ def reclassify_opportunities(
         before_counter[opp.opportunity_type] += 1
         before_area_counter[old_area] += 1
 
+        meta = opp.raw_metadata if isinstance(opp.raw_metadata, dict) else {}
+        extra_tags: list[str] = []
+        if isinstance(meta.get("labels"), list):
+            extra_tags.extend(str(x) for x in meta["labels"])
+        if isinstance(meta.get("job_type"), list):
+            extra_tags.extend(str(x) for x in meta["job_type"])
+        if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
+            extra_tags.append(str(meta["job_level"]))
+        if isinstance(meta.get("seniority"), list):
+            extra_tags.extend(str(x) for x in meta["seniority"])
+        if meta.get("employment_type_raw"):
+            extra_tags.append(str(meta["employment_type_raw"]))
+
         decision = classify_opportunity(
             title=opp.title,
-            tags=list(opp.technologies or []),
+            tags=list(opp.technologies or []) + extra_tags,
             description=opp.description,
             requirements=list(opp.requirements or []),
         )
-        after_counter[decision.opportunity_type] += 1
+        new_opp_type = decision.opportunity_type
+        new_emp_type = decision.employment_type
+        labels_low = {str(x).strip().lower() for x in (meta.get("labels") or [])}
+        if "clt" in labels_low and "pj" not in labels_low:
+            new_emp_type = "clt"
+        elif "pj" in labels_low and "clt" not in labels_low:
+            new_emp_type = "pj"
+        elif new_emp_type == "unknown":
+            jt_low = " ".join(extra_tags).lower()
+            if "freelance" in jt_low:
+                new_emp_type = "freelance"
+            elif "contract" in jt_low or "contractor" in jt_low:
+                new_emp_type = "pj"
+            elif "temporary" in jt_low:
+                new_emp_type = "temporary"
+
+        after_counter[new_opp_type] += 1
         after_area_counter[decision.professional_area] += 1
 
         if (
-            decision.opportunity_type,
-            decision.employment_type,
+            new_opp_type,
+            new_emp_type,
             decision.professional_area,
             decision.secondary_areas,
         ) != (
@@ -583,9 +701,9 @@ def reclassify_opportunities(
                     opportunity_id=str(opp.id),
                     title=opp.title,
                     old_opportunity_type=opp.opportunity_type,
-                    new_opportunity_type=decision.opportunity_type,
+                    new_opportunity_type=new_opp_type,
                     old_employment_type=opp.employment_type,
-                    new_employment_type=decision.employment_type,
+                    new_employment_type=new_emp_type,
                     old_professional_area=old_area,
                     new_professional_area=decision.professional_area,
                     old_secondary_areas=old_sec,
@@ -594,8 +712,8 @@ def reclassify_opportunities(
                 )
             )
             if not dry_run:
-                opp.opportunity_type = decision.opportunity_type
-                opp.employment_type = decision.employment_type
+                opp.opportunity_type = new_opp_type
+                opp.employment_type = new_emp_type
                 opp.professional_area = decision.professional_area
                 opp.secondary_areas = list(decision.secondary_areas)
 

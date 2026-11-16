@@ -58,8 +58,8 @@ docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
 docker compose --env-file .env -f infra/compose.yaml down
 ```
 
-### Sincronização controlada de oportunidades (Fases 02 e 02.1)
-A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores e o estado de conformidade de cada fonte (`Remote OK`: ativa com intervalo `>= 3600s`; `Remotive`: temporariamente desabilitada com `enabled=false` aguardando autorização escrita):
+### Sincronização controlada de oportunidades (Fases 02 a 02.4)
+A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores e o estado de conformidade de cada fonte (`remote_ok`, `jobicy`, `himalayas`, `github_backend_br` e `github_frontend_br`: ativas com intervalo `>= 3600s`; `remotive`: temporariamente desabilitada com `enabled=false` aguardando autorização escrita):
 
 ```powershell
 # Teste de conectividade e parsing sem persistir no banco (apenas fontes habilitadas)

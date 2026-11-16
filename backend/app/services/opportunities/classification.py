@@ -11,6 +11,7 @@ _MOJIBAKE_LATIN1_SPAN_RE = re.compile(r"[\u00c2-\u00f4][\u0080-\u00bf]{1,3}")
 _CAMEL_BOUNDARY_RE = re.compile(
     r"([a-z])((?:Contract|Salary|Hours|Location|Role|Type|Position|Schedule)\b)"
 )
+_GENDER_SUFFIX_RE = re.compile(r"\(\s*a\s*\)|/a(?![a-z0-9])")
 
 PROFESSIONAL_AREA_LABELS_PT: dict[str, str] = {
     ProfessionalArea.SOFTWARE_DEVELOPMENT.value: "Desenvolvimento de Software",
@@ -238,13 +239,14 @@ _ADMIN_TITLE_RE = re.compile(
     r"revenue\s+cycle\s+manager|specialist\s+global\s+qms|strategy\s*&\s*operations\s+coach|"
     r"agile\s+program\s+manager|program\s+manager|m&a\s+praktikum|"
     r"market\s+analyst|product\s+manager|product\s+lead|product\s+designer|"
-    r"director\s+of\s+product\s+management"
+    r"director\s+of\s+product\s+management|finance\s+systems\s*&\s*erp"
     r")(?![a-z0-9])"
 )
 
 _NON_DEV_OTHER_ROLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
     r"transport\s+planner|video\s+annotation|content\s+reviewer|"
+    r"mechanical\s+design\s+engineer|"
     r"helps\s+children\s+aged\s+5\s+to\s+17|teaching\s+them\s+python"
     r")(?![a-z0-9])"
 )
@@ -255,10 +257,10 @@ _FULLSTACK_RE = re.compile(
 )
 _BACKEND_TITLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
-    r"backend|back[- ]?end|"
+    r"backend|back[- ]?end|technical\s+lead\s*-\s*golang|"
     r"(?:python|java|spring|golang|go|node\.?js|ruby|rust|c#|dot\s*net|php|laravel|fastapi|django)\s+"
     r"(?:software\s+)?(?:engineer|developer|dev|programmer|programador|desenvolvedor)|"
-    r"(?:desenvolvedor|programador|engenheiro\s+de\s+software|developer|engineer)\s+"
+    r"(?:desenvolvedor|programador|engenheiro\s+de\s+software|developer|engineer|dev)\s+"
     r"(?:de\s+desenvolvimento\s+)?(?:backend|back[- ]?end|python|java|spring|golang|node\.?js|c#|php)"
     r")(?![a-z0-9])"
 )
@@ -267,7 +269,7 @@ _FRONTEND_TITLE_RE = re.compile(
     r"frontend|front[- ]?end|ui\s+developer|ui\s+engineer|"
     r"(?:react|vue|angular|next\.?js|javascript|typescript)\s+"
     r"(?:developer|engineer|dev|desenvolvedor|programador)|"
-    r"(?:desenvolvedor|programador|developer|engineer)\s+(?:frontend|front[- ]?end|react|vue|angular|ui)"
+    r"(?:desenvolvedor|programador|developer|engineer|dev)\s+(?:frontend|front[- ]?end|react|vue|angular|ui)"
     r")(?![a-z0-9])"
 )
 _API_INTEGRATIONS_TITLE_RE = re.compile(
@@ -280,17 +282,17 @@ _API_INTEGRATIONS_TITLE_RE = re.compile(
 )
 _AI_TITLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
-    r"ai\s+engineer|ml\s+engineer|ai\s+ml\s+engineer|machine\s+learning\s+engineer|"
+    r"ai\s+engineer|ml\s+engineer|ai\s+ml\s+engineer|machine\s+learning\s+engineer(?:ing)?|"
     r"agentic\s+ai\s+engineer|ml\s+inference\s+engineer|applied\s+ai|"
-    r"artificial\s+intelligence\s+engineer|engenheiro\s+de\s+ia|"
+    r"artificial\s+intelligence\s+engineer|engenheiro\s+de\s+ia|ai\s+engineering|"
     r"research\s+engineer\s+privacy|software\s+engineer\s+ai\s+tooling|"
-    r"build\s+ai\s+agents"
+    r"build\s+ai\s+agents|ai\s+coding\s+evaluation"
     r")(?![a-z0-9])"
 )
 _DATA_TITLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
     r"data\s+engineer|data\s+analyst|data\s+scientist|analytics\s+engineer|"
-    r"business\s+intelligence|bi\s+analyst|engenheiro\s+de\s+dados|"
+    r"data\s+and\s+analytics|business\s+intelligence|bi\s+analyst|engenheiro\s+de\s+dados|"
     r"analista\s+de\s+dados|cientista\s+de\s+dados|estagio\s+engenharia\s+de\s+dados|"
     r"operations\s+expert\s+with\s+python\s+for\s+ai\s+supply\s+chain"
     r")(?![a-z0-9])"
@@ -315,12 +317,15 @@ _INFRA_TITLE_RE = re.compile(
 )
 _SOFTWARE_DEV_TITLE_RE = re.compile(
     r"(?<![a-z0-9])(?:"
-    r"software\s+engineer|software\s+developer|software\s+development|"
+    r"software\s+engineers?|software\s+developer|software\s+development|"
+    r"software\s+applications?\s+developer|software\s+engineering|"
     r"desenvolvedor(?:\s+de\s+software|\s+de\s+sistemas)?|programador|"
     r"engenheiro\s+de\s+software|engenharia\s+de\s+software|"
-    r"tech\s+lead|product\s+engineering\s+lead|head\s+of\s+technology|"
+    r"tech\s+lead|engineering\s+lead|engineering\s+manager|product\s+engineering\s+lead|"
+    r"head\s+of\s+technology|developer\s+relations\s+engineer|developer\s+advocate|"
     r"principal\s+engineer|staff\s+software\s+engineer|solutions\s+engineer|"
     r"implementation\s+engineer|oracle\s+fusion\s+cloud\s+lead|"
+    r"embedded\s+systems|qa\s+tester|website\s*&\s*app\s+tester|quality\s+assurance\s+engineer|"
     r"internal\s+tools\s+software\s+engineer|apprentice\s+software\s+developer"
     r")(?![a-z0-9])"
 )
@@ -403,6 +408,7 @@ def normalize_classification_text(text: str | None) -> str:
     plain = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", plain)
     decomposed = unicodedata.normalize("NFKD", plain)
     ascii_folded = _COMBINING_MARKS_RE.sub("", decomposed).lower()
+    ascii_folded = _GENDER_SUFFIX_RE.sub("", ascii_folded)
     return _WHITESPACE_RE.sub(" ", ascii_folded).strip()
 
 
@@ -789,7 +795,18 @@ def classify_opportunity(
         reasons.append("tags:internship_without_conflict")
         return _finalize(OpportunityType.INTERNSHIP.value, "medium")
 
-    # 2. Freelance / Projeto autônomo explícito
+    # 2. Se o TÍTULO diz explicitamente Júnior/Entry-Level (e não diz Freelance no título),
+    # preserva a categoria Júnior mesmo que o corpo mencione contratação PJ/autônoma.
+    if (
+        _JUNIOR_TITLE_RE.search(norm_title)
+        and not _FREELANCE_TITLE_RE.search(norm_title)
+        and not title_is_senior_or_lead
+        and not desc_has_senior_req
+    ):
+        reasons.append("title:explicit_junior_or_entry_level")
+        return _finalize(OpportunityType.JUNIOR.value, "high")
+
+    # 3. Freelance / Projeto autônomo explícito
     if _FREELANCE_TITLE_RE.search(norm_title):
         reasons.append("title:explicit_freelance")
         return _finalize(OpportunityType.FREELANCE.value, "high")

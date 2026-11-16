@@ -84,8 +84,9 @@ Este documento registra as decisões arquiteturais de segurança implementadas n
   - Timeouts explícitos de conexão e leitura (`SYNC_HTTP_CONNECT_TIMEOUT_SECONDS=5`, `SYNC_HTTP_READ_TIMEOUT_SECONDS=15`) e `follow_redirects=False` no cliente HTTP.
   - Leitura em stream com teto rígido de bytes (`SYNC_MAX_RESPONSE_BYTES=5242880` / 5 MiB), evitando exaustão de memória por payloads anômalos.
   - Respeito obrigatório ao cabeçalho `Retry-After` em HTTP `429` e rejeição controlada de JSON malformado (`ConnectorPayloadError`).
-- **Sanitização de HTML e Dados Externos:**
+- **Sanitização de HTML, Redação de PII e Dados Externos:**
   - Descrições vindas de APIs externas passam por parser HTML restritivo (`sanitize_external_html_text`), removendo `<script>`, `<style>` e quaisquer tags antes da persistência, sendo renderizadas no frontend exclusivamente como texto simples (nunca `dangerouslySetInnerHTML`).
+  - Nos conectores de issues comunitárias (`github_backend_br` e `github_frontend_br`), e-mails e telefones pessoais presentes no texto bruto são anonimizados antes da persistência (`redact_contact_pii`), preservando apenas o link oficial da issue no GitHub para candidatura.
 - **Prevenção contra SSRF e Raspagem Indevida em Links Manuais / PWA:**
   - O endpoint `POST /api/v1/opportunities/manual` e o fluxo Web Share Target nunca realizam requisições HTTP do servidor para URLs fornecidas pelo usuário.
   - `validate_safe_external_url` aceita apenas esquemas `http`/`https`, proíbe credenciais embutidas e bloqueia alvos `localhost`, `.local`, IPs privados, loopback e faixas link-local/metadata (`169.254.169.254`).
