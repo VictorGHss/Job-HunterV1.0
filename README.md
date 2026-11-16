@@ -177,7 +177,9 @@ A importação é transacional e idempotente: valida o JSON estritamente (`schem
 A Fase 02 implementa conectores modulares para feeds públicos com termos verificados e compatíveis, além de captura manual privada e recebimento de links via Web Share Target (PWA):
 
 - **Fonte ativa e habilitada:**
-  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, `enabled=true`, intervalo mínimo padrão de `3600s` (1h), com atribuição visível, links diretos **sem `rel="nofollow"`** e sem uso não autorizado de logotipo, conforme FAQ/termos oficiais (`https://remoteok.com/terms`). Primeira carga real executada em 2026-11-15 persistiu **97 oportunidades** no PostgreSQL local (`88 other`, `4 junior`, `3 freelance`, `2 internship`).
+  - **Remote OK (`remote_ok`)**: feed JSON público sem chave, `enabled=true`, intervalo mínimo padrão de `3600s` (1h), com atribuição visível, links diretos **sem `rel="nofollow"`** e sem uso não autorizado de logotipo, conforme FAQ/termos oficiais (`https://remoteok.com/terms`). Primeira carga real executada em 2026-11-15 persistiu **97 oportunidades** no PostgreSQL local; após auditoria e reclassificação da Fase 02.2, o catálogo encontra-se distribuído em **`87 other`**, **`5 junior`**, **`3 freelance`** e **`2 internship`** (regimes contratuais: `83 unknown`, `5 freelance`, `4 pj`, `3 temporary`, `2 internship`).
+  - **Classificação determinística refinada (`classification.py`)**: utiliza fronteira lexical, normalização de acentuação/mojibake, separação de peso entre título, descrição (ignorando menções de senioridade de colegas/terceiros) e tags ruidosas, além de separação estrita entre `opportunity_type` e `employment_type` (`unknown` quando o contrato não é explicitado).
+  - **Limitação conhecida:** descrições truncadas na origem sem sinal explícito permanecem conservadoramente em `other` (precisão antes de quantidade); o filtro de área/tecnologia para o perfil do usuário ocorre na camada determinística de aderência (`matching.py`).
 - **Fonte pausada temporariamente por conformidade:**
   - **Remotive (`remotive`)**: conector implementado e preservado no código (`https://remotive.com/api/remote-jobs?category=software-dev`, intervalo `21600s`), porém marcado com **`enabled_by_default=False`** (`enabled=false` no banco) até esclarecimento e autorização escrita sobre restrições nos Termos de Uso gerais de março de 2026 para agregação multiusuário. A execução de `sync-opportunities` (mesmo com `--force` ou `--source remotive`) recusa consultas HTTP contra fontes desabilitadas.
 - **Fontes avaliadas e não integradas nesta etapa:**
@@ -199,6 +201,10 @@ docker exec job-hunter-backend python -m app.cli sync-opportunities --dry-run
 
 # Sincronização padrão (respeita intervalo mínimo por fonte)
 docker exec job-hunter-backend python -m app.cli sync-opportunities
+
+# Reclassificação determinística segura em registros externos já persistidos
+docker exec job-hunter-backend python -m app.cli reclassify-opportunities --source remote_ok --dry-run
+docker exec job-hunter-backend python -m app.cli reclassify-opportunities --source remote_ok
 ```
 
 Oportunidades brasileiras locais, estágios acadêmicos ou freelas recebidos fora dos feeds podem ser cadastrados de forma privada pelo botão **Adicionar Oportunidade** ou via **Web Share Target (PWA)** no navegador/Android, sem raspagem automática de HTML pelo servidor.

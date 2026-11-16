@@ -22,7 +22,7 @@ from app.db.session import SessionLocal
 from app.models.user import User
 from app.schemas.profile import ProfileSeedDocumentSchema
 from app.services.auth_service import create_user_account
-from app.services.opportunities.sync_service import sync_sources
+from app.services.opportunities.sync_service import reclassify_opportunities, sync_sources
 from app.services.profile_service import get_or_create_profile, import_profile_seed_for_user
 
 
@@ -180,6 +180,40 @@ def handle_sync_opportunities(args: argparse.Namespace) -> int:
     return 1 if has_error else 0
 
 
+def handle_reclassify_opportunities(args: argparse.Namespace) -> int:
+    with SessionLocal() as db:
+        try:
+            report = reclassify_opportunities(
+                db,
+                source_slug=args.source,
+                dry_run=args.dry_run,
+            )
+        except ValueError as err:
+            print(f"[ERRO] {err}", file=sys.stderr)
+            return 1
+
+    mode_label = "DRY_RUN" if report.dry_run else "SUCCESS"
+    target_label = report.source_slug or "all_enabled_sources"
+    print(
+        f"[{mode_label}] fonte={target_label} | "
+        f"avaliadas={report.evaluated_count} | atualizadas={report.updated_count} | "
+        f"inalteradas={report.unchanged_count}"
+    )
+    print(f"Distribuicao anterior: {report.before_counts}")
+    print(f"Distribuicao resultante: {report.after_counts}")
+    for change in report.changes:
+        if (
+            change.old_opportunity_type != change.new_opportunity_type
+            or change.new_employment_type != "unknown"
+        ):
+            print(
+                f"  - [{change.opportunity_id}] {change.title}: "
+                f"{change.old_opportunity_type}/{change.old_employment_type} -> "
+                f"{change.new_opportunity_type}/{change.new_employment_type}"
+            )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli",
@@ -258,6 +292,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Consulta e valida a fonte sem persistir alterações no catálogo.",
     )
     sync_opps.set_defaults(func=handle_sync_opportunities)
+
+    reclassify_opps = subparsers.add_parser(
+        "reclassify-opportunities",
+        help="Reclassifica oportunidades já persistidas de fontes habilitadas de forma segura e idempotente.",
+    )
+    reclassify_opps.add_argument(
+        "--source",
+        default=None,
+        help="Slug de uma fonte específica habilitada (ex: remote_ok).",
+    )
+    reclassify_opps.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Avalia e exibe alterações sugeridas sem persistir no banco.",
+    )
+    reclassify_opps.set_defaults(func=handle_reclassify_opportunities)
 
     return parser
 

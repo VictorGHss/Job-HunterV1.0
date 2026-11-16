@@ -14,10 +14,12 @@ from app.models.opportunity import (
     OpportunitySource,
     OpportunitySyncRun,
     OpportunityType,
+    OpportunityUserState,
     SyncRunStatus,
     WorkMode,
 )
 from app.services.auth_service import create_user_account
+from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     ConnectorFetchError,
     ConnectorPayloadError,
@@ -30,7 +32,7 @@ from app.services.opportunities.sanitization import (
     sanitize_external_html_text,
     validate_safe_external_url,
 )
-from app.services.opportunities.sync_service import sync_sources
+from app.services.opportunities.sync_service import reclassify_opportunities, sync_sources
 from app.services.profile_service import get_or_create_profile
 
 
@@ -845,3 +847,290 @@ def test_source_compliance_remotive_disabled_and_remote_ok_active(
     assert status_map["remotive"] == SyncRunStatus.FAILED.value
     assert status_map["remote_ok"] == SyncRunStatus.SUCCESS.value
     assert remotive_http_calls["count"] >= 1
+
+
+def test_phase022_classifier_precision_conflicts_and_contract_separation():
+    # Estágios legítimos e variações bilíngues
+    for title in (
+        "Backend Engineering Intern",
+        "Estagiário de Desenvolvimento Python",
+        "Estágio em Engenharia de Software",
+        "Apprentice Software Developer",
+        "Marketing Student Assistant",
+        "M&A Praktikum Intern",
+    ):
+        dec = classify_opportunity(title=title, tags=[], description="")
+        assert dec.opportunity_type == OpportunityType.INTERNSHIP.value, title
+        assert dec.employment_type == EmploymentType.INTERNSHIP.value, title
+
+    # Falsos positivos de substring "intern"
+    for title in (
+        "Internal Tools Software Engineer",
+        "International Technical Support Engineer",
+    ):
+        dec = classify_opportunity(title=title, tags=[], description="Manage internal systems.")
+        assert dec.opportunity_type == OpportunityType.OTHER.value, title
+        assert dec.employment_type == EmploymentType.UNKNOWN.value, title
+
+    # Vagas júnior e entrada explícitas (incluindo acentuação e sinal na descrição)
+    for title in (
+        "Junior Backend Developer",
+        "Jr. Python Developer",
+        "Desenvolvedor Java Júnior",
+        "Entry Level Software Engineer",
+        "Graduate Software Engineer",
+        "Trainee Tech / Tecnologia",
+    ):
+        dec = classify_opportunity(title=title, tags=[], description="")
+        assert dec.opportunity_type == OpportunityType.JUNIOR.value, title
+        assert dec.employment_type == EmploymentType.UNKNOWN.value, title
+
+    dec_jr_desc = classify_opportunity(
+        title="UI Developer",
+        tags=["dev", "senior", "react"],
+        description="Looking for an exceptional Jr. UI Developer to collaborate closely with senior developers. 1-2 years experience.",
+    )
+    assert dec_jr_desc.opportunity_type == OpportunityType.JUNIOR.value
+    assert dec_jr_desc.employment_type == EmploymentType.UNKNOWN.value
+
+    dec_entry_desc = classify_opportunity(
+        title="Travel Support Specialist",
+        tags=["travel", "customer support"],
+        description="This is an entry-level opportunity within the travel industry.",
+    )
+    assert dec_entry_desc.opportunity_type == OpportunityType.JUNIOR.value
+
+    # Cargos sênior / liderança / suporte genérico / tags conflitantes
+    for title, tags, desc in (
+        ("Senior Backend Engineer", ["junior"], "Work with Java microservices."),
+        ("Staff Software Engineer", ["intern"], "Lead technical architecture."),
+        ("Principal Software Engineer", [], "Design core platform API contracts."),
+        ("Engineering Manager", [], "Manage distributed backend squads."),
+        ("Tech Lead", ["junior", "senior"], "Mentor junior and mid developers."),
+        (
+            "Team Lead Account Executive",
+            ["junior", "sales"],
+            "Als Team Lead führst du unser Team und entwickelst insbesondere unsere Junior AEs weiter.",
+        ),
+        (
+            "Telehealth Endocrinologist Evenings Fridays and or Weekends",
+            ["medical", "internship"],
+            "Hiring board-eligible Endocrinologists (MD or DO). 1099 Contract: independent contractor arrangement.",
+        ),
+        ("Technical Support Engineer", [], "L2 troubleshooting and customer escalation."),
+        ("Software Engineer", [], "Build distributed systems in Python."),
+    ):
+        dec = classify_opportunity(title=title, tags=tags, description=desc)
+        assert dec.opportunity_type == OpportunityType.OTHER.value, title
+
+    # Separação estrita entre opportunity_type e employment_type
+    dec_jr_pj = classify_opportunity(
+        title="Desenvolvedor Backend Júnior - PJ",
+        tags=[],
+        description="Contratação PJ 100% remota.",
+    )
+    assert dec_jr_pj.opportunity_type == OpportunityType.JUNIOR.value
+    assert dec_jr_pj.employment_type == EmploymentType.PJ.value
+
+    dec_other_clt = classify_opportunity(
+        title="Desenvolvedor Full Stack Sênior",
+        tags=[],
+        description="Vaga CLT com benefícios.",
+    )
+    assert dec_other_clt.opportunity_type == OpportunityType.OTHER.value
+    assert dec_other_clt.employment_type == EmploymentType.CLT.value
+
+    dec_fulltime_contractor = classify_opportunity(
+        title="Software Engineer",
+        tags=["dev", "ai"],
+        description="Type: Full-time contractor. Typically 1-5 years of experience. Founder is a senior engineer to learn from.",
+    )
+    assert dec_fulltime_contractor.opportunity_type == OpportunityType.OTHER.value
+    assert dec_fulltime_contractor.employment_type == EmploymentType.PJ.value
+
+    # Freelance legítimo vs falsos positivos de "contract"
+    dec_freela = classify_opportunity(
+        title="Freelance Python Developer",
+        tags=["freelance"],
+        description="Projeto fechado de automação.",
+    )
+    assert dec_freela.opportunity_type == OpportunityType.FREELANCE.value
+    assert dec_freela.employment_type == EmploymentType.FREELANCE.value
+
+    dec_mojibake_freela = classify_opportunity(
+        title="APAC Python",
+        tags=["python", "part time"],
+        description="Please\u00c2\u00a0note:\u00c2\u00a0This\u00c2\u00a0is\u00c2\u00a0a\u00c2\u00a0part-time\u00c2\u00a0freelance\u00c2\u00a0position.",
+    )
+    assert dec_mojibake_freela.opportunity_type == OpportunityType.FREELANCE.value
+    assert dec_mojibake_freela.employment_type == EmploymentType.FREELANCE.value
+
+    dec_smart_contract = classify_opportunity(
+        title="Smart Contract Auditor",
+        tags=["web3"],
+        description="Audit Solidity smart contract protocols. 4+ years experience.",
+    )
+    assert dec_smart_contract.opportunity_type == OpportunityType.OTHER.value
+    assert dec_smart_contract.employment_type == EmploymentType.UNKNOWN.value
+
+    dec_contracts_mgr = classify_opportunity(
+        title="Contracts Manager Federal",
+        tags=["exec"],
+        description="Manage federal contracts after award. $100,000 - $120,000 a year.",
+    )
+    assert dec_contracts_mgr.opportunity_type == OpportunityType.OTHER.value
+    assert dec_contracts_mgr.employment_type == EmploymentType.UNKNOWN.value
+
+    dec_fixed_term = classify_opportunity(
+        title="Platform and Integration Engineer Security Telemetry",
+        tags=["golang"],
+        description="Hours: Part-time, 32 hours per weekContract: Fixed-termSalary: EUR 53,000.",
+    )
+    assert dec_fixed_term.opportunity_type == OpportunityType.OTHER.value
+    assert dec_fixed_term.employment_type == EmploymentType.TEMPORARY.value
+
+    # Entradas vazias ou ausentes
+    dec_empty = classify_opportunity(title="   ", tags=None, description=None)
+    assert dec_empty.opportunity_type == OpportunityType.UNKNOWN.value
+    assert dec_empty.employment_type == EmploymentType.UNKNOWN.value
+
+
+def test_phase022_safe_idempotent_reclassification_and_cli(
+    db_engine, db_session, monkeypatch, capsys
+):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    sources = {s.slug: s for s in ensure_default_sources(db_session)}
+    remote_ok_source = sources["remote_ok"]
+
+    user = create_user_account(
+        db_session,
+        email="reclassify.check@example.com",
+        display_name="Reclassify Check",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    db_session.flush()
+
+    fixed_first_seen = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+    fixed_published = datetime(2026, 11, 9, 10, 0, tzinfo=UTC)
+
+    opp_fp_contract = Opportunity(
+        source_id=remote_ok_source.id,
+        external_id="rk-fp-1",
+        title="Contracts Manager Federal",
+        company_name="Gov Co",
+        description="Manage federal contracts after award.",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        employment_type=EmploymentType.FREELANCE.value,
+        work_mode=WorkMode.REMOTE.value,
+        location_text="USA",
+        eligible_countries=["USA"],
+        technologies=["exec"],
+        source_url="https://remoteok.com/remote-jobs/contracts-manager-1",
+        application_url="https://apply.example.com/1",
+        first_seen_at=fixed_first_seen,
+        last_seen_at=fixed_first_seen,
+        published_at=fixed_published,
+        salary_min=100000.0,
+        content_hash="hash-fp-1",
+        raw_metadata={"slug": "contracts-manager-1"},
+    )
+    opp_fn_jr = Opportunity(
+        source_id=remote_ok_source.id,
+        external_id="rk-fn-2",
+        title="UI Developer",
+        company_name="RainFocus",
+        description="Search of an exceptional Jr. UI Developer. 1-2 years experience.",
+        opportunity_type=OpportunityType.OTHER.value,
+        employment_type=EmploymentType.OTHER.value,
+        work_mode=WorkMode.REMOTE.value,
+        location_text="Worldwide",
+        eligible_countries=["Worldwide"],
+        technologies=["dev", "senior", "react"],
+        source_url="https://remoteok.com/remote-jobs/ui-dev-2",
+        first_seen_at=fixed_first_seen,
+        last_seen_at=fixed_first_seen,
+        content_hash="hash-fn-2",
+    )
+    opp_manual = Opportunity(
+        source_id=None,
+        created_by_user_id=user.id,
+        external_id=None,
+        title="Projeto Freelance Manual Especial",
+        company_name="Cliente Privado",
+        description="Contrato indefinido manual",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        employment_type=EmploymentType.OTHER.value,
+        work_mode=WorkMode.REMOTE.value,
+        source_url="https://manual.example.com/projeto-1",
+        first_seen_at=fixed_first_seen,
+        last_seen_at=fixed_first_seen,
+        content_hash="hash-manual-3",
+    )
+    db_session.add_all([opp_fp_contract, opp_fn_jr, opp_manual])
+    db_session.flush()
+
+    user_state = OpportunityUserState(
+        user_id=user.id,
+        opportunity_id=opp_fn_jr.id,
+        is_saved=True,
+        last_viewed_at=fixed_first_seen,
+    )
+    db_session.add(user_state)
+    db_session.commit()
+
+    # 1. Dry-run calcula alterações mas NÃO altera o banco
+    dry_report = reclassify_opportunities(db_session, source_slug="remote_ok", dry_run=True)
+    assert dry_report.evaluated_count == 2
+    assert dry_report.updated_count == 2
+    db_session.refresh(opp_fp_contract)
+    db_session.refresh(opp_fn_jr)
+    assert opp_fp_contract.opportunity_type == OpportunityType.FREELANCE.value
+    assert opp_fn_jr.opportunity_type == OpportunityType.OTHER.value
+
+    # 2. Execução real via CLI para remote_ok
+    TestSession = sessionmaker(bind=db_engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr("app.cli.SessionLocal", TestSession)
+    exit_code = cli_main(["reclassify-opportunities", "--source", "remote_ok"])
+    assert exit_code == 0
+    out_text = capsys.readouterr().out
+    assert "atualizadas=2" in out_text
+
+    db_session.expire_all()
+    refreshed_fp = db_session.get(Opportunity, opp_fp_contract.id)
+    refreshed_jr = db_session.get(Opportunity, opp_fn_jr.id)
+    refreshed_manual = db_session.get(Opportunity, opp_manual.id)
+    refreshed_state = db_session.execute(
+        select(OpportunityUserState).where(OpportunityUserState.opportunity_id == opp_fn_jr.id)
+    ).scalar_one()
+
+    assert refreshed_fp.opportunity_type == OpportunityType.OTHER.value
+    assert refreshed_fp.employment_type == EmploymentType.UNKNOWN.value
+    assert refreshed_fp.first_seen_at.replace(tzinfo=None) == fixed_first_seen.replace(tzinfo=None)
+    assert refreshed_fp.published_at.replace(tzinfo=None) == fixed_published.replace(tzinfo=None)
+    assert refreshed_fp.source_url == "https://remoteok.com/remote-jobs/contracts-manager-1"
+    assert refreshed_fp.application_url == "https://apply.example.com/1"
+    assert refreshed_fp.salary_min == 100000.0
+    assert refreshed_fp.raw_metadata == {"slug": "contracts-manager-1"}
+
+    assert refreshed_jr.opportunity_type == OpportunityType.JUNIOR.value
+    assert refreshed_jr.employment_type == EmploymentType.UNKNOWN.value
+    assert refreshed_state.is_saved is True
+    assert refreshed_state.is_dismissed is False
+    assert refreshed_state.last_viewed_at.replace(tzinfo=None) == fixed_first_seen.replace(tzinfo=None)
+
+    # Vaga manual NÃO foi modificada
+    assert refreshed_manual.employment_type == EmploymentType.OTHER.value
+
+    # 3. Segunda execução é idempotente
+    second_report = reclassify_opportunities(db_session, source_slug="remote_ok", dry_run=False)
+    assert second_report.updated_count == 0
+    assert second_report.unchanged_count == 2
+
+    # 4. Fonte desabilitada (remotive) é recusada
+    bad_code = cli_main(["reclassify-opportunities", "--source", "remotive"])
+    assert bad_code == 1
+    capsys.readouterr()

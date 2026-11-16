@@ -1,3 +1,5 @@
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Mapping
 
@@ -12,6 +14,7 @@ from app.models.opportunity import (
     SyncRunStatus,
 )
 from app.schemas.opportunity import SyncRunSummary
+from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     ConnectorError,
@@ -454,3 +457,127 @@ def sync_sources(
         )
 
     return summaries
+
+
+@dataclass(frozen=True, slots=True)
+class ReclassificationChange:
+    opportunity_id: str
+    title: str
+    old_opportunity_type: str
+    new_opportunity_type: str
+    old_employment_type: str
+    new_employment_type: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReclassificationReport:
+    source_slug: str | None
+    dry_run: bool
+    evaluated_count: int
+    updated_count: int
+    unchanged_count: int
+    before_counts: dict[str, int]
+    after_counts: dict[str, int]
+    changes: tuple[ReclassificationChange, ...]
+
+
+def reclassify_opportunities(
+    db: Session,
+    *,
+    source_slug: str | None = None,
+    dry_run: bool = False,
+) -> ReclassificationReport:
+    """
+    Reavalia deterministicamente `opportunity_type` e `employment_type` de registros
+    já persistidos de fontes externas habilitadas sem alterar cadastros manuais,
+    metadados originais, histórico temporal ou estados do usuário.
+    """
+    ensure_default_sources(db)
+
+    if source_slug:
+        normalized_slug = source_slug.strip().lower()
+        source = db.execute(
+            select(OpportunitySource).where(OpportunitySource.slug == normalized_slug)
+        ).scalar_one_or_none()
+        if source is None:
+            raise ValueError(f"Fonte '{source_slug}' não encontrada no catálogo.")
+        if not source.enabled:
+            raise ValueError(
+                f"Fonte '{source.slug}' está desabilitada e não pode ser reclassificada por este comando."
+            )
+        target_source_ids = [source.id]
+        resolved_slug: str | None = source.slug
+    else:
+        enabled_sources = (
+            db.execute(
+                select(OpportunitySource)
+                .where(OpportunitySource.enabled.is_(True))
+                .order_by(OpportunitySource.slug)
+            )
+            .scalars()
+            .all()
+        )
+        if not enabled_sources:
+            raise ValueError("Nenhuma fonte externa habilitada encontrada para reclassificação.")
+        target_source_ids = [s.id for s in enabled_sources]
+        resolved_slug = None
+
+    opportunities = (
+        db.execute(
+            select(Opportunity)
+            .where(
+                Opportunity.source_id.is_not(None),
+                Opportunity.source_id.in_(target_source_ids),
+            )
+            .order_by(Opportunity.created_at, Opportunity.id)
+        )
+        .scalars()
+        .all()
+    )
+
+    before_counter: Counter[str] = Counter()
+    after_counter: Counter[str] = Counter()
+    changes: list[ReclassificationChange] = []
+
+    for opp in opportunities:
+        before_counter[opp.opportunity_type] += 1
+        decision = classify_opportunity(
+            title=opp.title,
+            tags=list(opp.technologies or []),
+            description=opp.description,
+        )
+        after_counter[decision.opportunity_type] += 1
+
+        if (decision.opportunity_type, decision.employment_type) != (
+            opp.opportunity_type,
+            opp.employment_type,
+        ):
+            changes.append(
+                ReclassificationChange(
+                    opportunity_id=str(opp.id),
+                    title=opp.title,
+                    old_opportunity_type=opp.opportunity_type,
+                    new_opportunity_type=decision.opportunity_type,
+                    old_employment_type=opp.employment_type,
+                    new_employment_type=decision.employment_type,
+                    reasons=decision.reasons,
+                )
+            )
+            if not dry_run:
+                opp.opportunity_type = decision.opportunity_type
+                opp.employment_type = decision.employment_type
+
+    if not dry_run and changes:
+        db.commit()
+
+    return ReclassificationReport(
+        source_slug=resolved_slug,
+        dry_run=dry_run,
+        evaluated_count=len(opportunities),
+        updated_count=len(changes),
+        unchanged_count=len(opportunities) - len(changes),
+        before_counts=dict(sorted(before_counter.items())),
+        after_counts=dict(sorted(after_counter.items())),
+        changes=tuple(changes),
+    )

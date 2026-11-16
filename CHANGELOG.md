@@ -6,6 +6,22 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.2] - 2026-11-15 — Fase 02.2: Auditoria e Refinamento da Classificação de Oportunidades
+
+### Alterado
+- **Classificador Determinístico Refinado (`classification.py` e `RemoteOKConnector`):**
+  - Substituída a heurística por substring simples em `remote_ok.py` pelo módulo dedicado `app/services/opportunities/classification.py` com normalização Unicode/acentos, reparo seguro de mojibake UTF-8/Latin-1, fronteira lexical estrita e separação de peso entre título, descrição higienizada (desconsiderando senioridade de colegas/reportados) e tags ruidosas.
+  - Eliminados falsos positivos de `"intern"` em `internal`/`international`, de `"contract"` em `Contracts Manager` / `smart contract` e de tags ruidosas (`Telehealth Endocrinologist` com tag `internship`; `Team Lead Account Executive` com tag `junior`).
+  - Recuperados falsos negativos identificados apenas na descrição/título acadêmico (`Jr. UI Developer`, `entry-level` em `Travel Support Specialist`, `Independent Contractor` em `AI Content Reviewer`, `part-time freelance` em `APAC Python`, `Marketing Student Assistant`).
+  - Separado estritamente `opportunity_type` de `employment_type` (`unknown` quando contrato não informado; `pj`, `freelance`, `temporary`, `clt` e `internship` quando houver evidência clara).
+- **Reclassificação Segura e CLI (`reclassify-opportunities`):**
+  - Adicionados `reclassify_opportunities` em `sync_service.py` e subcomando `python -m app.cli reclassify-opportunities [--source remote_ok --dry-run]`.
+  - Atualiza exclusivamente `opportunity_type` e `employment_type` de fontes externas habilitadas de forma idempotente, recusando fontes desabilitadas (`remotive`) e preservando cadastros manuais, `opportunity_user_states`, metadados e histórico temporal.
+- **Testes:**
+  - Expandida a suíte `tests/test_opportunities_phase02.py` com casos de fronteira lexical, acentuação, mojibake, conflito entre tags/título/descrição, separação de contrato e idempotência/preservação da reclassificação via CLI.
+
+---
+
 ## [0.2.1] - 2026-11-15 — Fase 02.1: Conformidade das Fontes e Primeira Sincronização Real
 
 ### Alterado

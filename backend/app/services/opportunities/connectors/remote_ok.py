@@ -1,12 +1,11 @@
 from typing import Any
 
 from app.models.opportunity import (
-    EmploymentType,
     ExternalSourceStatus,
-    OpportunityType,
     SourceType,
     WorkMode,
 )
+from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     ConnectorPayloadError,
@@ -24,18 +23,13 @@ from app.services.opportunities.sanitization import (
 )
 
 
-def _classify_remote_ok_types(title: str, tags: list[str]) -> tuple[str, str]:
-    joined = f"{title} {' '.join(tags)}".lower()
-    if any(token in joined for token in ("intern", "internship", "estágio", "estagio", "apprentice")):
-        return (OpportunityType.INTERNSHIP.value, EmploymentType.INTERNSHIP.value)
-    if any(token in joined for token in ("freelance", "contractor", "contract")):
-        return (OpportunityType.FREELANCE.value, EmploymentType.FREELANCE.value)
-    if any(
-        token in joined
-        for token in ("junior", "jr ", " jr", "entry level", "entry-level", "trainee", "graduate")
-    ):
-        return (OpportunityType.JUNIOR.value, EmploymentType.OTHER.value)
-    return (OpportunityType.OTHER.value, EmploymentType.OTHER.value)
+def _classify_remote_ok_types(
+    title: str,
+    tags: list[str],
+    description: str | None = None,
+) -> tuple[str, str]:
+    decision = classify_opportunity(title=title, tags=tags, description=description)
+    return (decision.opportunity_type, decision.employment_type)
 
 
 def _parse_optional_float(value: Any) -> float | None:
@@ -100,7 +94,8 @@ class RemoteOKConnector(BaseOpportunityConnector):
             tags = normalize_string_list(
                 item.get("tags") if isinstance(item.get("tags"), list) else []
             )
-            opp_type, emp_type = _classify_remote_ok_types(raw_title, tags)
+            description = sanitize_external_html_text(item.get("description"))
+            opp_type, emp_type = _classify_remote_ok_types(raw_title, tags, description)
             raw_location = sanitize_plain_text(item.get("location"))
             eligible_countries, country, eligibility_unknown = parse_geo_eligibility(
                 raw_location
@@ -123,7 +118,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     external_id=str(raw_id).strip(),
                     title=raw_title,
                     company_name=sanitize_plain_text(item.get("company"), max_length=200),
-                    description=sanitize_external_html_text(item.get("description")),
+                    description=description,
                     opportunity_type=opp_type,
                     employment_type=emp_type,
                     work_mode=WorkMode.REMOTE.value,
