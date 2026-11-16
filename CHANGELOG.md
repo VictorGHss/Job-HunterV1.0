@@ -6,6 +6,20 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.3] - 2026-11-15 — Fase 02.3: Classificação por Área Profissional e Relevância do Matching
+
+### Adicionado
+- **Taxonomia e Persistência de Área Profissional (`0004_professional_areas`):**
+  - Novo enum `ProfessionalArea` (`software_development`, `backend`, `frontend`, `fullstack`, `data`, `artificial_intelligence`, `devops_cloud`, `api_integrations`, `infrastructure`, `technical_support`, `customer_support`, `marketing_sales`, `healthcare`, `administration`, `other`, `unknown`) e colunas `professional_area` + `secondary_areas` na tabela `opportunities` com migração incremental e downgrade funcional.
+- **Classificador Determinístico Multi-Área (`classify_professional_area`):**
+  - Classifica área primária e especialidades secundárias independentemente de `opportunity_type` e `employment_type`, bloqueando falsos positivos de suporte técnico, atendimento, marketing, vendas, saúde e administração mesmo quando mencionam tecnologias incidentalmente ou possuem tags ruidosas.
+- **Matching por Relevância de Área (`matching.py`) e Filtro na API/Interface:**
+  - `OpportunityMatchEvaluation` expandido com `area_compatibility` (`compatible`, `incompatible`, `unknown`), `matched_areas`, `matched_technologies`, `missing_priority_technologies` e `uncertainty_notes`.
+  - Filtro `area` em `GET /api/v1/opportunities` (considerando área primária e secundárias) e seletor de **Área profissional** com badges legíveis em português em `OpportunityDiscoveryPage.tsx`.
+  - Comando `reclassify-opportunities` atualizado para recalcular e persistir `professional_area` e `secondary_areas` de forma idempotente.
+
+---
+
 ## [0.2.2] - 2026-11-15 — Fase 02.2: Auditoria e Refinamento da Classificação de Oportunidades
 
 ### Alterado

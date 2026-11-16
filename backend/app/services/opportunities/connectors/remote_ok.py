@@ -95,7 +95,13 @@ class RemoteOKConnector(BaseOpportunityConnector):
                 item.get("tags") if isinstance(item.get("tags"), list) else []
             )
             description = sanitize_external_html_text(item.get("description"))
-            opp_type, emp_type = _classify_remote_ok_types(raw_title, tags, description)
+            decision = classify_opportunity(
+                title=raw_title,
+                tags=tags,
+                description=description,
+            )
+            opp_type = decision.opportunity_type
+            emp_type = decision.employment_type
             raw_location = sanitize_plain_text(item.get("location"))
             eligible_countries, country, eligibility_unknown = parse_geo_eligibility(
                 raw_location
@@ -140,6 +146,8 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     published_at=published_at,
                     deadline_at=None,
                     source_status=ExternalSourceStatus.ACTIVE.value,
+                    professional_area=decision.professional_area,
+                    secondary_areas=list(decision.secondary_areas),
                     raw_metadata={
                         "slug": sanitize_plain_text(item.get("slug")),
                         "source": "remote_ok",

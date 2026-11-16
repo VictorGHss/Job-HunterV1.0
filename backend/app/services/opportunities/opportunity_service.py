@@ -22,7 +22,11 @@ from app.schemas.opportunity import (
     OpportunityUserStateResponse,
     OpportunityUserStateUpdate,
 )
-from app.services.opportunities.matching import evaluate_opportunity_for_user
+from app.services.opportunities.classification import classify_professional_area
+from app.services.opportunities.matching import (
+    evaluate_opportunity_for_user,
+    resolve_opportunity_areas,
+)
 from app.services.opportunities.sanitization import (
     compute_opportunity_content_hash,
     normalize_canonical_url,
@@ -54,6 +58,7 @@ def _serialize_opportunity(
         if state is not None
         else OpportunityUserStateResponse()
     )
+    primary_area, secondary_areas = resolve_opportunity_areas(opp)
     return OpportunityResponse(
         id=opp.id,
         is_manual=opp.created_by_user_id is not None and opp.source_id is None,
@@ -64,6 +69,8 @@ def _serialize_opportunity(
         opportunity_type=opp.opportunity_type,
         employment_type=opp.employment_type,
         work_mode=opp.work_mode,
+        professional_area=primary_area,
+        secondary_areas=secondary_areas,
         location_text=opp.location_text,
         city=opp.city,
         state=opp.state,
@@ -106,6 +113,7 @@ def _matches_query_filters(
     opportunity_type: str | None,
     work_mode: str | None,
     employment_type: str | None,
+    professional_area: str | None = None,
     location: str | None,
     country: str | None,
     source_slug: str | None,
@@ -133,6 +141,11 @@ def _matches_query_filters(
 
     if employment_type and opp.employment_type != employment_type:
         return False
+
+    if professional_area:
+        primary_area, secondary_areas = resolve_opportunity_areas(opp)
+        if primary_area != professional_area and professional_area not in secondary_areas:
+            return False
 
     if source_slug:
         slug_norm = source_slug.strip().lower()
@@ -204,6 +217,7 @@ def list_opportunities(
     opportunity_type: str | None = None,
     work_mode: str | None = None,
     employment_type: str | None = None,
+    professional_area: str | None = None,
     location: str | None = None,
     country: str | None = None,
     source_slug: str | None = None,
@@ -246,6 +260,7 @@ def list_opportunities(
             opportunity_type=opportunity_type,
             work_mode=work_mode,
             employment_type=employment_type,
+            professional_area=professional_area,
             location=location,
             country=country,
             source_slug=source_slug,
@@ -341,6 +356,18 @@ def create_manual_opportunity(
         description=payload.description,
     )
 
+    if payload.professional_area is not None and payload.professional_area.value != "unknown":
+        primary_area = payload.professional_area.value
+        secondary_areas = list(payload.secondary_areas or [])
+    else:
+        primary_area, sec_tuple, _ = classify_professional_area(
+            title=payload.title,
+            tags=payload.technologies,
+            description=payload.description,
+            requirements=payload.requirements,
+        )
+        secondary_areas = list(sec_tuple)
+
     opp = Opportunity(
         source_id=None,
         created_by_user_id=user.id,
@@ -351,6 +378,8 @@ def create_manual_opportunity(
         opportunity_type=payload.opportunity_type.value,
         employment_type=payload.employment_type.value,
         work_mode=payload.work_mode.value,
+        professional_area=primary_area,
+        secondary_areas=secondary_areas,
         location_text=payload.location_text,
         city=payload.city,
         state=payload.state,
@@ -408,12 +437,34 @@ def update_manual_opportunity(
 
     update_data = payload.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        if field in {"opportunity_type", "employment_type", "work_mode", "source_status"} and value is not None:
+        if (
+            field
+            in {
+                "opportunity_type",
+                "employment_type",
+                "work_mode",
+                "source_status",
+                "professional_area",
+            }
+            and value is not None
+        ):
             setattr(opp, field, value.value if hasattr(value, "value") else value)
         elif field == "source_url" and value is not None:
             setattr(opp, field, normalize_canonical_url(value))
         else:
             setattr(opp, field, value)
+
+    if "professional_area" not in update_data and any(
+        k in update_data for k in ("title", "description", "technologies")
+    ):
+        primary_area, sec_tuple, _ = classify_professional_area(
+            title=opp.title,
+            tags=list(opp.technologies or []),
+            description=opp.description,
+            requirements=list(opp.requirements or []),
+        )
+        opp.professional_area = primary_area
+        opp.secondary_areas = list(sec_tuple)
 
     opp.content_hash = compute_opportunity_content_hash(
         title=opp.title,

@@ -15,6 +15,7 @@ from app.models.opportunity import (
     OpportunitySyncRun,
     OpportunityType,
     OpportunityUserState,
+    ProfessionalArea,
     SyncRunStatus,
     WorkMode,
 )
@@ -1109,6 +1110,7 @@ def test_phase022_safe_idempotent_reclassification_and_cli(
 
     assert refreshed_fp.opportunity_type == OpportunityType.OTHER.value
     assert refreshed_fp.employment_type == EmploymentType.UNKNOWN.value
+    assert refreshed_fp.professional_area == ProfessionalArea.ADMINISTRATION.value
     assert refreshed_fp.first_seen_at.replace(tzinfo=None) == fixed_first_seen.replace(tzinfo=None)
     assert refreshed_fp.published_at.replace(tzinfo=None) == fixed_published.replace(tzinfo=None)
     assert refreshed_fp.source_url == "https://remoteok.com/remote-jobs/contracts-manager-1"
@@ -1118,6 +1120,7 @@ def test_phase022_safe_idempotent_reclassification_and_cli(
 
     assert refreshed_jr.opportunity_type == OpportunityType.JUNIOR.value
     assert refreshed_jr.employment_type == EmploymentType.UNKNOWN.value
+    assert refreshed_jr.professional_area == ProfessionalArea.FRONTEND.value
     assert refreshed_state.is_saved is True
     assert refreshed_state.is_dismissed is False
     assert refreshed_state.last_viewed_at.replace(tzinfo=None) == fixed_first_seen.replace(tzinfo=None)
@@ -1134,3 +1137,355 @@ def test_phase022_safe_idempotent_reclassification_and_cli(
     bad_code = cli_main(["reclassify-opportunities", "--source", "remotive"])
     assert bad_code == 1
     capsys.readouterr()
+
+
+def test_phase023_professional_area_taxonomy_and_multi_area_classification():
+    # 1. Exemplos obrigatórios da Fase 02.3 (separação estrita senioridade x área x contrato)
+    jr_be = classify_opportunity(
+        title="Junior Backend Developer",
+        tags=["python", "fastapi"],
+        description="Build REST APIs with Python and FastAPI.",
+    )
+    assert jr_be.opportunity_type == OpportunityType.JUNIOR.value
+    assert jr_be.professional_area == ProfessionalArea.BACKEND.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value in jr_be.secondary_areas
+
+    sr_py = classify_opportunity(
+        title="Senior Python Engineer",
+        tags=["python"],
+        description="5+ years building distributed backend services.",
+    )
+    assert sr_py.opportunity_type == OpportunityType.OTHER.value
+    assert sr_py.professional_area == ProfessionalArea.BACKEND.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value in sr_py.secondary_areas
+
+    ai_eng = classify_opportunity(
+        title="AI Engineer",
+        tags=["python", "pytorch"],
+        description="Develop LLM pipelines and AI applications.",
+    )
+    assert ai_eng.professional_area == ProfessionalArea.ARTIFICIAL_INTELLIGENCE.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value in ai_eng.secondary_areas
+
+    data_analyst = classify_opportunity(
+        title="Data Analyst",
+        tags=["sql", "excel"],
+        description="Create dashboards and KPI reports.",
+    )
+    assert data_analyst.professional_area == ProfessionalArea.DATA.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value not in data_analyst.secondary_areas
+
+    tech_sup = classify_opportunity(
+        title="Technical Support Specialist",
+        tags=["python", "sql", "backend"],
+        description="Handle L1/L2 support tickets in Zendesk. Basic Python or SQL query troubleshooting.",
+    )
+    assert tech_sup.professional_area == ProfessionalArea.TECHNICAL_SUPPORT.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value not in tech_sup.secondary_areas
+    assert ProfessionalArea.BACKEND.value not in tech_sup.secondary_areas
+
+    cust_sup = classify_opportunity(
+        title="Customer Support Representative",
+        tags=["customer support", "dev"],
+        description="Assist customers via phone and chat.",
+    )
+    assert cust_sup.professional_area == ProfessionalArea.CUSTOMER_SUPPORT.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value not in cust_sup.secondary_areas
+
+    mkt_intern = classify_opportunity(
+        title="Marketing Student Assistant",
+        tags=["marketing", "dev", "golang"],
+        description="Student job supporting B2B marketing campaigns, 15-20 hours/week.",
+    )
+    assert mkt_intern.opportunity_type == OpportunityType.INTERNSHIP.value
+    assert mkt_intern.professional_area == ProfessionalArea.MARKETING_SALES.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value not in mkt_intern.secondary_areas
+
+    api_dev = classify_opportunity(
+        title="API Integration Developer",
+        tags=["python", "webhooks"],
+        description="Develop REST API integrations and automation workflows.",
+    )
+    assert api_dev.professional_area == ProfessionalArea.API_INTEGRATIONS.value
+    assert ProfessionalArea.SOFTWARE_DEVELOPMENT.value in api_dev.secondary_areas
+
+    devops_eng = classify_opportunity(
+        title="DevOps Engineer",
+        tags=["aws", "terraform", "kubernetes"],
+        description="Maintain Kubernetes clusters and CI/CD pipelines.",
+    )
+    assert devops_eng.professional_area == ProfessionalArea.DEVOPS_CLOUD.value
+    assert ProfessionalArea.BACKEND.value not in devops_eng.secondary_areas
+
+    sw_generic = classify_opportunity(
+        title="Software Engineer",
+        tags=["golang", "dev"],
+        description="Remote software engineering position.",
+    )
+    assert sw_generic.opportunity_type == OpportunityType.OTHER.value
+    assert sw_generic.professional_area == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+
+    # 2. Vaga Full Stack com múltiplas áreas (Java, Spring Boot, React, PostgreSQL)
+    fs_multi = classify_opportunity(
+        title="Desenvolvedor Full Stack Júnior",
+        tags=["java", "spring boot", "react", "postgresql"],
+        description="Desenvolvimento Full Stack com Java, Spring Boot, React, TypeScript e PostgreSQL consumindo APIs REST.",
+    )
+    assert fs_multi.opportunity_type == OpportunityType.JUNIOR.value
+    assert fs_multi.professional_area == ProfessionalArea.FULLSTACK.value
+    assert set(fs_multi.secondary_areas) >= {
+        ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        ProfessionalArea.BACKEND.value,
+        ProfessionalArea.FRONTEND.value,
+        ProfessionalArea.API_INTEGRATIONS.value,
+    }
+
+    # 3. Vaga sem área identificável -> unknown
+    unk_area = classify_opportunity(
+        title="General Open Opportunity #402",
+        tags=[],
+        description="Confidential opportunity. Details upon request.",
+    )
+    assert unk_area.professional_area == ProfessionalArea.UNKNOWN.value
+    assert unk_area.secondary_areas == ()
+
+
+def test_phase023_matching_relevance_support_exclusion_and_api_area_filter(
+    db_session, make_client
+):
+    import copy
+
+    user = create_user_account(
+        db_session,
+        email="phase023.dev@example.com",
+        display_name="Dev Fase 02.3",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    profile = get_or_create_profile(db_session, user)
+    profile.country = "Brasil"
+    prefs = copy.deepcopy(profile.preferences)
+    prefs["internships"]["enabled"] = True
+    prefs["internships"]["priority_areas"] = [
+        "Desenvolvimento Backend",
+        "Engenharia de software",
+        "APIs e integrações",
+    ]
+    prefs["internships"]["excluded_areas"] = ["Suporte técnico", "Help desk", "Atendimento de TI"]
+    prefs["junior_developer"]["enabled"] = True
+    prefs["junior_developer"]["block_clt"] = True
+    prefs["junior_developer"]["priority_areas"] = [
+        "Desenvolvimento Backend",
+        "Full Stack",
+        "Inteligência artificial",
+    ]
+    prefs["junior_developer"]["excluded_areas"] = ["Suporte técnico", "Help desk"]
+    prefs["freelance"]["enabled"] = True
+    prefs["freelance"]["scopes"] = ["Brasil", "Exterior (Internacional)"]
+    prefs["freelance"]["priority_categories"] = ["APIs e integrações", "Python", "Automação"]
+    profile.preferences = prefs
+    db_session.commit()
+
+    now = datetime.now(UTC)
+
+    # 1. Travel Support Specialist (junior, mas customer_support -> incompatível com dev!)
+    opp_travel_jr = Opportunity(
+        external_id="p23-1",
+        title="Travel Support Specialist",
+        description="This is an entry-level opportunity within the travel industry.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.CUSTOMER_SUPPORT.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/travel-jr",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-1",
+    )
+    eval_travel = evaluate_opportunity_for_user(opp_travel_jr, profile)
+    assert eval_travel.eligible is False
+    assert eval_travel.area_compatibility == "incompatible"
+
+    # 2. Suporte técnico mencionando Python/Java incidentalmente -> incompatível!
+    opp_tech_support = Opportunity(
+        external_id="p23-2",
+        title="Technical Support Specialist",
+        description="L1/L2 Help Desk support. Knowledge of Python and Java is a plus.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        employment_type=EmploymentType.PJ.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.TECHNICAL_SUPPORT.value,
+        secondary_areas=[],
+        technologies=["Python", "Java"],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/tech-support",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-2",
+    )
+    eval_sup = evaluate_opportunity_for_user(opp_tech_support, profile)
+    assert eval_sup.eligible is False
+    assert eval_sup.area_compatibility == "incompatible"
+    assert eval_sup.matched_technologies == []
+
+    # 3. Vaga Júnior de Backend com employment_type=unknown e block_clt=true -> elegível!
+    opp_jr_dev_unknown_contract = Opportunity(
+        external_id="p23-3",
+        title="Junior Python Backend Developer",
+        description="Build FastAPI microservices and PostgreSQL integrations.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        secondary_areas=[
+            ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+            ProfessionalArea.API_INTEGRATIONS.value,
+        ],
+        technologies=["Python", "FastAPI", "PostgreSQL"],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/jr-backend",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-3",
+    )
+    eval_jr_dev = evaluate_opportunity_for_user(opp_jr_dev_unknown_contract, profile)
+    assert eval_jr_dev.eligible is True
+    assert eval_jr_dev.area_compatibility == "compatible"
+    assert any("contrato não informado" in n.lower() for n in eval_jr_dev.uncertainty_notes)
+
+    # 4. Estágio de desenvolvimento vs Estágio de marketing
+    opp_intern_dev = Opportunity(
+        external_id="p23-4",
+        title="Estágio em Engenharia de Software Backend",
+        description="Desenvolvimento em Java, Spring Boot e APIs REST.",
+        opportunity_type=OpportunityType.INTERNSHIP.value,
+        employment_type=EmploymentType.INTERNSHIP.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        secondary_areas=[ProfessionalArea.SOFTWARE_DEVELOPMENT.value],
+        technologies=["Java", "Spring Boot"],
+        eligible_countries=["Brasil"],
+        source_url="https://example.com/intern-dev",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-4",
+    )
+    opp_intern_mkt = Opportunity(
+        external_id="p23-5",
+        title="Marketing Student Assistant",
+        description="Student job in B2B marketing.",
+        opportunity_type=OpportunityType.INTERNSHIP.value,
+        employment_type=EmploymentType.INTERNSHIP.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.MARKETING_SALES.value,
+        secondary_areas=[ProfessionalArea.ADMINISTRATION.value],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/intern-mkt",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-5",
+    )
+    assert evaluate_opportunity_for_user(opp_intern_dev, profile).eligible is True
+    assert evaluate_opportunity_for_user(opp_intern_mkt, profile).eligible is False
+
+    # 5. Freelance de desenvolvimento vs Freelance de saúde/outras áreas
+    opp_freela_dev = Opportunity(
+        external_id="p23-6",
+        title="Freelance Python API Automation Developer",
+        description="Independent contractor building FastAPI integrations.",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        employment_type=EmploymentType.FREELANCE.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.API_INTEGRATIONS.value,
+        secondary_areas=[
+            ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+            ProfessionalArea.BACKEND.value,
+        ],
+        technologies=["Python", "FastAPI"],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/freela-dev",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-6",
+    )
+    opp_freela_med = Opportunity(
+        external_id="p23-7",
+        title="Freelance Question Reviewers",
+        description="OB-GYN medical exam question review.",
+        opportunity_type=OpportunityType.FREELANCE.value,
+        employment_type=EmploymentType.FREELANCE.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.HEALTHCARE.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/freela-med",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-7",
+    )
+    assert evaluate_opportunity_for_user(opp_freela_dev, profile).eligible is True
+    assert evaluate_opportunity_for_user(opp_freela_med, profile).eligible is False
+
+    # 6. Oportunidade sem área identificada (unknown) -> não recomendada como compatível, mas consultável
+    opp_unknown_area = Opportunity(
+        external_id="p23-8",
+        title="Open Remote Opportunity #99",
+        description="Apply with resume.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        source_url="https://example.com/unk-99",
+        first_seen_at=now,
+        last_seen_at=now,
+        content_hash="h-p23-8",
+    )
+    eval_unk = evaluate_opportunity_for_user(opp_unknown_area, profile)
+    assert eval_unk.eligible is False
+    assert eval_unk.area_compatibility == "unknown"
+
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    src = {s.slug: s for s in ensure_default_sources(db_session)}["remote_ok"]
+    for o in (
+        opp_travel_jr,
+        opp_tech_support,
+        opp_jr_dev_unknown_contract,
+        opp_intern_dev,
+        opp_intern_mkt,
+        opp_freela_dev,
+        opp_freela_med,
+        opp_unknown_area,
+    ):
+        o.source_id = src.id
+        db_session.add(o)
+    db_session.commit()
+
+    client = make_client(("10.10.0.55", 50000))
+    login_and_get_csrf(client, "phase023.dev@example.com", "StrongPassword123!")
+
+    # Aba Júnior padrão retorna apenas a vaga de desenvolvimento compatível
+    jr_default = client.get("/api/v1/opportunities?type=junior").json()
+    assert [i["title"] for i in jr_default["items"]] == ["Junior Python Backend Developer"]
+    assert jr_default["items"][0]["professional_area"] == "backend"
+    assert "api_integrations" in jr_default["items"][0]["secondary_areas"]
+
+    # Filtro por área secundária (api_integrations) encontra a vaga Junior Python Backend Developer
+    jr_api_area = client.get("/api/v1/opportunities?type=junior&area=api_integrations").json()
+    assert [i["title"] for i in jr_api_area["items"]] == ["Junior Python Backend Developer"]
+
+    # Vagas sem área ou de atendimento permanecem consultáveis com include_excluded=true e filtro de área
+    jr_unk_query = client.get(
+        "/api/v1/opportunities?type=junior&area=unknown&include_excluded=true"
+    ).json()
+    assert [i["title"] for i in jr_unk_query["items"]] == ["Open Remote Opportunity #99"]
+
+    jr_cust_query = client.get(
+        "/api/v1/opportunities?type=junior&area=customer_support&include_excluded=true"
+    ).json()
+    assert [i["title"] for i in jr_cust_query["items"]] == ["Travel Support Specialist"]
+

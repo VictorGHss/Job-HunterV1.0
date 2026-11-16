@@ -8,6 +8,7 @@ from app.models.opportunity import (
     EmploymentType,
     ExternalSourceStatus,
     OpportunityType,
+    ProfessionalArea,
     SourceType,
     SyncRunStatus,
     WorkMode,
@@ -45,6 +46,11 @@ class OpportunityUserStateResponse(BaseModel):
 class OpportunityMatchEvaluation(BaseModel):
     eligible: bool
     geographic_eligibility: Literal["eligible", "excluded", "unknown"]
+    area_compatibility: Literal["compatible", "incompatible", "unknown"] = "unknown"
+    matched_areas: list[str] = Field(default_factory=list)
+    matched_technologies: list[str] = Field(default_factory=list)
+    missing_priority_technologies: list[str] = Field(default_factory=list)
+    uncertainty_notes: list[str] = Field(default_factory=list)
     inclusion_reasons: list[str] = Field(default_factory=list)
     exclusion_reasons: list[str] = Field(default_factory=list)
 
@@ -59,6 +65,8 @@ class OpportunityResponse(BaseModel):
     opportunity_type: OpportunityType | str
     employment_type: EmploymentType | str
     work_mode: WorkMode | str
+    professional_area: ProfessionalArea | str = ProfessionalArea.UNKNOWN.value
+    secondary_areas: list[str] = Field(default_factory=list)
     location_text: str | None = None
     city: str | None = None
     state: str | None = None
@@ -101,6 +109,8 @@ class ManualOpportunityCreate(BaseModel):
     opportunity_type: OpportunityType = OpportunityType.UNKNOWN
     employment_type: EmploymentType = EmploymentType.UNKNOWN
     work_mode: WorkMode = WorkMode.UNKNOWN
+    professional_area: ProfessionalArea | None = None
+    secondary_areas: list[str] = Field(default_factory=list)
     location_text: str | None = Field(default=None, max_length=255)
     city: str | None = Field(default=None, max_length=120)
     state: str | None = Field(default=None, max_length=120)
@@ -163,6 +173,8 @@ class ManualOpportunityUpdate(BaseModel):
     opportunity_type: OpportunityType | None = None
     employment_type: EmploymentType | None = None
     work_mode: WorkMode | None = None
+    professional_area: ProfessionalArea | None = None
+    secondary_areas: list[str] | None = None
     location_text: str | None = Field(default=None, max_length=255)
     country: str | None = Field(default=None, max_length=120)
     eligible_countries: list[str] | None = None

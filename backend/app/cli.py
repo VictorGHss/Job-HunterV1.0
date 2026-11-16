@@ -201,15 +201,19 @@ def handle_reclassify_opportunities(args: argparse.Namespace) -> int:
     )
     print(f"Distribuicao anterior: {report.before_counts}")
     print(f"Distribuicao resultante: {report.after_counts}")
+    if report.before_area_counts is not None and report.after_area_counts is not None:
+        print(f"Distribuicao de areas anterior: {report.before_area_counts}")
+        print(f"Distribuicao de areas resultante: {report.after_area_counts}")
     for change in report.changes:
         if (
             change.old_opportunity_type != change.new_opportunity_type
             or change.new_employment_type != "unknown"
+            or change.old_professional_area != change.new_professional_area
         ):
             print(
                 f"  - [{change.opportunity_id}] {change.title}: "
-                f"{change.old_opportunity_type}/{change.old_employment_type} -> "
-                f"{change.new_opportunity_type}/{change.new_employment_type}"
+                f"{change.old_opportunity_type}/{change.old_employment_type}/{change.old_professional_area} -> "
+                f"{change.new_opportunity_type}/{change.new_employment_type}/{change.new_professional_area}"
             )
     return 0
 

@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.opportunity import EmploymentType, OpportunityType, WorkMode
+from app.models.opportunity import (
+    EmploymentType,
+    OpportunityType,
+    ProfessionalArea,
+    WorkMode,
+)
 from app.models.user import User
 from app.schemas.opportunity import (
     ManualOpportunityCreate,
@@ -49,6 +54,7 @@ def search_opportunities(
     type: Annotated[OpportunityType | None, Query()] = None,
     work_mode: Annotated[WorkMode | None, Query()] = None,
     employment_type: Annotated[EmploymentType | None, Query()] = None,
+    area: Annotated[ProfessionalArea | None, Query()] = None,
     location: Annotated[str | None, Query(max_length=120)] = None,
     country: Annotated[str | None, Query(max_length=120)] = None,
     source: Annotated[str | None, Query(max_length=64)] = None,
@@ -67,6 +73,7 @@ def search_opportunities(
         opportunity_type=type.value if type else None,
         work_mode=work_mode.value if work_mode else None,
         employment_type=employment_type.value if employment_type else None,
+        professional_area=area.value if area else None,
         location=location,
         country=country,
         source_slug=source,

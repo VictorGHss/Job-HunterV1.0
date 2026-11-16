@@ -8,6 +8,7 @@ from app.models.opportunity import (
     SourceType,
     WorkMode,
 )
+from app.services.opportunities.classification import classify_professional_area
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     ConnectorPayloadError,
@@ -158,13 +159,19 @@ class RemotiveConnector(BaseOpportunityConnector):
             sal_min, sal_max, sal_cur, sal_period = _parse_remotive_salary(
                 sanitize_plain_text(item.get("salary"), max_length=120)
             )
+            description = sanitize_external_html_text(item.get("description"))
+            primary_area, secondary_areas, _ = classify_professional_area(
+                title=raw_title,
+                tags=technologies,
+                description=description,
+            )
 
             drafts.append(
                 NormalizedOpportunityDraft(
                     external_id=str(raw_id).strip(),
                     title=raw_title,
                     company_name=sanitize_plain_text(item.get("company_name"), max_length=200),
-                    description=sanitize_external_html_text(item.get("description")),
+                    description=description,
                     opportunity_type=opp_type,
                     employment_type=emp_type,
                     work_mode=WorkMode.REMOTE.value,
@@ -186,6 +193,8 @@ class RemotiveConnector(BaseOpportunityConnector):
                     published_at=parse_iso_datetime(item.get("publication_date")),
                     deadline_at=None,
                     source_status=ExternalSourceStatus.ACTIVE.value,
+                    professional_area=primary_area,
+                    secondary_areas=list(secondary_areas),
                     raw_metadata={
                         "category": sanitize_plain_text(item.get("category")),
                         "job_type": sanitize_plain_text(item.get("job_type")),

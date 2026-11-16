@@ -252,6 +252,7 @@ export const api = {
       if (params.work_mode) search.set("work_mode", params.work_mode);
       if (params.employment_type)
         search.set("employment_type", params.employment_type);
+      if (params.area) search.set("area", params.area);
       if (params.location && params.location.trim())
         search.set("location", params.location.trim());
       if (params.country && params.country.trim())

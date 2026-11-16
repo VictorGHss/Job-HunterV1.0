@@ -292,6 +292,8 @@ function buildMockOpportunity(overrides: Partial<Opportunity> = {}): Opportunity
     opportunity_type: "junior",
     employment_type: "pj",
     work_mode: "remote",
+    professional_area: "backend",
+    secondary_areas: ["software_development", "api_integrations"],
     location_text: "Worldwide",
     city: null,
     state: null,
@@ -404,6 +406,19 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Junior Python Backend Developer")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Área: Backend/i)).toBeInTheDocument();
+    expect(screen.getByText(/Especialidades secundárias:/i)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/APIs, Integrações e Automação/i).length
+    ).toBeGreaterThanOrEqual(2);
+
+    const areaSelect = screen.getByLabelText(/Área profissional/i);
+    fireEvent.change(areaSelect, { target: { value: "backend" } });
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "junior", area: "backend" })
+      );
     });
 
     // Verifica atribuição visível e ausência de nofollow nos links de saída

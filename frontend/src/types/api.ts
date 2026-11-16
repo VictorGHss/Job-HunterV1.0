@@ -252,6 +252,24 @@ export type EmploymentType =
   | "other"
   | "unknown";
 
+export type ProfessionalArea =
+  | "software_development"
+  | "backend"
+  | "frontend"
+  | "fullstack"
+  | "data"
+  | "artificial_intelligence"
+  | "devops_cloud"
+  | "api_integrations"
+  | "infrastructure"
+  | "technical_support"
+  | "customer_support"
+  | "marketing_sales"
+  | "healthcare"
+  | "administration"
+  | "other"
+  | "unknown";
+
 export type ExternalSourceStatus = "active" | "closed" | "unknown";
 
 export interface OpportunitySourcePublic {
@@ -272,6 +290,11 @@ export interface OpportunitySourcePublic {
 export interface OpportunityMatchEvaluation {
   eligible: boolean;
   geographic_eligibility: "eligible" | "excluded" | "unknown";
+  area_compatibility?: "compatible" | "incompatible" | "unknown";
+  matched_areas?: ProfessionalArea[];
+  matched_technologies?: string[];
+  missing_priority_technologies?: string[];
+  uncertainty_notes?: string[];
   inclusion_reasons: string[];
   exclusion_reasons: string[];
 }
@@ -292,6 +315,8 @@ export interface Opportunity {
   opportunity_type: OpportunityType;
   employment_type: EmploymentType;
   work_mode: WorkMode;
+  professional_area?: ProfessionalArea;
+  secondary_areas?: ProfessionalArea[];
   location_text: string | null;
   city: string | null;
   state: string | null;
@@ -330,6 +355,7 @@ export interface OpportunityListParams {
   type?: OpportunityType;
   work_mode?: WorkMode;
   employment_type?: EmploymentType;
+  area?: ProfessionalArea;
   location?: string;
   country?: string;
   source?: string;

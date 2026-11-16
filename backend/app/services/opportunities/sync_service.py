@@ -132,6 +132,8 @@ def _upsert_opportunity(
             opportunity_type=draft.opportunity_type,
             employment_type=draft.employment_type,
             work_mode=draft.work_mode,
+            professional_area=draft.professional_area,
+            secondary_areas=draft.secondary_areas,
             location_text=draft.location_text,
             city=draft.city,
             state=draft.state,
@@ -168,6 +170,8 @@ def _upsert_opportunity(
     existing.opportunity_type = draft.opportunity_type
     existing.employment_type = draft.employment_type
     existing.work_mode = draft.work_mode
+    existing.professional_area = draft.professional_area
+    existing.secondary_areas = draft.secondary_areas
     existing.location_text = draft.location_text
     existing.city = draft.city
     existing.state = draft.state
@@ -467,7 +471,11 @@ class ReclassificationChange:
     new_opportunity_type: str
     old_employment_type: str
     new_employment_type: str
-    reasons: tuple[str, ...]
+    old_professional_area: str = "unknown"
+    new_professional_area: str = "unknown"
+    old_secondary_areas: tuple[str, ...] = ()
+    new_secondary_areas: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +488,8 @@ class ReclassificationReport:
     before_counts: dict[str, int]
     after_counts: dict[str, int]
     changes: tuple[ReclassificationChange, ...]
+    before_area_counts: dict[str, int] | None = None
+    after_area_counts: dict[str, int] | None = None
 
 
 def reclassify_opportunities(
@@ -489,9 +499,9 @@ def reclassify_opportunities(
     dry_run: bool = False,
 ) -> ReclassificationReport:
     """
-    Reavalia deterministicamente `opportunity_type` e `employment_type` de registros
-    já persistidos de fontes externas habilitadas sem alterar cadastros manuais,
-    metadados originais, histórico temporal ou estados do usuário.
+    Reavalia deterministicamente `opportunity_type`, `employment_type`, `professional_area`
+    e `secondary_areas` de registros já persistidos de fontes externas habilitadas sem
+    alterar cadastros manuais, metadados originais, histórico temporal ou estados do usuário.
     """
     ensure_default_sources(db)
 
@@ -538,20 +548,35 @@ def reclassify_opportunities(
 
     before_counter: Counter[str] = Counter()
     after_counter: Counter[str] = Counter()
+    before_area_counter: Counter[str] = Counter()
+    after_area_counter: Counter[str] = Counter()
     changes: list[ReclassificationChange] = []
 
     for opp in opportunities:
+        old_area = opp.professional_area or "unknown"
+        old_sec = tuple(opp.secondary_areas or [])
         before_counter[opp.opportunity_type] += 1
+        before_area_counter[old_area] += 1
+
         decision = classify_opportunity(
             title=opp.title,
             tags=list(opp.technologies or []),
             description=opp.description,
+            requirements=list(opp.requirements or []),
         )
         after_counter[decision.opportunity_type] += 1
+        after_area_counter[decision.professional_area] += 1
 
-        if (decision.opportunity_type, decision.employment_type) != (
+        if (
+            decision.opportunity_type,
+            decision.employment_type,
+            decision.professional_area,
+            decision.secondary_areas,
+        ) != (
             opp.opportunity_type,
             opp.employment_type,
+            old_area,
+            old_sec,
         ):
             changes.append(
                 ReclassificationChange(
@@ -561,12 +586,18 @@ def reclassify_opportunities(
                     new_opportunity_type=decision.opportunity_type,
                     old_employment_type=opp.employment_type,
                     new_employment_type=decision.employment_type,
+                    old_professional_area=old_area,
+                    new_professional_area=decision.professional_area,
+                    old_secondary_areas=old_sec,
+                    new_secondary_areas=decision.secondary_areas,
                     reasons=decision.reasons,
                 )
             )
             if not dry_run:
                 opp.opportunity_type = decision.opportunity_type
                 opp.employment_type = decision.employment_type
+                opp.professional_area = decision.professional_area
+                opp.secondary_areas = list(decision.secondary_areas)
 
     if not dry_run and changes:
         db.commit()
@@ -580,4 +611,6 @@ def reclassify_opportunities(
         before_counts=dict(sorted(before_counter.items())),
         after_counts=dict(sorted(after_counter.items())),
         changes=tuple(changes),
+        before_area_counts=dict(sorted(before_area_counter.items())),
+        after_area_counts=dict(sorted(after_area_counter.items())),
     )

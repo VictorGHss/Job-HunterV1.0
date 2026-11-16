@@ -52,6 +52,25 @@ class EmploymentType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProfessionalArea(StrEnum):
+    SOFTWARE_DEVELOPMENT = "software_development"
+    BACKEND = "backend"
+    FRONTEND = "frontend"
+    FULLSTACK = "fullstack"
+    DATA = "data"
+    ARTIFICIAL_INTELLIGENCE = "artificial_intelligence"
+    DEVOPS_CLOUD = "devops_cloud"
+    API_INTEGRATIONS = "api_integrations"
+    INFRASTRUCTURE = "infrastructure"
+    TECHNICAL_SUPPORT = "technical_support"
+    CUSTOMER_SUPPORT = "customer_support"
+    MARKETING_SALES = "marketing_sales"
+    HEALTHCARE = "healthcare"
+    ADMINISTRATION = "administration"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
 class ExternalSourceStatus(StrEnum):
     ACTIVE = "active"
     CLOSED = "closed"
@@ -159,6 +178,15 @@ class Opportunity(Base, TimestampMixin):
         default=WorkMode.UNKNOWN.value,
         index=True,
         nullable=False,
+    )
+    professional_area: Mapped[str] = mapped_column(
+        String(64),
+        default=ProfessionalArea.UNKNOWN.value,
+        index=True,
+        nullable=False,
+    )
+    secondary_areas: Mapped[list[str]] = mapped_column(
+        JsonType, default=list, nullable=False
     )
 
     location_text: Mapped[str | None] = mapped_column(String(255), nullable=True)

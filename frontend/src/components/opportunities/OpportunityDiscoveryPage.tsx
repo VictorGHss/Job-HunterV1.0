@@ -33,6 +33,7 @@ import type {
   Opportunity,
   OpportunitySourcePublic,
   OpportunityType,
+  ProfessionalArea,
   WorkMode,
 } from "@/types/api";
 
@@ -61,6 +62,35 @@ const EMPLOYMENT_LABELS: Record<EmploymentType, string> = {
   other: "Outro",
   unknown: "Contrato não informado",
 };
+
+const PROFESSIONAL_AREA_LABELS: Record<ProfessionalArea, string> = {
+  software_development: "Desenvolvimento de Software",
+  backend: "Backend",
+  frontend: "Frontend",
+  fullstack: "Full Stack",
+  data: "Dados e Analytics",
+  artificial_intelligence: "Inteligência Artificial e ML",
+  devops_cloud: "DevOps, Cloud e SRE",
+  api_integrations: "APIs, Integrações e Automação",
+  infrastructure: "Infraestrutura de TI",
+  technical_support: "Suporte Técnico e Help Desk",
+  customer_support: "Atendimento e Suporte ao Cliente",
+  marketing_sales: "Marketing e Vendas",
+  healthcare: "Saúde",
+  administration: "Administração e Operações",
+  other: "Outras Áreas",
+  unknown: "Área não identificada",
+};
+
+const NON_DEV_AREAS = new Set<string>([
+  "technical_support",
+  "customer_support",
+  "marketing_sales",
+  "healthcare",
+  "administration",
+  "other",
+  "unknown",
+]);
 
 function formatDatePtBr(iso: string | null): string {
   if (!iso) return "Data não informada";
@@ -109,6 +139,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [workModeFilter, setWorkModeFilter] = useState<string>("");
   const [employmentFilter, setEmploymentFilter] = useState<string>("");
+  const [areaFilter, setAreaFilter] = useState<string>("");
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
@@ -149,17 +180,21 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     setLoading(true);
     setErrorMessage(null);
 
+    const effectiveIncludeExcluded =
+      includeExcluded || (areaFilter !== "" && NON_DEV_AREAS.has(areaFilter));
+
     api.opportunities
       .list({
         q: debouncedQuery || undefined,
         type: category,
         work_mode: (workModeFilter as WorkMode) || undefined,
         employment_type: (employmentFilter as EmploymentType) || undefined,
+        area: (areaFilter as ProfessionalArea) || undefined,
         country: countryFilter || undefined,
         source: sourceFilter || undefined,
         saved_only: savedOnly,
         include_dismissed: includeDismissed,
-        include_excluded: includeExcluded,
+        include_excluded: effectiveIncludeExcluded,
         sort: sortOrder,
         page,
         page_size: 10,
@@ -190,6 +225,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     debouncedQuery,
     workModeFilter,
     employmentFilter,
+    areaFilter,
     countryFilter,
     sourceFilter,
     savedOnly,
@@ -291,7 +327,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-6">
             <div className="space-y-1 lg:col-span-2">
               <Label htmlFor={`search-${category}`}>Busca textual</Label>
               <div className="relative">
@@ -304,6 +340,41 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                   placeholder="Título, empresa, tecnologia (Python, React, SQL...)"
                 />
               </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor={`area-${category}`}>Área profissional</Label>
+              <select
+                id={`area-${category}`}
+                value={areaFilter}
+                onChange={(e) => {
+                  setAreaFilter(e.target.value);
+                  setPage(1);
+                }}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+              >
+                <option value="">Todas as áreas</option>
+                <optgroup label="Tecnologia e Desenvolvimento">
+                  <option value="software_development">Desenvolvimento de Software</option>
+                  <option value="backend">Backend</option>
+                  <option value="frontend">Frontend</option>
+                  <option value="fullstack">Full Stack</option>
+                  <option value="api_integrations">APIs, Integrações e Automação</option>
+                  <option value="artificial_intelligence">Inteligência Artificial e ML</option>
+                  <option value="data">Dados e Analytics</option>
+                  <option value="devops_cloud">DevOps, Cloud e SRE</option>
+                  <option value="infrastructure">Infraestrutura de TI</option>
+                </optgroup>
+                <optgroup label="Outras Áreas (consultar separadamente)">
+                  <option value="technical_support">Suporte Técnico e Help Desk</option>
+                  <option value="customer_support">Atendimento ao Cliente</option>
+                  <option value="marketing_sales">Marketing e Vendas</option>
+                  <option value="healthcare">Saúde</option>
+                  <option value="administration">Administração e Operações</option>
+                  <option value="other">Outras Áreas</option>
+                  <option value="unknown">Área não identificada</option>
+                </optgroup>
+              </select>
             </div>
 
             <div className="space-y-1">
@@ -339,7 +410,9 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                 <option value="internship">Estágio</option>
                 <option value="pj">PJ</option>
                 <option value="freelance">Freelance</option>
+                <option value="temporary">Temporário</option>
                 <option value="clt">CLT</option>
+                <option value="unknown">Contrato não informado</option>
                 <option value="other">Outro</option>
               </select>
             </div>
@@ -515,6 +588,25 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                           {EMPLOYMENT_LABELS[opp.employment_type] ||
                             opp.employment_type}
                         </Badge>
+                        {opp.professional_area && (
+                          <Badge
+                            variant={
+                              opp.professional_area === "unknown"
+                                ? "outline"
+                                : "secondary"
+                            }
+                          >
+                            Área:{" "}
+                            {PROFESSIONAL_AREA_LABELS[opp.professional_area] ||
+                              "Outras Áreas"}
+                          </Badge>
+                        )}
+                        {opp.professional_area === "unknown" && (
+                          <Badge className="border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                            <AlertTriangle className="mr-1 h-3 w-3" />
+                            Classificação de área incerta
+                          </Badge>
+                        )}
                         {opp.match.geographic_eligibility === "unknown" && (
                           <Badge className="border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300">
                             <AlertTriangle className="mr-1 h-3 w-3" />
@@ -599,6 +691,19 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                 </CardHeader>
 
                 <CardContent className="space-y-3 text-sm">
+                  {opp.secondary_areas && opp.secondary_areas.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        Especialidades secundárias:
+                      </span>
+                      {opp.secondary_areas.map((sec) => (
+                        <Badge key={sec} variant="outline" className="text-xs">
+                          {PROFESSIONAL_AREA_LABELS[sec] || "Outras Áreas"}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+
                   {opp.description && (
                     <p className="line-clamp-3 whitespace-pre-line text-xs text-muted-foreground">
                       {opp.description}
@@ -616,7 +721,9 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                   )}
 
                   {(opp.match.inclusion_reasons.length > 0 ||
-                    opp.match.exclusion_reasons.length > 0) && (
+                    opp.match.exclusion_reasons.length > 0 ||
+                    (opp.match.uncertainty_notes &&
+                      opp.match.uncertainty_notes.length > 0)) && (
                     <div className="grid gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs">
                       {opp.match.inclusion_reasons.map((reason) => (
                         <div
@@ -625,6 +732,15 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                         >
                           <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                           <span>{reason}</span>
+                        </div>
+                      ))}
+                      {opp.match.uncertainty_notes?.map((note) => (
+                        <div
+                          key={note}
+                          className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300"
+                        >
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>{note}</span>
                         </div>
                       ))}
                       {opp.match.exclusion_reasons.map((reason) => (

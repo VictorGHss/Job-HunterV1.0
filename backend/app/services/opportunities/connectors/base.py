@@ -49,6 +49,8 @@ class NormalizedOpportunityDraft:
     published_at: datetime | None
     deadline_at: datetime | None
     source_status: str
+    professional_area: str = "unknown"
+    secondary_areas: list[str] = field(default_factory=list)
     raw_metadata: dict[str, Any] = field(default_factory=dict)
 
 

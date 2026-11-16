@@ -2,20 +2,56 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
-from app.models.opportunity import EmploymentType, OpportunityType
+from app.models.opportunity import EmploymentType, OpportunityType, ProfessionalArea
 
 _COMBINING_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
 _MOJIBAKE_LATIN1_SPAN_RE = re.compile(r"[\u00c2-\u00f4][\u0080-\u00bf]{1,3}")
-_CAMEL_BOUNDARY_RE = re.compile(r"([a-z])([A-Z])")
+_CAMEL_BOUNDARY_RE = re.compile(
+    r"([a-z])((?:Contract|Salary|Hours|Location|Role|Type|Position|Schedule)\b)"
+)
+
+PROFESSIONAL_AREA_LABELS_PT: dict[str, str] = {
+    ProfessionalArea.SOFTWARE_DEVELOPMENT.value: "Desenvolvimento de Software",
+    ProfessionalArea.BACKEND.value: "Backend",
+    ProfessionalArea.FRONTEND.value: "Frontend",
+    ProfessionalArea.FULLSTACK.value: "Full Stack",
+    ProfessionalArea.DATA.value: "Dados e Analytics",
+    ProfessionalArea.ARTIFICIAL_INTELLIGENCE.value: "Inteligência Artificial e ML",
+    ProfessionalArea.DEVOPS_CLOUD.value: "DevOps, Cloud e SRE",
+    ProfessionalArea.API_INTEGRATIONS.value: "APIs, Integrações e Automação",
+    ProfessionalArea.INFRASTRUCTURE.value: "Infraestrutura de TI",
+    ProfessionalArea.TECHNICAL_SUPPORT.value: "Suporte Técnico e Help Desk",
+    ProfessionalArea.CUSTOMER_SUPPORT.value: "Atendimento e Suporte ao Cliente",
+    ProfessionalArea.MARKETING_SALES.value: "Marketing e Vendas",
+    ProfessionalArea.HEALTHCARE.value: "Saúde",
+    ProfessionalArea.ADMINISTRATION.value: "Administração e Operações",
+    ProfessionalArea.OTHER.value: "Outras Áreas",
+    ProfessionalArea.UNKNOWN.value: "Área não identificada",
+}
+
+TECH_TARGET_AREAS: frozenset[str] = frozenset(
+    {
+        ProfessionalArea.SOFTWARE_DEVELOPMENT.value,
+        ProfessionalArea.BACKEND.value,
+        ProfessionalArea.FRONTEND.value,
+        ProfessionalArea.FULLSTACK.value,
+        ProfessionalArea.DATA.value,
+        ProfessionalArea.ARTIFICIAL_INTELLIGENCE.value,
+        ProfessionalArea.DEVOPS_CLOUD.value,
+        ProfessionalArea.API_INTEGRATIONS.value,
+        ProfessionalArea.INFRASTRUCTURE.value,
+    }
+)
 
 # Frases que mencionam senioridade ou perfil júnior de TERCEIROS (colegas, líderes, reportados),
 # não os requisitos da própria vaga — removidas apenas do texto de descrição antes da heurística.
 _NON_SELF_MENTION_PATTERNS = (
     re.compile(
         r"\b(?:collaborate|work|working|partner|paired?)\s+(?:closely\s+)?with\s+"
-        r"(?:our\s+)?(?:senior|staff|principal|lead|experienced)\s+"
+        r"(?:our\s+)?(?:product,\s+design,\s+)?(?:senior|staff|principal|lead|experienced|backend|frontend|ai)?\s*"
+        r"(?:and\s+(?:ai|backend|frontend)\s+)?"
         r"(?:developers?|engineers?|designers?|bds?|leaders?|leadership|stakeholders?|colleagues?|team)\b"
     ),
     re.compile(
@@ -136,6 +172,199 @@ _CONTRACT_DUAL_RE = re.compile(
     r")(?![a-z0-9])"
 )
 
+# ==============================================================================
+# PADRÕES DETERMINÍSTICOS DE ÁREA PROFISSIONAL (FASE 02.3)
+# ==============================================================================
+
+_TECH_SUPPORT_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"technical\s+support|tech\s+support|it\s+support|help\s*desk|service\s+desk|"
+    r"desktop\s+support|hil\s+support|suporte\s+tecnico|suporte\s+de\s+ti|"
+    r"atendimento\s+de\s+ti|analista\s+de\s+suporte|tecnico\s+de\s+suporte|"
+    r"tecnico\s+de\s+ti|(?:technical|it|tech|l1|l2|tier\s*[12]|application|product)\s+support\s+(?:engineer|specialist)|"
+    r"support\s+engineer|technical\s+account\s+manager"
+    r")(?![a-z0-9])"
+)
+_TECH_SUPPORT_BODY_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"atendimento\s+de\s+chamados|suporte\s+tecnico\s+n[123]|help\s*desk|"
+    r"service\s+desk|escalat(?:e|ed)\s+to\s+l[23]|l[12]\s+support|"
+    r"tier\s+[123]\s+support|zendesk[^.]{0,80}support\s+channels"
+    r")(?![a-z0-9])"
+)
+
+_CUSTOMER_SUPPORT_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"customer\s+support|client\s+support|travel\s+support|customer\s+service|"
+    r"customer\s+success|patient\s+care\s+specialist|patient\s+engagement\s+specialist|"
+    r"call\s+center|atendimento\s+ao\s+cliente|suporte\s+ao\s+cliente|"
+    r"travel\s+booking|booking\s+assistant|coordinating\s+reservations|"
+    r"reservations?\s+coordinator"
+    r")(?![a-z0-9])"
+)
+
+_HEALTHCARE_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"endocrinologist|physician|doctor|clinician|nurse|medical\s+director|"
+    r"clinical\s+data\s+manager|telehealth|medico|enfermeir[oa]"
+    r")(?![a-z0-9])"
+)
+_HEALTHCARE_BODY_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"ob-?gyn\s+residents?|abog\s+qualifying\s+examination|usmle|"
+    r"board[- ]?eligible\s+endocrinologists?|patient[- ]?facing\s+hours"
+    r")(?![a-z0-9])"
+)
+
+_MARKETING_SALES_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"marketing|paid\s+media|growth\s+product\s+manager|account\s+executive|"
+    r"account\s+manager|business\s+development|bd\s+lead|partner\s+operations|"
+    r"sales|vendas|comercial|copywriter|content\s+strategist|seo\s+specialist|"
+    r"country\s+manager"
+    r")(?![a-z0-9])"
+)
+_MARKETING_SALES_BODY_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"leads\s+the\s+education\s+sales\s+team|sales\s+experience\s+within\s+a\s+saas"
+    r")(?![a-z0-9])"
+)
+
+_ADMIN_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"accountant|accounting|bookkeeper|recruiter|recruiting\s+coordinator|"
+    r"people\s+operations|human\s+resources|hr\s+manager|contracts?\s+manager|"
+    r"project\s+scheduler|academic\s+dean|wedding\s+coordinator|payment\s+integrity|"
+    r"revenue\s+cycle\s+manager|specialist\s+global\s+qms|strategy\s*&\s*operations\s+coach|"
+    r"agile\s+program\s+manager|program\s+manager|m&a\s+praktikum|"
+    r"market\s+analyst|product\s+manager|product\s+lead|product\s+designer|"
+    r"director\s+of\s+product\s+management"
+    r")(?![a-z0-9])"
+)
+
+_NON_DEV_OTHER_ROLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"transport\s+planner|video\s+annotation|content\s+reviewer|"
+    r"helps\s+children\s+aged\s+5\s+to\s+17|teaching\s+them\s+python"
+    r")(?![a-z0-9])"
+)
+
+# Sinais técnicos de engenharia / desenvolvimento / dados / IA / cloud / infra
+_FULLSTACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:full[- ]?stack|desenvolvedor(?:/a)?\s+full\s+stack)(?![a-z0-9])"
+)
+_BACKEND_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"backend|back[- ]?end|"
+    r"(?:python|java|spring|golang|go|node\.?js|ruby|rust|c#|dot\s*net|php|laravel|fastapi|django)\s+"
+    r"(?:software\s+)?(?:engineer|developer|dev|programmer|programador|desenvolvedor)|"
+    r"(?:desenvolvedor|programador|engenheiro\s+de\s+software|developer|engineer)\s+"
+    r"(?:de\s+desenvolvimento\s+)?(?:backend|back[- ]?end|python|java|spring|golang|node\.?js|c#|php)"
+    r")(?![a-z0-9])"
+)
+_FRONTEND_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"frontend|front[- ]?end|ui\s+developer|ui\s+engineer|"
+    r"(?:react|vue|angular|next\.?js|javascript|typescript)\s+"
+    r"(?:developer|engineer|dev|desenvolvedor|programador)|"
+    r"(?:desenvolvedor|programador|developer|engineer)\s+(?:frontend|front[- ]?end|react|vue|angular|ui)"
+    r")(?![a-z0-9])"
+)
+_API_INTEGRATIONS_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"api\s+integration|integration\s+(?:engineer|developer)|"
+    r"desenvolvedor\s+de\s+integrac(?:ao|oes)|"
+    r"(?:api|integrations?|automac(?:ao|oes)|rpa)\s+(?:developer|engineer|specialist|desenvolvedor)|"
+    r"projeto\s+freelance\s+api"
+    r")(?![a-z0-9])"
+)
+_AI_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"ai\s+engineer|ml\s+engineer|ai\s+ml\s+engineer|machine\s+learning\s+engineer|"
+    r"agentic\s+ai\s+engineer|ml\s+inference\s+engineer|applied\s+ai|"
+    r"artificial\s+intelligence\s+engineer|engenheiro\s+de\s+ia|"
+    r"research\s+engineer\s+privacy|software\s+engineer\s+ai\s+tooling|"
+    r"build\s+ai\s+agents"
+    r")(?![a-z0-9])"
+)
+_DATA_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"data\s+engineer|data\s+analyst|data\s+scientist|analytics\s+engineer|"
+    r"business\s+intelligence|bi\s+analyst|engenheiro\s+de\s+dados|"
+    r"analista\s+de\s+dados|cientista\s+de\s+dados|estagio\s+engenharia\s+de\s+dados|"
+    r"operations\s+expert\s+with\s+python\s+for\s+ai\s+supply\s+chain"
+    r")(?![a-z0-9])"
+)
+_DATA_ENGINEERING_ROLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:data\s+engineer|engenheiro\s+de\s+dados|engenharia\s+de\s+dados|analytics\s+engineer|etl)(?![a-z0-9])"
+)
+_DEVOPS_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"devops|site\s+reliability|sre|cloud\s+engineer|cloud\s+solutions\s+architect|"
+    r"solutions\s+architect|platform\s+and\s+integration\s+engineer|"
+    r"platform\s+engineer|kubernetes\s+control\s+plane"
+    r")(?![a-z0-9])"
+)
+_INFRA_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"infrastructure\s*&\s*security\s+engineer|software\s+engineer\s+infrastructure|"
+    r"infrastructure\s+engineer|network\s+engineer|security\s+engineer|"
+    r"systems?\s+administrator|sysadmin|director\s+of\s+it|analista\s+de\s+infraestrutura|"
+    r"smart\s+contract\s+auditor|infosec"
+    r")(?![a-z0-9])"
+)
+_SOFTWARE_DEV_TITLE_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"software\s+engineer|software\s+developer|software\s+development|"
+    r"desenvolvedor(?:\s+de\s+software|\s+de\s+sistemas)?|programador|"
+    r"engenheiro\s+de\s+software|engenharia\s+de\s+software|"
+    r"tech\s+lead|product\s+engineering\s+lead|head\s+of\s+technology|"
+    r"principal\s+engineer|staff\s+software\s+engineer|solutions\s+engineer|"
+    r"implementation\s+engineer|oracle\s+fusion\s+cloud\s+lead|"
+    r"internal\s+tools\s+software\s+engineer|apprentice\s+software\s+developer"
+    r")(?![a-z0-9])"
+)
+
+# Sinais substantivos de stack para enriquecer áreas secundárias quando a vaga já é técnica
+_BACKEND_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"backend|back[- ]?end|fastapi|django|flask|spring\s+boot|spring\s+data|"
+    r"java\b|python\b|golang\b|node\.?js|ruby\s+on\s+rails|laravel| dot\s*net|"
+    r"postgresql|postgres|mysql|redis|microservices|microsservicos|drizzle\s+orm|trpc"
+    r")(?![a-z0-9])"
+)
+_FRONTEND_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"frontend|front[- ]?end|react(?:\.?js)?|vue(?:\.?js)?|nuxt(?:\.?js)?|"
+    r"angular|next\.?js|tailwind\s*css|html5?|css3?|sass|ui\s+components"
+    r")(?![a-z0-9])"
+)
+_API_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"rest(?:ful)?\s+apis?|apis?\s+rest(?:ful)?|http\s+apis?|graphql|webhooks?|"
+    r"api\s+integrations?|integrac(?:ao|oes)\s+de\s+(?:apis?|sistemas)|"
+    r"automac(?:ao|oes)|web\s+scraping"
+    r")(?![a-z0-9])"
+)
+_AI_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"machine\s+learning|deep\s+learning|llm\s+apis?|llms?|pytorch|tensorflow|"
+    r"vllm|sglang|tensorrt[- ]?llm|computer\s+vision|agentic\s+ai|ai\s+agents|"
+    r"artificial\s+intelligence|inteligencia\s+artificial"
+    r")(?![a-z0-9])"
+)
+_DATA_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"data\s+pipelines?|etl\b|data\s+warehouse|snowflake|bigquery|spark|airflow|"
+    r"data\s+engineering|engenharia\s+de\s+dados"
+    r")(?![a-z0-9])"
+)
+_DEVOPS_STACK_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"kubernetes|k8s|terraform|ansible|ci/cd|github\s+actions|cloudformation|eks\b"
+    r")(?![a-z0-9])"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ClassificationDecision:
@@ -143,6 +372,8 @@ class ClassificationDecision:
     employment_type: str
     confidence: str
     reasons: tuple[str, ...]
+    professional_area: str = ProfessionalArea.UNKNOWN.value
+    secondary_areas: tuple[str, ...] = ()
 
 
 def _repair_mojibake(text: str) -> str:
@@ -172,7 +403,6 @@ def normalize_classification_text(text: str | None) -> str:
     plain = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", plain)
     decomposed = unicodedata.normalize("NFKD", plain)
     ascii_folded = _COMBINING_MARKS_RE.sub("", decomposed).lower()
-    # Normaliza múltiplos espaços preservando pontuação relevante (como '+', '.', '-')
     return _WHITESPACE_RE.sub(" ", ascii_folded).strip()
 
 
@@ -245,15 +475,246 @@ def _detect_employment_type(
     return (EmploymentType.UNKNOWN.value, reasons)
 
 
+def classify_professional_area(
+    *,
+    title: str | None,
+    tags: list[str] | None = None,
+    description: str | None = None,
+    requirements: list[str] | None = None,
+) -> tuple[str, tuple[str, ...], list[str]]:
+    """
+    Classifica a área profissional primária e especialidades secundárias de forma
+    independente de senioridade e contrato, bloqueando falsos positivos por menção
+    incidental de tecnologia em vagas de suporte, atendimento, vendas ou saúde.
+    """
+    norm_title = normalize_classification_text(title)
+    if not norm_title:
+        return (ProfessionalArea.UNKNOWN.value, (), ["area:missing_title"])
+
+    norm_desc = _strip_non_self_context(normalize_classification_text(description))
+    norm_reqs = " ".join(_normalize_tags(requirements))
+    norm_tags = _normalize_tags(tags)
+    substantive_body = f"{norm_reqs} {norm_desc}".strip()
+
+    reasons: list[str] = []
+
+    # 1. Domínios não-desenvolvimento verificados prioritariamente para impedir
+    # que menções incidentais a linguagens/bancos ou tags ruidosas gerem falso positivo.
+    if _TECH_SUPPORT_TITLE_RE.search(norm_title):
+        reasons.append("area:technical_support_or_helpdesk")
+        sec: list[str] = []
+        if _CUSTOMER_SUPPORT_TITLE_RE.search(norm_title) or "customer service" in substantive_body:
+            sec.append(ProfessionalArea.CUSTOMER_SUPPORT.value)
+        return (ProfessionalArea.TECHNICAL_SUPPORT.value, tuple(sec), reasons)
+
+    if _CUSTOMER_SUPPORT_TITLE_RE.search(norm_title):
+        reasons.append("area:customer_or_client_support")
+        sec = []
+        if "patient" in norm_title or "healthcare" in substantive_body:
+            sec.append(ProfessionalArea.HEALTHCARE.value)
+        if "scheduling" in norm_title or "reservations" in norm_title:
+            sec.append(ProfessionalArea.ADMINISTRATION.value)
+        return (ProfessionalArea.CUSTOMER_SUPPORT.value, tuple(sec), reasons)
+
+    if _HEALTHCARE_TITLE_RE.search(norm_title) or _HEALTHCARE_BODY_RE.search(substantive_body):
+        reasons.append("area:healthcare_or_clinical")
+        sec = []
+        if "data manager" in norm_title or "data management" in substantive_body:
+            sec.append(ProfessionalArea.DATA.value)
+        return (ProfessionalArea.HEALTHCARE.value, tuple(sec), reasons)
+
+    if _NON_DEV_OTHER_ROLE_RE.search(norm_title) or _NON_DEV_OTHER_ROLE_RE.search(substantive_body):
+        reasons.append("area:non_dev_specialized_other")
+        return (ProfessionalArea.OTHER.value, (), reasons)
+
+    if _MARKETING_SALES_TITLE_RE.search(norm_title) or _MARKETING_SALES_BODY_RE.search(substantive_body):
+        reasons.append("area:marketing_sales_or_commercial")
+        sec = []
+        if "student assistant" in norm_title or "operations" in norm_title:
+            sec.append(ProfessionalArea.ADMINISTRATION.value)
+        return (ProfessionalArea.MARKETING_SALES.value, tuple(sec), reasons)
+
+    if _ADMIN_TITLE_RE.search(norm_title):
+        reasons.append("area:administration_finance_hr_or_product")
+        sec = []
+        if "it operations" in norm_title:
+            sec.append(ProfessionalArea.INFRASTRUCTURE.value)
+        if "revenue cycle" in norm_title and "home health" in substantive_body:
+            sec.append(ProfessionalArea.HEALTHCARE.value)
+        return (ProfessionalArea.ADMINISTRATION.value, tuple(sec), reasons)
+
+    if (
+        _TECH_SUPPORT_BODY_RE.search(substantive_body)
+        and not _SOFTWARE_DEV_TITLE_RE.search(norm_title)
+        and not _BACKEND_TITLE_RE.search(norm_title)
+        and not _FRONTEND_TITLE_RE.search(norm_title)
+    ):
+        reasons.append("area:technical_support_body")
+        return (ProfessionalArea.TECHNICAL_SUPPORT.value, (), reasons)
+
+    # 2. Áreas técnicas de Engenharia, Software, Dados, IA, Cloud e Infraestrutura
+    detected: list[str] = []
+
+    def _add_area(area_code: str, reason: str | None = None) -> None:
+        if area_code not in detected:
+            detected.append(area_code)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    # Sinais fortes no título determinam a área primária com máxima precisão
+    if _FULLSTACK_RE.search(norm_title):
+        _add_area(ProfessionalArea.FULLSTACK.value, "area:title_fullstack")
+        _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+        _add_area(ProfessionalArea.BACKEND.value)
+        _add_area(ProfessionalArea.FRONTEND.value)
+
+    if _AI_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.ARTIFICIAL_INTELLIGENCE.value, "area:title_ai_ml")
+        if any(w in norm_title for w in ("engineer", "developer", "software", "engenheiro")):
+            _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _API_INTEGRATIONS_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.API_INTEGRATIONS.value, "area:title_api_integrations")
+        _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _BACKEND_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.BACKEND.value, "area:title_backend")
+        _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _FRONTEND_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.FRONTEND.value, "area:title_frontend")
+        _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _DATA_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.DATA.value, "area:title_data")
+        if _DATA_ENGINEERING_ROLE_RE.search(norm_title):
+            _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _DEVOPS_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.DEVOPS_CLOUD.value, "area:title_devops_cloud")
+        if "platform and integration" in norm_title:
+            _add_area(ProfessionalArea.API_INTEGRATIONS.value)
+        if "kubernetes control plane" in norm_title:
+            _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+    if _INFRA_TITLE_RE.search(norm_title):
+        if "software engineer infrastructure" in norm_title:
+            _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value, "area:title_software_infra")
+            _add_area(ProfessionalArea.INFRASTRUCTURE.value)
+            _add_area(ProfessionalArea.DEVOPS_CLOUD.value)
+        elif "infrastructure & security" in norm_title:
+            _add_area(ProfessionalArea.DEVOPS_CLOUD.value, "area:title_infra_cloud_security")
+            _add_area(ProfessionalArea.INFRASTRUCTURE.value)
+        else:
+            _add_area(ProfessionalArea.INFRASTRUCTURE.value, "area:title_infrastructure")
+
+    if _SOFTWARE_DEV_TITLE_RE.search(norm_title):
+        _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value, "area:title_software_development")
+
+    # Se o título é técnico/engenharia (ou tem stack clara no corpo sem ser cargo administrativo/suporte),
+    # analisa o corpo substantivo para identificar especialidades (fullstack, backend, frontend, APIs, IA, dados)
+    is_tech_context = bool(detected) or bool(
+        re.search(
+            r"(?<![a-z0-9])(?:developer|engineer|desenvolvedor|programador|engenheiro|arquitetura|estagio\s+em\s+ti)(?![a-z0-9])",
+            norm_title,
+        )
+    )
+
+    if is_tech_context and substantive_body:
+        primary_candidate = detected[0] if detected else None
+        is_pure_devops_or_infra = primary_candidate in {
+            ProfessionalArea.DEVOPS_CLOUD.value,
+            ProfessionalArea.INFRASTRUCTURE.value,
+        } and not _SOFTWARE_DEV_TITLE_RE.search(norm_title)
+        is_data_analyst = (
+            primary_candidate == ProfessionalArea.DATA.value
+            and not _DATA_ENGINEERING_ROLE_RE.search(norm_title)
+            and not _SOFTWARE_DEV_TITLE_RE.search(norm_title)
+        )
+
+        has_fullstack_body = bool(_FULLSTACK_RE.search(substantive_body))
+        has_backend_body = bool(_BACKEND_STACK_RE.search(substantive_body))
+        has_frontend_body = bool(_FRONTEND_STACK_RE.search(substantive_body))
+
+        if not is_pure_devops_or_infra and not is_data_analyst:
+            if has_fullstack_body or (
+                has_backend_body
+                and has_frontend_body
+                and ProfessionalArea.SOFTWARE_DEVELOPMENT.value in detected
+            ):
+                _add_area(ProfessionalArea.FULLSTACK.value, "area:body_fullstack")
+                _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+                _add_area(ProfessionalArea.BACKEND.value)
+                _add_area(ProfessionalArea.FRONTEND.value)
+            else:
+                if has_backend_body:
+                    _add_area(ProfessionalArea.BACKEND.value, "area:body_backend_stack")
+                    _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+                if has_frontend_body:
+                    _add_area(ProfessionalArea.FRONTEND.value, "area:body_frontend_stack")
+                    _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+        if _API_STACK_RE.search(substantive_body) and not is_data_analyst:
+            _add_area(ProfessionalArea.API_INTEGRATIONS.value, "area:body_api_integrations")
+            if not is_pure_devops_or_infra:
+                _add_area(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
+
+        if _AI_STACK_RE.search(substantive_body):
+            _add_area(ProfessionalArea.ARTIFICIAL_INTELLIGENCE.value, "area:body_ai_ml")
+
+        if _DATA_STACK_RE.search(substantive_body):
+            _add_area(ProfessionalArea.DATA.value, "area:body_data")
+
+        if _DEVOPS_STACK_RE.search(substantive_body) and is_pure_devops_or_infra:
+            _add_area(ProfessionalArea.DEVOPS_CLOUD.value, "area:body_devops_cloud")
+
+    # Sinais secundários a partir de tags apenas quando a vaga já é comprovadamente de desenvolvimento
+    if (
+        ProfessionalArea.SOFTWARE_DEVELOPMENT.value in detected
+        and len(detected) == 1
+        and norm_tags
+    ):
+        tag_set = set(norm_tags)
+        if "full stack" in tag_set or "fullstack" in tag_set:
+            _add_area(ProfessionalArea.FULLSTACK.value, "area:tag_fullstack")
+            _add_area(ProfessionalArea.BACKEND.value)
+            _add_area(ProfessionalArea.FRONTEND.value)
+        if tag_set & {"backend", "python", "java", "spring boot", "fastapi", "django", "postgres", "postgresql"}:
+            _add_area(ProfessionalArea.BACKEND.value, "area:tag_backend")
+        if tag_set & {"front end", "frontend", "react", "vue", "angular", "typescript"}:
+            _add_area(ProfessionalArea.FRONTEND.value, "area:tag_frontend")
+        if tag_set & {"api", "apis"}:
+            _add_area(ProfessionalArea.API_INTEGRATIONS.value, "area:tag_api")
+
+    if detected:
+        # Se a vaga começou como software_development genérico no título (ex.: "Software Engineer")
+        # mas o corpo revelou claramente que é fullstack/backend/frontend/IA, promove a especialidade
+        # mais específica mantendo software_development nas secundárias, exceto quando o título é "Software Engineer" puro sem foco único.
+        primary = detected[0]
+        if (
+            primary == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+            and len(detected) > 1
+            and _FULLSTACK_RE.search(substantive_body)
+        ):
+            primary = ProfessionalArea.FULLSTACK.value
+        secondary = tuple(a for a in detected if a != primary)
+        return (primary, secondary, reasons)
+
+    reasons.append("area:unknown_insufficient_evidence")
+    return (ProfessionalArea.UNKNOWN.value, (), reasons)
+
+
 def classify_opportunity(
     *,
     title: str | None,
     tags: list[str] | None = None,
     description: str | None = None,
+    requirements: list[str] | None = None,
 ) -> ClassificationDecision:
     """
-    Classifica oportunidade e regime contratual de forma 100% determinística,
-    separando peso de título, descrição higienizada de contexto de terceiros e tags.
+    Classifica oportunidade (`opportunity_type`), regime contratual (`employment_type`)
+    e área profissional (`professional_area` + `secondary_areas`) de forma 100%
+    determinística e independente entre as três dimensões.
     """
     norm_title = normalize_classification_text(title)
     if not norm_title:
@@ -262,12 +723,21 @@ def classify_opportunity(
             employment_type=EmploymentType.UNKNOWN.value,
             confidence="low",
             reasons=("title:missing_or_empty",),
+            professional_area=ProfessionalArea.UNKNOWN.value,
+            secondary_areas=(),
         )
 
     norm_tags = _normalize_tags(tags)
     tag_set = set(norm_tags)
     norm_desc_raw = normalize_classification_text(description)
     norm_desc = _strip_non_self_context(norm_desc_raw)
+
+    primary_area, secondary_areas, area_reasons = classify_professional_area(
+        title=title,
+        tags=tags,
+        description=description,
+        requirements=requirements,
+    )
 
     title_is_senior_or_lead = bool(
         _LEADERSHIP_OR_SENIOR_RE.search(norm_title)
@@ -285,38 +755,31 @@ def classify_opportunity(
 
     reasons: list[str] = []
 
-    # 1. Estágio / Programa acadêmico (título e frases explícitas vencem tags ruidosas)
-    if _INTERNSHIP_STRONG_RE.search(norm_title):
-        reasons.append("title:explicit_internship_or_student_role")
+    def _finalize(opp_type: str, confidence: str) -> ClassificationDecision:
         emp_type, emp_reasons = _detect_employment_type(
             norm_title=norm_title,
             norm_desc=norm_desc_raw,
             norm_tags=norm_tags,
-            opportunity_type=OpportunityType.INTERNSHIP.value,
+            opportunity_type=opp_type,
         )
         return ClassificationDecision(
-            opportunity_type=OpportunityType.INTERNSHIP.value,
+            opportunity_type=opp_type,
             employment_type=emp_type,
-            confidence="high",
-            reasons=tuple(reasons + emp_reasons),
+            confidence=confidence,
+            reasons=tuple(reasons + emp_reasons + area_reasons),
+            professional_area=primary_area,
+            secondary_areas=secondary_areas,
         )
+
+    # 1. Estágio / Programa acadêmico
+    if _INTERNSHIP_STRONG_RE.search(norm_title):
+        reasons.append("title:explicit_internship_or_student_role")
+        return _finalize(OpportunityType.INTERNSHIP.value, "high")
 
     if not title_is_senior_or_lead and _INTERNSHIP_BODY_PHRASE_RE.search(norm_desc):
         reasons.append("description:explicit_internship_or_student_phrase")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.INTERNSHIP.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.INTERNSHIP.value,
-            employment_type=emp_type,
-            confidence="medium",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.INTERNSHIP.value, "medium")
 
-    # Tag isolada de estágio só vale se não houver senioridade/credencial/autônomo conflitante
     if (
         tag_set & {"intern", "internship", "estagio", "apprentice", "working student"}
         and not title_is_senior_or_lead
@@ -324,34 +787,12 @@ def classify_opportunity(
         and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
     ):
         reasons.append("tags:internship_without_conflict")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.INTERNSHIP.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.INTERNSHIP.value,
-            employment_type=emp_type,
-            confidence="medium",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.INTERNSHIP.value, "medium")
 
-    # 2. Freelance / Projeto autônomo explícito (sem confundir com contratos comerciais ou sênior B2B integral)
+    # 2. Freelance / Projeto autônomo explícito
     if _FREELANCE_TITLE_RE.search(norm_title):
         reasons.append("title:explicit_freelance")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.FREELANCE.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.FREELANCE.value,
-            employment_type=emp_type,
-            confidence="high",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.FREELANCE.value, "high")
 
     if (
         _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
@@ -359,18 +800,7 @@ def classify_opportunity(
         and not _CONTRACT_DUAL_RE.search(norm_desc)
     ):
         reasons.append("description:explicit_freelance_or_independent_contractor")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.FREELANCE.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.FREELANCE.value,
-            employment_type=emp_type,
-            confidence="high",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.FREELANCE.value, "high")
 
     if (
         "freelance" in tag_set
@@ -379,96 +809,30 @@ def classify_opportunity(
         and not _CONTRACT_FIXED_TERM_RE.search(norm_desc)
     ):
         reasons.append("tags:freelance_without_conflict")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.FREELANCE.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.FREELANCE.value,
-            employment_type=emp_type,
-            confidence="medium",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.FREELANCE.value, "medium")
 
-    # 3. Bloqueio explícito de senioridade/liderança antes de considerar júnior por descrição/tags
+    # 3. Bloqueio explícito de senioridade/liderança antes de considerar júnior
     if title_is_senior_or_lead:
         reasons.append("title:senior_lead_manager_or_specialist_role")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.OTHER.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.OTHER.value,
-            employment_type=emp_type,
-            confidence="high",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.OTHER.value, "high")
 
     # 4. Júnior / Entrada na área
     if _JUNIOR_TITLE_RE.search(norm_title) and not desc_has_senior_req:
         reasons.append("title:explicit_junior_or_entry_level")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.JUNIOR.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.JUNIOR.value,
-            employment_type=emp_type,
-            confidence="high",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.JUNIOR.value, "high")
 
     if _JUNIOR_BODY_PHRASE_RE.search(norm_desc) and not desc_has_senior_req:
         reasons.append("description:explicit_junior_or_entry_level_phrase")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.JUNIOR.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.JUNIOR.value,
-            employment_type=emp_type,
-            confidence="medium",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.JUNIOR.value, "medium")
 
     if (
         tag_set & {"junior", "jr", "entry-level", "entry level", "trainee", "graduate"}
         and not desc_has_senior_req
     ):
         reasons.append("tags:junior_without_conflict")
-        emp_type, emp_reasons = _detect_employment_type(
-            norm_title=norm_title,
-            norm_desc=norm_desc_raw,
-            norm_tags=norm_tags,
-            opportunity_type=OpportunityType.JUNIOR.value,
-        )
-        return ClassificationDecision(
-            opportunity_type=OpportunityType.JUNIOR.value,
-            employment_type=emp_type,
-            confidence="medium",
-            reasons=tuple(reasons + emp_reasons),
-        )
+        return _finalize(OpportunityType.JUNIOR.value, "medium")
 
-    # 5. Caso padrão conservador: other (precisão antes de quantidade)
+    # 5. Caso padrão conservador: other
     reasons.append("fallback:senior_mid_or_generic_other")
-    emp_type, emp_reasons = _detect_employment_type(
-        norm_title=norm_title,
-        norm_desc=norm_desc_raw,
-        norm_tags=norm_tags,
-        opportunity_type=OpportunityType.OTHER.value,
-    )
     confidence = "high" if desc_has_senior_req else "medium"
-    return ClassificationDecision(
-        opportunity_type=OpportunityType.OTHER.value,
-        employment_type=emp_type,
-        confidence=confidence,
-        reasons=tuple(reasons + emp_reasons),
-    )
+    return _finalize(OpportunityType.OTHER.value, confidence)
