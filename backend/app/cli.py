@@ -164,17 +164,46 @@ def handle_sync_opportunities(args: argparse.Namespace) -> int:
         return 1
 
     has_error = False
+    tot_rec = tot_val = tot_rej = tot_ins = tot_upd = tot_intra = tot_cross = 0
+    tot_uniq = tot_open = tot_closed = tot_unc = 0
     for res in results:
         status_value = res.status.value if hasattr(res.status, "value") else str(res.status)
         status_label = status_value.upper()
         if status_value == "failed":
             has_error = True
+        tot_rec += res.received_count
+        tot_val += res.valid_count
+        tot_rej += res.rejected_count
+        tot_ins += res.inserted_count
+        tot_upd += res.updated_count
+        tot_intra += res.intra_source_duplicate_count
+        tot_cross += res.cross_source_duplicate_count
+        tot_uniq += res.unique_opportunities_count
+        tot_open += res.open_opportunities_count
+        tot_closed += res.closed_or_expired_count
+        tot_unc += res.unconfirmed_count
         detail = f" | detalhe={res.error_summary}" if res.error_summary else ""
         print(
             f"[{status_label}] fonte={res.source_slug} | "
-            f"coletadas={res.fetched_count} | criadas={res.inserted_count} | "
-            f"atualizadas={res.updated_count} | ignoradas={res.skipped_count}"
+            f"recebidas={res.received_count} | validas={res.valid_count} | "
+            f"rejeitadas={res.rejected_count} | coletadas={res.fetched_count} | "
+            f"criadas={res.inserted_count} | atualizadas={res.updated_count} | "
+            f"dup_interna={res.intra_source_duplicate_count} | "
+            f"dup_entre_fontes={res.cross_source_duplicate_count} | "
+            f"ignoradas={res.skipped_count} | "
+            f"unicas={res.unique_opportunities_count} (abertas={res.open_opportunities_count}, "
+            f"encerradas={res.closed_or_expired_count}, nao_confirmadas={res.unconfirmed_count})"
             f"{detail}"
+        )
+
+    if len(results) > 1:
+        print(
+            f"[CONSOLIDADO] fontes={len(results)} | "
+            f"recebidas={tot_rec} | validas={tot_val} | rejeitadas={tot_rej} | "
+            f"criadas={tot_ins} | atualizadas={tot_upd} | "
+            f"dup_interna={tot_intra} | dup_entre_fontes={tot_cross} | "
+            f"oportunidades_unicas={tot_uniq} (abertas={tot_open}, "
+            f"encerradas_expiradas={tot_closed}, nao_confirmadas={tot_unc})"
         )
 
     return 1 if has_error else 0

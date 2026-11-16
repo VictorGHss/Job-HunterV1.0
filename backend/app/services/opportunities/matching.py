@@ -282,7 +282,23 @@ def evaluate_opportunity_for_user(
     }:
         category = opportunity.opportunity_type
 
-    # 1. Restrições de fontes externas
+    # 1. Ciclo de vida e restrições de fontes externas
+    opp_status = (getattr(opportunity, "source_status", None) or "active").lower()
+    if opp_status == "expired":
+        exclusions.append("Publicação expirada conforme prazo informado pela fonte.")
+    elif opp_status == "closed":
+        exclusions.append("Publicação encerrada na fonte de origem.")
+    elif opp_status == "removed":
+        exclusions.append("Publicação removida na fonte de origem.")
+    elif opp_status in {"unknown", "unconfirmed"}:
+        uncertainty_notes.append(
+            "Disponibilidade atual não confirmada no último lote limitado da fonte."
+        )
+    elif opp_status == "source_unavailable":
+        uncertainty_notes.append(
+            "A fonte apresentou indisponibilidade temporária na última verificação."
+        )
+
     source_restrictions = prefs["source_restrictions"]
     source_slug = opportunity.source.slug.lower() if opportunity.source else ""
     source_url_low = (opportunity.source_url or "").lower()

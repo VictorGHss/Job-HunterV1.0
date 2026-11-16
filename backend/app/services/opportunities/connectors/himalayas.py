@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from app.models.opportunity import (
     EmploymentType,
@@ -11,9 +12,11 @@ from app.models.opportunity import (
 from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
+    CollectionBatch,
     ConnectorPayloadError,
     NormalizedOpportunityDraft,
     SourceDefinition,
+    SourceLifecycleSignal,
     parse_iso_datetime,
 )
 from app.services.opportunities.sanitization import (
@@ -33,6 +36,13 @@ def _parse_optional_float(value: Any) -> float | None:
         return parsed if parsed > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _extract_himalayas_external_id(source_url: str) -> str:
+    path_clean = urlparse(source_url).path.strip("/")
+    if path_clean.startswith("companies/"):
+        path_clean = path_clean[len("companies/") :]
+    return (path_clean or source_url)[:255]
 
 
 class HimalayasConnector(BaseOpportunityConnector):
@@ -63,24 +73,53 @@ class HimalayasConnector(BaseOpportunityConnector):
 
         now = datetime.now(UTC)
         drafts: list[NormalizedOpportunityDraft] = []
+        raw_jobs = payload["jobs"]
+        rejected_count = 0
+        rejection_breakdown: dict[str, int] = {}
+        lifecycle_signals: list[SourceLifecycleSignal] = []
 
-        for item in payload["jobs"]:
+        for item in raw_jobs:
             if not isinstance(item, dict):
+                rejected_count += 1
+                rejection_breakdown["invalid_item"] = (
+                    rejection_breakdown.get("invalid_item", 0) + 1
+                )
                 continue
 
             raw_guid = item.get("guid")
             raw_title = sanitize_plain_text(item.get("title"))
             if not isinstance(raw_guid, str) or not raw_guid.strip() or not raw_title:
+                rejected_count += 1
+                rejection_breakdown["missing_required_fields"] = (
+                    rejection_breakdown.get("missing_required_fields", 0) + 1
+                )
                 continue
 
             try:
                 source_url = normalize_canonical_url(raw_guid)
             except ValueError:
+                rejected_count += 1
+                rejection_breakdown["invalid_url"] = (
+                    rejection_breakdown.get("invalid_url", 0) + 1
+                )
                 continue
 
+            ext_id = _extract_himalayas_external_id(source_url)
             deadline_at = parse_iso_datetime(item.get("expiryDate"))
             if deadline_at is not None and deadline_at < now:
-                # Termos da Himalayas exigem não exibir vagas já expiradas
+                # Termos da Himalayas exigem não exibir vagas já expiradas:
+                # emite sinal de expiração para atualizar eventual vaga já persistida
+                lifecycle_signals.append(
+                    SourceLifecycleSignal(
+                        external_id=ext_id,
+                        source_url=source_url,
+                        status=ExternalSourceStatus.EXPIRED.value,
+                        deadline_at=deadline_at,
+                        reason="expiryDate vencido na API Himalayas",
+                    )
+                )
+                rejected_count += 1
+                rejection_breakdown["expired"] = rejection_breakdown.get("expired", 0) + 1
                 continue
 
             application_url: str | None = None
@@ -139,7 +178,9 @@ class HimalayasConnector(BaseOpportunityConnector):
 
             raw_locs = item.get("locationRestrictions")
             if isinstance(raw_locs, list):
-                cleaned_locs = normalize_string_list([str(loc) for loc in raw_locs])
+                cleaned_locs = normalize_string_list(
+                    [str(loc) for loc in raw_locs], max_items=250
+                )
                 if not cleaned_locs:
                     eligible_countries = ["Worldwide"]
                     country: str | None = "Worldwide"
@@ -149,6 +190,8 @@ class HimalayasConnector(BaseOpportunityConnector):
                     eligible_countries = cleaned_locs
                     country = cleaned_locs[0] if len(cleaned_locs) == 1 else None
                     location_text = ", ".join(cleaned_locs[:5])
+                    if len(cleaned_locs) > 5:
+                        location_text = f"{location_text} (+{len(cleaned_locs) - 5})"
                     eligibility_unknown = False
             else:
                 eligible_countries = []
@@ -170,11 +213,10 @@ class HimalayasConnector(BaseOpportunityConnector):
             )
 
             published_at = parse_iso_datetime(item.get("pubDate"))
-            ext_id = source_url.rstrip("/").split("/")[-1] or source_url
 
             drafts.append(
                 NormalizedOpportunityDraft(
-                    external_id=ext_id[:255],
+                    external_id=ext_id,
                     title=raw_title,
                     company_name=sanitize_plain_text(item.get("companyName"), max_length=200),
                     description=description,
@@ -203,6 +245,7 @@ class HimalayasConnector(BaseOpportunityConnector):
                     secondary_areas=list(decision.secondary_areas),
                     raw_metadata={
                         "guid": source_url,
+                        "application_link": application_url or source_url,
                         "seniority": seniority_list,
                         "employment_type_raw": emp_raw,
                         "source": "himalayas",
@@ -210,4 +253,11 @@ class HimalayasConnector(BaseOpportunityConnector):
                 )
             )
 
+        self.last_batch = CollectionBatch(
+            received_count=len(raw_jobs),
+            valid_drafts=list(drafts),
+            rejected_count=rejected_count,
+            rejection_breakdown=rejection_breakdown,
+            lifecycle_signals=lifecycle_signals,
+        )
         return drafts

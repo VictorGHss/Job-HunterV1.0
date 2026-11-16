@@ -6,6 +6,29 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.5] - 2026-11-15 — Fase 02.5: Confiabilidade, Rastreabilidade e Ciclo de Vida das Oportunidades
+
+### Adicionado
+- **Rastreabilidade Normalizada Entre Fontes (`0005_lifecycle_traceability` e `OpportunitySourceLink`):**
+  - Nova tabela `opportunity_source_links` persistindo, para cada publicação primária ou secundária vinculada a uma oportunidade, `external_id`, `source_url`, `application_url`, `is_primary`, `source_status`, `published_at`, `deadline_at`, `location_text`, `eligible_countries`, dados salariais, `first_seen_at`, `last_seen_at`, `last_checked_at`, `missing_sync_count` e `raw_metadata`.
+  - Migração Alembic reversível (`upgrade` e `downgrade`) com backfill automático das oportunidades existentes e normalização de `external_id` da Himalayas (`<company>/jobs/<slug>`).
+- **Ciclo de Vida Auditável e Revalidação por Fonte:**
+  - Estados suportados em `ExternalSourceStatus`: `active`, `expired`, `closed`, `removed`, `source_unavailable`, `unconfirmed` e `unknown`.
+  - Aplicação automática de sinais de expiração (`expiryDate` da Himalayas) e encerramento (`state="closed"` ou labels `fechada`/`encerrada`/`Stale` nas issues do GitHub, além de revalidação individual via `check_publication_status` para issues ausentes da primeira página sem encerrar falsamente vagas que apenas mudaram de página).
+  - Exclusão determinística de vagas `expired`, `closed` e `removed` nas recomendações ativas de `evaluate_opportunity_for_user`, preservando integralmente estados salvos/dispensados do usuário (`opportunity_user_states`).
+- **Métricas de Sincronização e Observabilidade (`OpportunitySyncRun` e `SyncRunSummary`):**
+  - Distinção estrita entre `received_count`, `valid_count`, `rejected_count`, `inserted_count`, `updated_count`, `intra_source_duplicate_count`, `cross_source_duplicate_count`, `unique_opportunities_count`, `open_opportunities_count`, `closed_or_expired_count` e `unconfirmed_count`, exibidas por fonte e em linha consolidada no CLI e em `GET /api/v1/opportunities/sources`.
+- **Interface e API:**
+  - Exposição de `source_links`, `last_status_check_at` e `status_uncertainty_note` em `OpportunityResponse`, filtro por fonte considerando também vínculos secundários e exibição de fontes secundárias clicáveis, data da última verificação e estado traduzido em `OpportunityDiscoveryPage.tsx`.
+
+### Corrigido
+- Corrigida colisão de `external_id` em `HimalayasConnector` quando empresas distintas utilizavam o mesmo slug final de vaga (`/jobs/software-developer`), passando a usar `<company-slug>/jobs/<job-slug>`.
+- Corrigido limite de truncamento de `locationRestrictions` em `HimalayasConnector` (`max_items=250`), evitando perda de países elegíveis em listas extensas.
+- Substituído o descarte silencioso de clones multi-país em `JobicyConnector` por vinculação rastreável em `opportunity_source_links` (`intra_source_duplicate_count`) com mesclagem de `eligible_countries`.
+- Refinada a extração de `city` em `github_vagas.py` para remover sufixos de UF (`/PR`, `/SP`) em vagas presenciais/híbridas e endurecida a deduplicação composta (`_is_safe_composite_match`) para impedir falsos positivos baseados apenas em `(title, company_name)`.
+
+---
+
 ## [0.2.4] - 2026-11-15 — Fase 02.4: Expansão de Fontes e Cobertura de Oportunidades
 
 ### Adicionado

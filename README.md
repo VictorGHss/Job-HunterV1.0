@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 02.1 — Conformidade das Fontes e Primeira Sincronização Real
+- **Fase atual:** Fase 02.5 — Confiabilidade, Rastreabilidade e Ciclo de Vida das Oportunidades
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -50,7 +50,9 @@ job-hunter/
 │   │   ├── versions/
 │   │   │   ├── 0001_initial_foundation.py
 │   │   │   ├── 0002_auth_rate_limiting.py
-│   │   │   └── 0003_opportunity_discovery.py
+│   │   │   ├── 0003_opportunity_discovery.py
+│   │   │   ├── 0004_professional_areas.py
+│   │   │   └── 0005_lifecycle_traceability.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -177,11 +179,11 @@ A importação é transacional e idempotente: valida o JSON estritamente (`schem
 A Fase 02 implementa conectores modulares para feeds públicos com termos verificados e compatíveis, além de captura manual privada e recebimento de links via Web Share Target (PWA):
 
 - **Fontes ativas e habilitadas (`enabled=true`, intervalo mínimo `3600s`):**
-  - **Remote OK (`remote_ok`)**: feed JSON público sem chave (`https://remoteok.com/api`), atribuição visível e links diretos **sem `rel="nofollow"`** (`99` oportunidades ativas no catálogo local).
-  - **Jobicy (`jobicy`)**: API v2 pública oficial (`https://jobicy.com/api/v2/remote-jobs?count=50&industry=dev`), sem chave, limite oficial `<= 1 req/h`, com deduplicação de clones multi-país no próprio lote (`43` oportunidades ativas).
-  - **Himalayas (`himalayas`)**: API JSON pública oficial (`https://himalayas.app/jobs/api/search?q=software+developer`), sem chave, preservando `applicationLink` oficial e descartando vagas expiradas via `expiryDate` (`17` oportunidades ativas).
-  - **GitHub Backend BR (`github_backend_br`)** e **GitHub Frontend BR (`github_frontend_br`)**: repositórios comunitários brasileiros licenciados sob **MIT** (`backend-br/vagas` e `frontendbr/vagas`) consumidos exclusivamente via API REST oficial v3 do GitHub (`per_page=30`), com filtragem de PRs/issues `Stale`/avisos administrativos e **redação automática de PII** (e-mails e telefones pessoais) no corpo da vaga (`30` + `3` oportunidades ativas).
-  - **Catálogo consolidado após Fase 02.4 (`192` oportunidades no PostgreSQL `jobhunter`):** `169 other`, `13 junior`, `7 freelance`, `3 internship`, com deduplicação intra-fonte e cross-source (`also_seen_in_sources`) preservando atribuição e URLs canônicas da primeira fonte.
+  - **Remote OK (`remote_ok`)**: feed JSON público sem chave (`https://remoteok.com/api`), atribuição visível e links diretos **sem `rel="nofollow"`** (`99` oportunidades únicas no catálogo local).
+  - **Jobicy (`jobicy`)**: API v2 pública oficial (`https://jobicy.com/api/v2/remote-jobs?count=50&industry=dev`), sem chave, limite oficial `<= 1 req/h`, com unificação de clones multi-país preservando todos os links e mesclando países elegíveis (`43` oportunidades únicas + `7` vínculos secundários regionais em `opportunity_source_links`).
+  - **Himalayas (`himalayas`)**: API JSON pública oficial (`https://himalayas.app/jobs/api/search?q=software+developer`), sem chave, identificadores compostos `<company>/jobs/<slug>`, preservação integral de `applicationLink` (`?utm_source=api`) e controle de ciclo de vida via `expiryDate` (`20` oportunidades únicas).
+  - **GitHub Backend BR (`github_backend_br`)** e **GitHub Frontend BR (`github_frontend_br`)**: repositórios comunitários brasileiros licenciados sob **MIT** (`backend-br/vagas` e `frontendbr/vagas`, observando que a licença MIT do repositório não suprime direitos sobre conteúdo de terceiros) consumidos via API REST oficial v3 do GitHub (`per_page=30`), com filtragem de PRs/issues `Stale`/avisos administrativos, revalidação de issues encerradas/removidas e **redação automática de PII** (e-mails e telefones pessoais) no corpo da vaga (`30` + `3` oportunidades únicas + `1` vínculo compartilhado entre ambos os repositórios).
+  - **Catálogo consolidado após Fase 02.5 (`195` oportunidades únicas e `203` vínculos de publicação em `opportunity_source_links`, com `53` compatíveis com o perfil):** rastreabilidade normalizada de todas as fontes primárias e secundárias (`source_url`, `application_url`, `external_id`, `source_status`, `first_seen_at`, `last_seen_at`, `last_checked_at`), deduplicação segura sem falsos positivos por mero `(title, company_name)` e métricas auditáveis de sincronização (`received_count == valid_count + rejected_count` e `valid_count == inserted_count + updated_count + intra_source_duplicate_count + cross_source_duplicate_count`).
   - **Classificação determinística tridimensional (`classification.py`)**: avalia de forma independente `opportunity_type`, `employment_type` e `professional_area` + `secondary_areas` (`software_development`, `backend`, `frontend`, `fullstack`, `data`, `artificial_intelligence`, `devops_cloud`, `api_integrations`, `infrastructure`, `technical_support`, `customer_support`, `marketing_sales`, `healthcare`, `administration`, `other`, `unknown`), bloqueando falsos positivos de tecnologias mencionadas incidentalmente em vagas de suporte, atendimento, marketing ou saúde.
   - **Matching por área e relevância (`matching.py`)**: distingue área compatível, incompatível e não identificada (`unknown`), impede recomendação de suporte técnico/atendimento/marketing como desenvolvimento, mantém `employment_type=unknown` elegível mesmo com `block_clt=true` e permite filtrar por área na API (`GET /api/v1/opportunities?area=...`) e na interface.
 - **Fonte pausada temporariamente por conformidade:**

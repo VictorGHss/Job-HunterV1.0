@@ -270,7 +270,14 @@ export type ProfessionalArea =
   | "other"
   | "unknown";
 
-export type ExternalSourceStatus = "active" | "closed" | "unknown";
+export type ExternalSourceStatus =
+  | "active"
+  | "expired"
+  | "closed"
+  | "removed"
+  | "source_unavailable"
+  | "unconfirmed"
+  | "unknown";
 
 export interface OpportunitySourcePublic {
   id: string;
@@ -284,7 +291,36 @@ export interface OpportunitySourcePublic {
   refresh_interval_seconds: number;
   last_synced_at: string | null;
   last_success_at: string | null;
+  last_error_at?: string | null;
   last_error_summary: string | null;
+  unique_opportunities_count?: number;
+  open_opportunities_count?: number;
+  closed_or_expired_count?: number;
+  unconfirmed_count?: number;
+}
+
+export interface OpportunitySourceLink {
+  id: string;
+  source_id: string;
+  source_slug: string;
+  source_name: string;
+  external_id: string;
+  source_url: string;
+  application_url: string | null;
+  is_primary: boolean;
+  source_status: ExternalSourceStatus;
+  published_at: string | null;
+  deadline_at: string | null;
+  location_text: string | null;
+  eligible_countries: string[];
+  salary_min: number | null;
+  salary_max: number | null;
+  salary_currency: string | null;
+  salary_period: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_checked_at: string | null;
+  missing_sync_count: number;
 }
 
 export interface OpportunityMatchEvaluation {
@@ -337,7 +373,10 @@ export interface Opportunity {
   source_status: ExternalSourceStatus;
   first_seen_at: string;
   last_seen_at: string;
+  last_status_check_at?: string | null;
+  status_uncertainty_note?: string | null;
   source: OpportunitySourcePublic | null;
+  source_links?: OpportunitySourceLink[];
   user_state: OpportunityUserState;
   match: OpportunityMatchEvaluation;
 }

@@ -75,6 +75,9 @@ class ExternalSourceStatus(StrEnum):
     ACTIVE = "active"
     CLOSED = "closed"
     EXPIRED = "expired"
+    REMOVED = "removed"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    UNCONFIRMED = "unconfirmed"
     UNKNOWN = "unknown"
 
 
@@ -117,6 +120,10 @@ class OpportunitySource(Base, TimestampMixin):
     last_error_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     opportunities: Mapped[list["Opportunity"]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+    )
+    source_links: Mapped[list["OpportunitySourceLink"]] = relationship(
         back_populates="source",
         cascade="all, delete-orphan",
     )
@@ -246,10 +253,85 @@ class Opportunity(Base, TimestampMixin):
     source: Mapped["OpportunitySource | None"] = relationship(
         back_populates="opportunities"
     )
+    source_links: Mapped[list["OpportunitySourceLink"]] = relationship(
+        back_populates="opportunity",
+        cascade="all, delete-orphan",
+        order_by="OpportunitySourceLink.is_primary.desc(), OpportunitySourceLink.first_seen_at.asc()",
+    )
     user_states: Mapped[list["OpportunityUserState"]] = relationship(
         back_populates="opportunity",
         cascade="all, delete-orphan",
     )
+
+
+class OpportunitySourceLink(Base, TimestampMixin):
+    __tablename__ = "opportunity_source_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "external_id",
+            name="uq_opp_source_links_source_external",
+        ),
+        Index("ix_opp_source_links_source_url", "source_id", "source_url"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("opportunity_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    application_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source_status: Mapped[str] = mapped_column(
+        String(32),
+        default=ExternalSourceStatus.ACTIVE.value,
+        index=True,
+        nullable=False,
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    location_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    eligible_countries: Mapped[list[str]] = mapped_column(
+        JsonType, default=list, nullable=False
+    )
+    salary_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salary_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    salary_period: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    missing_sync_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JsonType, default=dict, nullable=False
+    )
+
+    opportunity: Mapped["Opportunity"] = relationship(back_populates="source_links")
+    source: Mapped["OpportunitySource"] = relationship(back_populates="source_links")
 
 
 class OpportunityUserState(Base, TimestampMixin):
@@ -310,9 +392,28 @@ class OpportunitySyncRun(Base):
         DateTime(timezone=True), nullable=True
     )
     fetched_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    received_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    valid_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     inserted_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     updated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    intra_source_duplicate_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    cross_source_duplicate_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     skipped_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unique_opportunities_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    open_opportunities_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    closed_or_expired_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    unconfirmed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     source: Mapped["OpportunitySource"] = relationship(back_populates="sync_runs")

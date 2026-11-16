@@ -35,6 +35,38 @@ class OpportunitySourcePublicResponse(BaseModel):
     refresh_interval_seconds: int
     last_synced_at: datetime | None = None
     last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error_summary: str | None = None
+    unique_opportunities_count: int = 0
+    open_opportunities_count: int = 0
+    closed_or_expired_count: int = 0
+    unconfirmed_count: int = 0
+
+
+class OpportunitySourceLinkResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    source_id: uuid.UUID
+    source_slug: str
+    source_name: str
+    external_id: str
+    source_url: str
+    application_url: str | None = None
+    is_primary: bool
+    source_status: ExternalSourceStatus | str
+    published_at: datetime | None = None
+    deadline_at: datetime | None = None
+    location_text: str | None = None
+    eligible_countries: list[str] = Field(default_factory=list)
+    salary_min: float | None = None
+    salary_max: float | None = None
+    salary_currency: str | None = None
+    salary_period: str | None = None
+    first_seen_at: datetime
+    last_seen_at: datetime
+    last_checked_at: datetime | None = None
+    missing_sync_count: int = 0
 
 
 class OpportunityUserStateResponse(BaseModel):
@@ -87,7 +119,10 @@ class OpportunityResponse(BaseModel):
     source_status: ExternalSourceStatus | str
     first_seen_at: datetime
     last_seen_at: datetime
+    last_status_check_at: datetime | None = None
+    status_uncertainty_note: str | None = None
     source: OpportunitySourcePublicResponse | None = None
+    source_links: list[OpportunitySourceLinkResponse] = Field(default_factory=list)
     user_state: OpportunityUserStateResponse
     match: OpportunityMatchEvaluation
 
@@ -217,8 +252,17 @@ class OpportunityUserStateUpdate(BaseModel):
 class SyncRunSummary(BaseModel):
     source_slug: str
     status: SyncRunStatus | str
+    received_count: int = 0
+    valid_count: int = 0
+    rejected_count: int = 0
     fetched_count: int = 0
     inserted_count: int = 0
     updated_count: int = 0
+    intra_source_duplicate_count: int = 0
+    cross_source_duplicate_count: int = 0
     skipped_count: int = 0
+    unique_opportunities_count: int = 0
+    open_opportunities_count: int = 0
+    closed_or_expired_count: int = 0
+    unconfirmed_count: int = 0
     error_summary: str | None = None

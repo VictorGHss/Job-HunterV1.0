@@ -30,6 +30,7 @@ import { Input, Label } from "@/components/ui/input";
 import { ApiError, api } from "@/lib/api";
 import type {
   EmploymentType,
+  ExternalSourceStatus,
   Opportunity,
   OpportunitySourcePublic,
   OpportunityType,
@@ -91,6 +92,16 @@ const NON_DEV_AREAS = new Set<string>([
   "other",
   "unknown",
 ]);
+
+const SOURCE_STATUS_LABELS: Record<ExternalSourceStatus, string> = {
+  active: "Aberta",
+  expired: "Expirada",
+  closed: "Encerrada",
+  removed: "Publicação removida",
+  source_unavailable: "Fonte temporariamente indisponível",
+  unconfirmed: "Estado não confirmado",
+  unknown: "Estado não confirmado",
+};
 
 function formatDatePtBr(iso: string | null): string {
   if (!iso) return "Data não informada";
@@ -755,35 +766,98 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                     </div>
                   )}
 
+                  {opp.status_uncertainty_note && (
+                    <div className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{opp.status_uncertainty_note}</span>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs">
-                    <div className="text-muted-foreground">
+                    <div className="space-y-1 text-muted-foreground">
                       {opp.source ? (
-                        <span>
-                          Origem:{" "}
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span>
+                            Origem:{" "}
+                            <a
+                              href={opp.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-medium text-primary underline-offset-2 hover:underline"
+                            >
+                              {opp.source.name}
+                            </a>
+                          </span>
+                          <span>•</span>
+                          <span>
+                            Status:{" "}
+                            <strong className="font-medium text-foreground">
+                              {SOURCE_STATUS_LABELS[opp.source_status] ||
+                                opp.source_status}
+                            </strong>
+                          </span>
+                          <span>•</span>
+                          <span>
+                            Verificada:{" "}
+                            {formatDatePtBr(
+                              opp.last_status_check_at || opp.last_seen_at
+                            )}
+                          </span>
+                        </div>
+                      ) : (
+                        <span>Registro privado adicionado manualmente</span>
+                      )}
+
+                      {opp.source_links &&
+                        opp.source_links.filter((l) => !l.is_primary).length >
+                          0 && (
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                            <span className="font-medium text-foreground">
+                              Também publicada em:
+                            </span>
+                            {opp.source_links
+                              .filter((l) => !l.is_primary)
+                              .map((link) => (
+                                <a
+                                  key={link.id}
+                                  href={link.source_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary underline-offset-2 hover:underline"
+                                >
+                                  {link.source_name}
+                                  {link.location_text
+                                    ? ` (${link.location_text})`
+                                    : ""}
+                                </a>
+                              ))}
+                          </div>
+                        )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      {opp.application_url &&
+                        opp.application_url !== opp.source_url && (
                           <a
                             href={opp.source_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="font-medium text-primary underline-offset-2 hover:underline"
+                            className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground hover:underline"
                           >
-                            {opp.source.name}
-                          </a>{" "}
-                          • Status: {opp.source_status}
-                        </span>
-                      ) : (
-                        <span>Registro privado adicionado manualmente</span>
-                      )}
+                            Publicação na fonte
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
+                      <a
+                        href={outboundUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
+                      >
+                        Ver oportunidade original
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
                     </div>
-
-                    <a
-                      href={outboundUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
-                    >
-                      Ver oportunidade original
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
                   </div>
                 </CardContent>
               </Card>

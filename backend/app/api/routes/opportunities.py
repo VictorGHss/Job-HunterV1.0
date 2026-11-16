@@ -42,8 +42,7 @@ def list_sources(
     db: Annotated[Session, Depends(get_db)],
 ) -> list[OpportunitySourcePublicResponse]:
     del current_user
-    sources = list_public_sources(db)
-    return [OpportunitySourcePublicResponse.model_validate(src) for src in sources]
+    return list_public_sources(db)
 
 
 @router.get("", response_model=OpportunityListResponse)

@@ -8,6 +8,7 @@ from app.models.opportunity import (
 from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
+    CollectionBatch,
     ConnectorPayloadError,
     NormalizedOpportunityDraft,
     SourceDefinition,
@@ -68,19 +69,40 @@ class RemoteOKConnector(BaseOpportunityConnector):
             )
 
         drafts: list[NormalizedOpportunityDraft] = []
-        for item in payload:
+        received_count = 0
+        rejected_count = 0
+        rejection_breakdown: dict[str, int] = {}
+
+        for idx, item in enumerate(payload):
             if not isinstance(item, dict):
+                received_count += 1
+                rejected_count += 1
+                rejection_breakdown["invalid_item"] = (
+                    rejection_breakdown.get("invalid_item", 0) + 1
+                )
                 continue
-            # O primeiro elemento do feed Remote OK costuma ser um aviso legal sem id/position
+            # O primeiro elemento do feed Remote OK é o banner legal {"legal": "..."} sem campos de vaga
+            if idx == 0 and "legal" in item and "id" not in item and "position" not in item:
+                continue
+
+            received_count += 1
             raw_id = item.get("id")
             raw_title = sanitize_plain_text(item.get("position"))
             raw_url = item.get("url")
             if raw_id is None or not raw_title or not isinstance(raw_url, str):
+                rejected_count += 1
+                rejection_breakdown["missing_required_fields"] = (
+                    rejection_breakdown.get("missing_required_fields", 0) + 1
+                )
                 continue
 
             try:
                 source_url = normalize_canonical_url(raw_url)
             except ValueError:
+                rejected_count += 1
+                rejection_breakdown["invalid_url"] = (
+                    rejection_breakdown.get("invalid_url", 0) + 1
+                )
                 continue
 
             application_url: str | None = None
@@ -155,4 +177,10 @@ class RemoteOKConnector(BaseOpportunityConnector):
                 )
             )
 
+        self.last_batch = CollectionBatch(
+            received_count=received_count,
+            valid_drafts=list(drafts),
+            rejected_count=rejected_count,
+            rejection_breakdown=rejection_breakdown,
+        )
         return drafts

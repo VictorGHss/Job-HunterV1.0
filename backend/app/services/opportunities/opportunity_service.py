@@ -6,8 +6,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.opportunity import (
+    ExternalSourceStatus,
     Opportunity,
     OpportunitySource,
+    OpportunitySourceLink,
     OpportunityUserState,
     WorkMode,
 )
@@ -18,6 +20,7 @@ from app.schemas.opportunity import (
     OpportunityListResponse,
     OpportunityMatchEvaluation,
     OpportunityResponse,
+    OpportunitySourceLinkResponse,
     OpportunitySourcePublicResponse,
     OpportunityUserStateResponse,
     OpportunityUserStateUpdate,
@@ -37,6 +40,87 @@ from app.services.profile_service import get_or_create_profile
 
 class GlobalOpportunityImmutableError(PermissionError):
     """Lançado quando um usuário tenta alterar um registro global de provedor externo."""
+
+
+def _build_status_uncertainty_note(opp: Opportunity) -> str | None:
+    st = (opp.source_status or "active").lower()
+    if st in {ExternalSourceStatus.UNKNOWN.value, ExternalSourceStatus.UNCONFIRMED.value}:
+        return (
+            "Esta publicação deixou de aparecer nas consultas parciais mais recentes da fonte, "
+            "sem confirmação explícita de encerramento."
+        )
+    if st == ExternalSourceStatus.SOURCE_UNAVAILABLE.value:
+        return "A fonte de origem esteve temporariamente indisponível na última verificação."
+    if opp.source is not None and opp.source.last_error_summary:
+        return (
+            f"Última verificação da fonte ({opp.source.name}) registrou falha temporária; "
+            "estado preservado."
+        )
+    if opp.missing_sync_count > 0 and st == ExternalSourceStatus.ACTIVE.value:
+        return (
+            f"Ausente em {opp.missing_sync_count} consulta(s) recente(s) de feed limitado; "
+            "mantida como aberta."
+        )
+    return None
+
+
+def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkResponse]:
+    links = list(getattr(opp, "source_links", None) or [])
+    result: list[OpportunitySourceLinkResponse] = []
+    for link in links:
+        src = link.source or opp.source
+        result.append(
+            OpportunitySourceLinkResponse(
+                id=link.id,
+                source_id=link.source_id,
+                source_slug=src.slug if src is not None else "unknown",
+                source_name=src.name if src is not None else "Fonte externa",
+                external_id=link.external_id,
+                source_url=link.source_url,
+                application_url=link.application_url,
+                is_primary=link.is_primary,
+                source_status=link.source_status,
+                published_at=link.published_at,
+                deadline_at=link.deadline_at,
+                location_text=link.location_text,
+                eligible_countries=list(link.eligible_countries or []),
+                salary_min=link.salary_min,
+                salary_max=link.salary_max,
+                salary_currency=link.salary_currency,
+                salary_period=link.salary_period,
+                first_seen_at=link.first_seen_at,
+                last_seen_at=link.last_seen_at,
+                last_checked_at=link.last_checked_at,
+                missing_sync_count=link.missing_sync_count,
+            )
+        )
+    if not result and opp.source_id is not None and opp.source is not None:
+        result.append(
+            OpportunitySourceLinkResponse(
+                id=opp.id,
+                source_id=opp.source_id,
+                source_slug=opp.source.slug,
+                source_name=opp.source.name,
+                external_id=str(opp.external_id or opp.id),
+                source_url=opp.source_url,
+                application_url=opp.application_url,
+                is_primary=True,
+                source_status=opp.source_status,
+                published_at=opp.published_at,
+                deadline_at=opp.deadline_at,
+                location_text=opp.location_text,
+                eligible_countries=list(opp.eligible_countries or []),
+                salary_min=opp.salary_min,
+                salary_max=opp.salary_max,
+                salary_currency=opp.salary_currency,
+                salary_period=opp.salary_period,
+                first_seen_at=opp.first_seen_at,
+                last_seen_at=opp.last_seen_at,
+                last_checked_at=opp.last_status_check_at or opp.last_seen_at,
+                missing_sync_count=opp.missing_sync_count,
+            )
+        )
+    return result
 
 
 def _serialize_opportunity(
@@ -91,7 +175,10 @@ def _serialize_opportunity(
         source_status=opp.source_status,
         first_seen_at=opp.first_seen_at,
         last_seen_at=opp.last_seen_at,
+        last_status_check_at=opp.last_status_check_at or opp.last_seen_at,
+        status_uncertainty_note=_build_status_uncertainty_note(opp),
         source=source_dto,
+        source_links=_serialize_source_links(opp),
         user_state=state_dto,
         match=match,
     )
@@ -152,8 +239,14 @@ def _matches_query_filters(
         if slug_norm == "manual":
             if opp.created_by_user_id is None or opp.source_id is not None:
                 return False
-        elif opp.source is None or opp.source.slug.lower() != slug_norm:
-            return False
+        else:
+            primary_match = opp.source is not None and opp.source.slug.lower() == slug_norm
+            secondary_match = any(
+                link.source is not None and link.source.slug.lower() == slug_norm
+                for link in (getattr(opp, "source_links", None) or [])
+            )
+            if not primary_match and not secondary_match:
+                return False
 
     if published_after is not None:
         ref_dt = opp.published_at or opp.first_seen_at
@@ -234,7 +327,10 @@ def list_opportunities(
 
     stmt = (
         select(Opportunity)
-        .options(selectinload(Opportunity.source))
+        .options(
+            selectinload(Opportunity.source),
+            selectinload(Opportunity.source_links).selectinload(OpportunitySourceLink.source),
+        )
         .where(_visible_to_user_filter(user.id))
     )
     opportunities = db.execute(stmt).scalars().all()
@@ -310,7 +406,10 @@ def get_opportunity_for_user(
 ) -> OpportunityResponse | None:
     opp = db.execute(
         select(Opportunity)
-        .options(selectinload(Opportunity.source))
+        .options(
+            selectinload(Opportunity.source),
+            selectinload(Opportunity.source_links).selectinload(OpportunitySourceLink.source),
+        )
         .where(
             Opportunity.id == opportunity_id,
             _visible_to_user_filter(user.id),
@@ -547,5 +646,41 @@ def update_opportunity_user_state(
     )
 
 
-def list_public_sources(db: Session) -> list[OpportunitySource]:
-    return ensure_default_sources(db)
+def list_public_sources(db: Session) -> list[OpportunitySourcePublicResponse]:
+    sources = ensure_default_sources(db)
+    opps = (
+        db.execute(
+            select(Opportunity.source_id, Opportunity.source_status).where(
+                Opportunity.source_id.is_not(None)
+            )
+        )
+        .all()
+    )
+    counts_by_src: dict[uuid.UUID, list[int]] = {}
+    for src_id, st in opps:
+        if src_id is None:
+            continue
+        bucket = counts_by_src.setdefault(src_id, [0, 0, 0, 0])
+        bucket[0] += 1
+        st_low = (st or "active").lower()
+        if st_low == ExternalSourceStatus.ACTIVE.value:
+            bucket[1] += 1
+        elif st_low in {
+            ExternalSourceStatus.EXPIRED.value,
+            ExternalSourceStatus.CLOSED.value,
+            ExternalSourceStatus.REMOVED.value,
+        }:
+            bucket[2] += 1
+        else:
+            bucket[3] += 1
+
+    result: list[OpportunitySourcePublicResponse] = []
+    for src in sources:
+        u_cnt, o_cnt, c_cnt, unc_cnt = counts_by_src.get(src.id, [0, 0, 0, 0])
+        dto = OpportunitySourcePublicResponse.model_validate(src)
+        dto.unique_opportunities_count = u_cnt
+        dto.open_opportunities_count = o_cnt
+        dto.closed_or_expired_count = c_cnt
+        dto.unconfirmed_count = unc_cnt
+        result.append(dto)
+    return result

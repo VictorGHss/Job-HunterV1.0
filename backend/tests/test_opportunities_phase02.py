@@ -12,6 +12,7 @@ from app.models.opportunity import (
     ExternalSourceStatus,
     Opportunity,
     OpportunitySource,
+    OpportunitySourceLink,
     OpportunitySyncRun,
     OpportunityType,
     OpportunityUserState,
@@ -1576,8 +1577,9 @@ def test_phase024_new_connectors_normalization_pii_redaction_and_cross_source_de
     jobicy_drafts = jobicy_conn.collect()
     assert jobicy_calls["count"] == 2
     assert jobicy_sleeps == [2.0]
-    # O clone multi-país 90103 é deduplicado no próprio lote
-    assert len(jobicy_drafts) == 2
+    assert len(jobicy_drafts) == 3
+    assert jobicy_conn.last_batch.received_count == 3
+    assert jobicy_conn.last_batch.rejected_count == 0
     assert jobicy_drafts[0].opportunity_type == OpportunityType.JUNIOR.value
     assert jobicy_drafts[0].employment_type == EmploymentType.PJ.value
     assert jobicy_drafts[0].professional_area == ProfessionalArea.BACKEND.value
@@ -1707,22 +1709,393 @@ def test_phase024_new_connectors_normalization_pii_redaction_and_cross_source_de
     )
     by_slug = {s.source_slug: s for s in summaries}
     # Por ordem alfabética de slug, jobicy executa antes de remote_ok:
-    # jobicy insere 2 vagas ("Junior Python Backend Engineer" na "Acme Cloud" e "Senior Full Stack Engineer"),
-    # e remote_ok insere 1 ("Backend Engineering Intern") e deduplica 1 cross-source contra jobicy!
+    # jobicy recebe 3 válidas -> insere 2 vagas únicas e vincula 1 clone multi-país (intra_source_duplicate_count=1);
+    # remote_ok recebe 2 válidas -> insere 1 ("Backend Engineering Intern") e vincula 1 cross-source contra jobicy!
     assert by_slug["jobicy"].status == SyncRunStatus.SUCCESS.value
+    assert by_slug["jobicy"].received_count == 3
+    assert by_slug["jobicy"].valid_count == 3
     assert by_slug["jobicy"].inserted_count == 2
+    assert by_slug["jobicy"].intra_source_duplicate_count == 1
     assert by_slug["remote_ok"].status == SyncRunStatus.SUCCESS.value
     assert by_slug["remote_ok"].inserted_count == 1
-    assert by_slug["remote_ok"].updated_count == 1
+    assert by_slug["remote_ok"].cross_source_duplicate_count == 1
+    assert by_slug["remote_ok"].updated_count == 0
+    assert by_slug["himalayas"].received_count == 2
+    assert by_slug["himalayas"].valid_count == 1
+    assert by_slug["himalayas"].rejected_count == 1
     assert by_slug["himalayas"].inserted_count == 1
+    assert by_slug["github_backend_br"].received_count == 3
+    assert by_slug["github_backend_br"].valid_count == 1
+    assert by_slug["github_backend_br"].rejected_count == 2
     assert by_slug["github_backend_br"].inserted_count == 1
     assert by_slug["github_frontend_br"].status == SyncRunStatus.FAILED.value
 
     deduped_acme = db_session.execute(
         select(Opportunity).where(Opportunity.external_id == "90101")
     ).scalar_one()
-    # Preserva URL e atribuição originais da primeira fonte que inseriu (Jobicy) e registra Remote OK em also_seen_in_sources
+    # Preserva URL e atribuição originais da primeira fonte que inseriu (Jobicy) e registra vínculo completo da Remote OK
     assert deduped_acme.source_url == "https://jobicy.com/jobs/90101-junior-python-backend-developer"
     assert "remote_ok" in deduped_acme.raw_metadata.get("also_seen_in_sources", [])
+    acme_links = db_session.execute(
+        select(OpportunitySourceLink).where(
+            OpportunitySourceLink.opportunity_id == deduped_acme.id
+        )
+    ).scalars().all()
+    assert len(acme_links) == 2
+    by_ext = {lnk.external_id: lnk for lnk in acme_links}
+    assert by_ext["90101"].is_primary is True
+    assert by_ext["109001"].is_primary is False
+    assert by_ext["109001"].source_url == "https://remoteok.com/remote-jobs/junior-python-backend-109001"
+    assert by_ext["109001"].application_url == "https://jobs.example.com/apply/109001"
+
+
+def test_phase025_traceability_dedup_precision_lifecycle_and_observability(
+    db_session, make_client
+):
+    now = datetime.now(UTC)
+    future_epoch = int((now + timedelta(days=20)).timestamp())
+    past_epoch = int((now - timedelta(days=1)).timestamp())
+
+    # 1. Precisão de deduplicação: mesmo título e empresa, mas vagas diferentes por senioridade,
+    # modalidade, cidade ou país/descrição NÃO podem sofrer merge falso-positivo;
+    # enquanto clones multi-país reais da Jobicy devem unir países elegíveis e preservar ambos os links.
+    jobicy_batch = {
+        "jobs": [
+            {
+                "id": 7001,
+                "url": "https://jobicy.com/jobs/7001-fullstack-uk",
+                "jobTitle": "Full Stack Python Engineer | UK | Remote",
+                "companyName": "GeoMerge Labs",
+                "jobIndustry": ["Python", "React"],
+                "jobType": ["Contract"],
+                "jobGeo": "UK",
+                "jobLevel": "Junior",
+                "jobDescription": "<p>Build distributed Python and React services for global telemetry platform with FastAPI and PostgreSQL.</p>",
+                "pubDate": "2026-11-15T10:00:00+00:00",
+            },
+            {
+                "id": 7002,
+                "url": "https://jobicy.com/jobs/7002-fullstack-br",
+                "jobTitle": "Full Stack Python Engineer | Brazil | Remote",
+                "companyName": "GeoMerge Labs",
+                "jobIndustry": ["Python", "React"],
+                "jobType": ["Contract"],
+                "jobGeo": "Brazil",
+                "jobLevel": "Junior",
+                "jobDescription": "<p>Build distributed Python and React services for global telemetry platform with FastAPI and PostgreSQL.</p>",
+                "pubDate": "2026-11-15T10:05:00+00:00",
+            },
+            # Mesma empresa e mesmo título base de outra vaga, mas senioridade Senior e descrição distinta -> NÃO deve unificar com 7001!
+            {
+                "id": 7003,
+                "url": "https://jobicy.com/jobs/7003-fullstack-senior",
+                "jobTitle": "Full Stack Python Engineer",
+                "companyName": "GeoMerge Labs",
+                "jobIndustry": ["Python", "Kubernetes"],
+                "jobType": ["Full-Time"],
+                "jobGeo": "USA",
+                "jobLevel": "Senior",
+                "jobDescription": "<p>Architect enterprise billing pipelines and lead 8 engineers in US timezone.</p>",
+                "pubDate": "2026-11-15T11:00:00+00:00",
+            },
+        ]
+    }
+
+    # Himalayas: duas empresas diferentes com mesmo slug final "/jobs/software-developer"
+    # + uma vaga ativa que irá expirar na 2ª sincronização
+    him_state = {"expire_first": False}
+
+    def him_handler(_: httpx.Request) -> httpx.Response:
+        exp_val = past_epoch if him_state["expire_first"] else future_epoch
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "guid": "https://himalayas.app/companies/alpha-corp/jobs/software-developer",
+                        "title": "Junior Software Developer",
+                        "companyName": "Alpha Corp",
+                        "employmentType": "Contractor",
+                        "seniority": ["Entry-level"],
+                        "locationRestrictions": ["Brazil", "United States"],
+                        "categories": ["Software-Engineering", "Python"],
+                        "description": "<p>Develop backend microservices in Python for Alpha Corp.</p>",
+                        "pubDate": 1794600000,
+                        "expiryDate": exp_val,
+                        "applicationLink": "https://himalayas.app/companies/alpha-corp/jobs/software-developer?utm_source=api",
+                    },
+                    {
+                        "guid": "https://himalayas.app/companies/omega-inc/jobs/software-developer",
+                        "title": "Junior Software Developer",
+                        "companyName": "Omega Inc",
+                        "employmentType": "Contractor",
+                        "seniority": ["Entry-level"],
+                        "locationRestrictions": ["Brazil"],
+                        "categories": ["Software-Engineering", "Python"],
+                        "description": "<p>Develop backend APIs in Python for Omega Inc.</p>",
+                        "pubDate": 1794600500,
+                        "expiryDate": future_epoch,
+                        "applicationLink": "https://himalayas.app/companies/omega-inc/jobs/software-developer?utm_source=api",
+                    },
+                ]
+            },
+        )
+
+    # GitHub Backend BR e Frontend BR:
+    # - Vaga compartilhada entre Backend BR (#501) e Frontend BR (#801)
+    # - Duas vagas presenciais na mesma empresa ("Banco Zeta") com mesmo título base mas cidades diferentes (SP vs Curitiba) -> NÃO podem unificar!
+    # - Vaga #502 no Backend BR que será fechada via revalidação individual de issue na 2ª sincronização
+    gh_state = {"close_502": False, "close_801_in_feed": False}
+
+    def gh_backend_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/issues/502"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 502,
+                    "state": "closed" if gh_state["close_502"] else "open",
+                    "labels": [{"name": "PJ"}, {"name": "Júnior"}],
+                },
+            )
+        issues = [
+            {
+                "number": 501,
+                "state": "open",
+                "title": "[Remoto] Desenvolvedor Full Stack Júnior Python & React na DualStackBR",
+                "html_url": "https://github.com/backend-br/vagas/issues/501",
+                "created_at": "2026-11-15T10:00:00Z",
+                "labels": [{"name": "PJ"}, {"name": "Júnior"}, {"name": "Python"}, {"name": "Remoto"}],
+                "body": "Vaga Full Stack Júnior atuando com FastAPI, PostgreSQL e React em arquitetura SaaS.",
+            },
+            {
+                "number": 503,
+                "state": "open",
+                "title": "[São Paulo/SP] Desenvolvedor Back-end Júnior na Banco Zeta",
+                "html_url": "https://github.com/backend-br/vagas/issues/503",
+                "created_at": "2026-11-15T10:10:00Z",
+                "labels": [{"name": "PJ"}, {"name": "Júnior"}, {"name": "Presencial"}, {"name": "Python"}],
+                "body": "Atuação presencial no escritório de São Paulo com Python e SQL.",
+            },
+            {
+                "number": 504,
+                "state": "open",
+                "title": "[Curitiba/PR] Desenvolvedor Back-end Júnior na Banco Zeta",
+                "html_url": "https://github.com/backend-br/vagas/issues/504",
+                "created_at": "2026-11-15T10:15:00Z",
+                "labels": [{"name": "PJ"}, {"name": "Júnior"}, {"name": "Presencial"}, {"name": "Python"}],
+                "body": "Atuação presencial no escritório de Curitiba com Python e SQL.",
+            },
+        ]
+        if not gh_state["close_502"]:
+            issues.append(
+                {
+                    "number": 502,
+                    "state": "open",
+                    "title": "[Remoto] Engenheiro de Dados Júnior Python na DataPulseBR",
+                    "html_url": "https://github.com/backend-br/vagas/issues/502",
+                    "created_at": "2026-11-15T10:05:00Z",
+                    "labels": [{"name": "PJ"}, {"name": "Júnior"}, {"name": "Python"}, {"name": "Remoto"}],
+                    "body": "Pipeline de dados com Python e SQL.",
+                }
+            )
+        return httpx.Response(200, json=issues)
+
+    def gh_frontend_handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 801,
+                    "state": "closed" if gh_state["close_801_in_feed"] else "open",
+                    "title": "[Remoto] Desenvolvedor Full Stack Júnior Python & React na DualStackBR",
+                    "html_url": "https://github.com/frontendbr/vagas/issues/801",
+                    "created_at": "2026-11-15T10:02:00Z",
+                    "labels": [{"name": "PJ"}, {"name": "Júnior"}, {"name": "React"}, {"name": "Remoto"}],
+                    "body": "Vaga Full Stack Júnior atuando com FastAPI, PostgreSQL e React em arquitetura SaaS.",
+                }
+            ],
+        )
+
+    overrides = {
+        "jobicy": JobicyConnector(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=jobicy_batch)),
+            sleep_fn=lambda _: None,
+        ),
+        "himalayas": HimalayasConnector(
+            transport=httpx.MockTransport(him_handler),
+            sleep_fn=lambda _: None,
+        ),
+        "github_backend_br": GitHubBackendBRConnector(
+            transport=httpx.MockTransport(gh_backend_handler),
+            sleep_fn=lambda _: None,
+        ),
+        "github_frontend_br": GitHubFrontendBRConnector(
+            transport=httpx.MockTransport(gh_frontend_handler),
+            sleep_fn=lambda _: None,
+        ),
+    }
+
+    # 1ª Sincronização
+    runs1 = {
+        r.source_slug: r
+        for r in sync_sources(db_session, force=True, connector_overrides=overrides)
+    }
+
+    # Invariante matemática de métricas por fonte
+    for r in runs1.values():
+        assert r.received_count == r.valid_count + r.rejected_count
+        assert r.valid_count == (
+            r.inserted_count
+            + r.updated_count
+            + r.intra_source_duplicate_count
+            + r.cross_source_duplicate_count
+        )
+
+    assert runs1["jobicy"].received_count == 3
+    assert runs1["jobicy"].inserted_count == 2  # 7001 e 7003 (7002 é clone multi-país de 7001)
+    assert runs1["jobicy"].intra_source_duplicate_count == 1
+    assert runs1["himalayas"].inserted_count == 2  # Alpha Corp e Omega Inc NÃO colidem!
+    assert runs1["github_backend_br"].inserted_count == 4  # 501, 502, 503 (SP) e 504 (Curitiba)
+    assert runs1["github_frontend_br"].inserted_count == 0
+    assert runs1["github_frontend_br"].cross_source_duplicate_count == 1  # 801 unificada com 501
+
+    # Verifica que o clone multi-país 7002 uniu Brasil + UK e preservou ambos os links
+    geomerge_jr = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "7001")
+    ).scalar_one()
+    assert set(geomerge_jr.eligible_countries) == {"UK", "Brazil"}
+    geomerge_links = db_session.execute(
+        select(OpportunitySourceLink).where(
+            OpportunitySourceLink.opportunity_id == geomerge_jr.id
+        )
+    ).scalars().all()
+    assert len(geomerge_links) == 2
+    assert {l.external_id for l in geomerge_links} == {"7001", "7002"}
+
+    # Verifica que a vaga DualStackBR preservou os links de ambos os repositórios GitHub
+    dual_opp = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "gh-backend-br-501")
+    ).scalar_one()
+    dual_links = db_session.execute(
+        select(OpportunitySourceLink).where(
+            OpportunitySourceLink.opportunity_id == dual_opp.id
+        )
+    ).scalars().all()
+    assert len(dual_links) == 2
+    assert {l.source_url for l in dual_links} == {
+        "https://github.com/backend-br/vagas/issues/501",
+        "https://github.com/frontendbr/vagas/issues/801",
+    }
+
+    # Cria usuário em Curitiba/Brasil e salva a vaga da Alpha Corp antes de ela expirar
+    user = create_user_account(
+        db_session,
+        email="phase025.user@example.com",
+        display_name="Phase 025 User",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    profile = get_or_create_profile(db_session, user)
+    profile.city = "Curitiba"
+    profile.state = "PR"
+    profile.country = "Brasil"
+    db_session.commit()
+
+    # Elegibilidade geográfica: GeoMerge Labs (UK + Brazil) é elegível para o candidato brasileiro!
+    assert evaluate_opportunity_for_user(geomerge_jr, profile).eligible is True
+    # Banco Zeta Curitiba (504) é elegível, enquanto Banco Zeta São Paulo (503) é bloqueada por cidade!
+    zeta_sp = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "gh-backend-br-503")
+    ).scalar_one()
+    zeta_cwb = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "gh-backend-br-504")
+    ).scalar_one()
+    assert evaluate_opportunity_for_user(zeta_sp, profile).eligible is False
+    assert evaluate_opportunity_for_user(zeta_cwb, profile).eligible is True
+
+    alpha_opp = db_session.execute(
+        select(Opportunity).where(
+            Opportunity.external_id == "alpha-corp/jobs/software-developer"
+        )
+    ).scalar_one()
+    assert alpha_opp.application_url == (
+        "https://himalayas.app/companies/alpha-corp/jobs/software-developer?utm_source=api"
+    )
+    db_session.add(
+        OpportunityUserState(
+            user_id=user.id,
+            opportunity_id=alpha_opp.id,
+            is_saved=True,
+            is_dismissed=False,
+        )
+    )
+    db_session.commit()
+
+    # 2ª Sincronização:
+    # - Alpha Corp expira na Himalayas (expiryDate < now)
+    # - Issue #502 some do feed aberto do GitHub Backend BR e é revalidada como closed via endpoint individual
+    # - Issue #801 fecha no GitHub Frontend BR, mas a vaga DualStackBR continua aberta porque #501 segue aberta no Backend BR!
+    him_state["expire_first"] = True
+    gh_state["close_502"] = True
+    gh_state["close_801_in_feed"] = True
+
+    runs2 = {
+        r.source_slug: r
+        for r in sync_sources(db_session, force=True, connector_overrides=overrides)
+    }
+    assert runs2["jobicy"].inserted_count == 0
+    assert runs2["jobicy"].updated_count == 2
+    assert runs2["jobicy"].intra_source_duplicate_count == 1
+
+    db_session.expire_all()
+    alpha_refreshed = db_session.get(Opportunity, alpha_opp.id)
+    assert alpha_refreshed.source_status == ExternalSourceStatus.EXPIRED.value
+    # Estado salvo pelo usuário é integralmente preservado mesmo após expiração
+    saved_state = db_session.execute(
+        select(OpportunityUserState).where(
+            OpportunityUserState.user_id == user.id,
+            OpportunityUserState.opportunity_id == alpha_opp.id,
+        )
+    ).scalar_one()
+    assert saved_state.is_saved is True
+    # Vaga expirada não é mais elegível para recomendação ativa
+    alpha_eval = evaluate_opportunity_for_user(alpha_refreshed, profile)
+    assert alpha_eval.eligible is False
+    assert any("expirada" in r.lower() for r in alpha_eval.exclusion_reasons)
+
+    # Issue #502 revalidada via check_publication_status passou para CLOSED
+    opp_502 = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "gh-backend-br-502")
+    ).scalar_one()
+    assert opp_502.source_status == ExternalSourceStatus.CLOSED.value
+
+    # DualStackBR (#501 aberta + #801 fechada) permanece ACTIVE na oportunidade consolidada
+    dual_refreshed = db_session.get(Opportunity, dual_opp.id)
+    assert dual_refreshed.source_status == ExternalSourceStatus.ACTIVE.value
+    dual_links_refreshed = {
+        l.external_id: l.source_status for l in dual_refreshed.source_links
+    }
+    assert dual_links_refreshed["gh-backend-br-501"] == ExternalSourceStatus.ACTIVE.value
+    assert dual_links_refreshed["gh-frontend-br-801"] == ExternalSourceStatus.CLOSED.value
+
+    # Validação via API HTTP: source_links, filtro por fonte secundária e observabilidade
+    client = make_client(("10.10.0.88", 50000))
+    login_and_get_csrf(client, "phase025.user@example.com", "StrongPassword123!")
+
+    fe_filtered = client.get("/api/v1/opportunities?type=junior&source=github_frontend_br").json()
+    assert fe_filtered["total"] == 1
+    fe_item = fe_filtered["items"][0]
+    assert fe_item["external_id"] == "gh-backend-br-501"
+    assert len(fe_item["source_links"]) == 2
+    assert fe_item["last_status_check_at"] is not None
+
+    sources_resp = {
+        s["slug"]: s for s in client.get("/api/v1/opportunities/sources").json()
+    }
+    assert sources_resp["github_backend_br"]["unique_opportunities_count"] == 4
+    assert sources_resp["github_backend_br"]["open_opportunities_count"] == 3
+    assert sources_resp["github_backend_br"]["closed_or_expired_count"] == 1
+
 
 

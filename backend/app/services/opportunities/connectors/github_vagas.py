@@ -1,5 +1,8 @@
 import re
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from app.models.opportunity import (
     EmploymentType,
@@ -12,9 +15,12 @@ from app.models.opportunity import (
 from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
+    CollectionBatch,
+    ConnectorError,
     ConnectorPayloadError,
     NormalizedOpportunityDraft,
     SourceDefinition,
+    SourceLifecycleSignal,
     parse_iso_datetime,
 )
 from app.services.opportunities.sanitization import (
@@ -102,7 +108,12 @@ def _extract_work_mode_and_location(
     location_text = bracket_text or ("Remoto - Brasil" if work_mode == WorkMode.REMOTE.value else "Brasil")
     city: str | None = None
     if work_mode in {WorkMode.HYBRID.value, WorkMode.ONSITE.value}:
-        cleaned_city = re.sub(r"(?i)\b(?:híbrido|hibrido|presencial|brasil)\b|[/-]", " ", bracket_text).strip()
+        cleaned_city = re.sub(
+            r"(?i)\b(?:híbrido|hibrido|presencial|brasil|remoto|remote)\b|(?:[/,-]\s*[A-Za-z]{2}\b)|[,/-]",
+            " ",
+            bracket_text,
+        )
+        cleaned_city = re.sub(r"\s+", " ", cleaned_city).strip()
         city = cleaned_city[:120] if cleaned_city else "Outra localidade"
     return (work_mode, location_text[:255], city, country, eligible_countries, False)
 
@@ -136,23 +147,45 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
             )
 
         drafts: list[NormalizedOpportunityDraft] = []
+        rejected_count = 0
+        rejection_breakdown: dict[str, int] = {}
+        lifecycle_signals: list[SourceLifecycleSignal] = []
+
         for item in payload:
             if not isinstance(item, dict):
+                rejected_count += 1
+                rejection_breakdown["invalid_item"] = (
+                    rejection_breakdown.get("invalid_item", 0) + 1
+                )
                 continue
             # Ignora Pull Requests retornados no endpoint de issues
             if "pull_request" in item:
-                continue
-            if str(item.get("state", "")).lower() != "open":
+                rejected_count += 1
+                rejection_breakdown["pull_request"] = (
+                    rejection_breakdown.get("pull_request", 0) + 1
+                )
                 continue
 
             raw_number = item.get("number") or item.get("id")
             raw_title = sanitize_plain_text(item.get("title"))
             raw_url = item.get("html_url")
             if raw_number is None or not raw_title or not isinstance(raw_url, str):
-                continue
-            if _META_ISSUE_TITLE_RE.search(raw_title):
+                rejected_count += 1
+                rejection_breakdown["missing_required_fields"] = (
+                    rejection_breakdown.get("missing_required_fields", 0) + 1
+                )
                 continue
 
+            try:
+                source_url = normalize_canonical_url(raw_url)
+            except ValueError:
+                rejected_count += 1
+                rejection_breakdown["invalid_url"] = (
+                    rejection_breakdown.get("invalid_url", 0) + 1
+                )
+                continue
+
+            ext_id = f"{self.id_prefix}-{raw_number}"
             raw_labels = item.get("labels") if isinstance(item.get("labels"), list) else []
             label_names = normalize_string_list(
                 [
@@ -163,12 +196,39 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                 ]
             )
             labels_lower = {lb.lower() for lb in label_names}
-            if "stale" in labels_lower:
+
+            state_lower = str(item.get("state", "")).lower()
+            if state_lower != "open" or bool(labels_lower & {"fechada", "encerrada", "closed"}):
+                lifecycle_signals.append(
+                    SourceLifecycleSignal(
+                        external_id=ext_id,
+                        source_url=source_url,
+                        status=ExternalSourceStatus.CLOSED.value,
+                        reason="Issue encerrada no GitHub",
+                    )
+                )
+                rejected_count += 1
+                rejection_breakdown["closed"] = rejection_breakdown.get("closed", 0) + 1
                 continue
 
-            try:
-                source_url = normalize_canonical_url(raw_url)
-            except ValueError:
+            if _META_ISSUE_TITLE_RE.search(raw_title):
+                rejected_count += 1
+                rejection_breakdown["meta_issue"] = (
+                    rejection_breakdown.get("meta_issue", 0) + 1
+                )
+                continue
+
+            if "stale" in labels_lower:
+                lifecycle_signals.append(
+                    SourceLifecycleSignal(
+                        external_id=ext_id,
+                        source_url=source_url,
+                        status=ExternalSourceStatus.EXPIRED.value,
+                        reason="Issue marcada como Stale por inatividade no GitHub",
+                    )
+                )
+                rejected_count += 1
+                rejection_breakdown["stale"] = rejection_breakdown.get("stale", 0) + 1
                 continue
 
             redacted_body = redact_contact_pii(
@@ -264,7 +324,82 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                 )
             )
 
+        self.last_batch = CollectionBatch(
+            received_count=len(payload),
+            valid_drafts=list(drafts),
+            rejected_count=rejected_count,
+            rejection_breakdown=rejection_breakdown,
+            lifecycle_signals=lifecycle_signals,
+        )
         return drafts
+
+    def check_publication_status(
+        self,
+        external_id: str,
+        source_url: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SourceLifecycleSignal | None:
+        issue_number = (metadata or {}).get("issue_number")
+        if issue_number is None and "-" in external_id:
+            tail = external_id.rsplit("-", 1)[-1]
+            if tail.isdigit():
+                issue_number = int(tail)
+        if issue_number is None:
+            path_parts = [p for p in urlparse(source_url).path.split("/") if p]
+            if len(path_parts) >= 4 and path_parts[-2] == "issues" and path_parts[-1].isdigit():
+                issue_number = int(path_parts[-1])
+        if issue_number is None:
+            return None
+
+        base_issues_url = self.definition.base_url.split("?", 1)[0].rstrip("/")
+        detail_url = f"{base_issues_url}/{issue_number}"
+
+        try:
+            data = self.fetch_json(detail_url)
+        except ConnectorError as exc:
+            msg = str(exc)
+            if "HTTP 404" in msg or "HTTP 410" in msg:
+                return SourceLifecycleSignal(
+                    external_id=external_id,
+                    source_url=source_url,
+                    status=ExternalSourceStatus.REMOVED.value,
+                    reason="Issue removida ou inacessível (HTTP 404/410) no GitHub",
+                )
+            return None
+        except Exception:
+            return None
+
+        if not isinstance(data, dict) or "state" not in data:
+            return None
+
+        raw_labels = data.get("labels") if isinstance(data.get("labels"), list) else []
+        labels_lower = {
+            (lb.get("name", "") if isinstance(lb, dict) else str(lb)).strip().lower()
+            for lb in raw_labels
+        }
+        state_lower = str(data.get("state", "")).lower()
+        if state_lower == "closed" or bool(labels_lower & {"fechada", "encerrada", "closed"}):
+            return SourceLifecycleSignal(
+                external_id=external_id,
+                source_url=source_url,
+                status=ExternalSourceStatus.CLOSED.value,
+                reason="Issue fechada confirmada via GitHub API",
+            )
+        if "stale" in labels_lower:
+            return SourceLifecycleSignal(
+                external_id=external_id,
+                source_url=source_url,
+                status=ExternalSourceStatus.EXPIRED.value,
+                reason="Issue marcada como Stale no GitHub",
+            )
+        if state_lower == "open":
+            return SourceLifecycleSignal(
+                external_id=external_id,
+                source_url=source_url,
+                status=ExternalSourceStatus.ACTIVE.value,
+                reason="Issue confirmada aberta via GitHub API",
+            )
+        return None
 
 
 class GitHubBackendBRConnector(BaseGitHubIssuesVagasConnector):
@@ -278,7 +413,8 @@ class GitHubBackendBRConnector(BaseGitHubIssuesVagasConnector):
         base_url="https://api.github.com/repos/backend-br/vagas/issues?state=open&per_page=30",
         terms_url="https://github.com/backend-br/vagas/blob/master/LICENSE",
         attribution_text=(
-            "Fonte: Comunidade Backend Brasil (GitHub MIT) — link direto para a issue original."
+            "Fonte: Comunidade Backend Brasil (repositório sob licença MIT; "
+            "conteúdo de terceiros com link direto para a issue original e PII higienizada)."
         ),
         refresh_interval_seconds=3600,
         enabled_by_default=True,
@@ -296,7 +432,8 @@ class GitHubFrontendBRConnector(BaseGitHubIssuesVagasConnector):
         base_url="https://api.github.com/repos/frontendbr/vagas/issues?state=open&per_page=30",
         terms_url="https://github.com/frontendbr/vagas/blob/master/LICENSE",
         attribution_text=(
-            "Fonte: Comunidade Frontend Brasil (GitHub MIT) — link direto para a issue original."
+            "Fonte: Comunidade Frontend Brasil (repositório sob licença MIT; "
+            "conteúdo de terceiros com link direto para a issue original e PII higienizada)."
         ),
         refresh_interval_seconds=3600,
         enabled_by_default=True,

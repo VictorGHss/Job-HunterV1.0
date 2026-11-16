@@ -58,19 +58,24 @@ docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
 docker compose --env-file .env -f infra/compose.yaml down
 ```
 
-### Sincronização controlada de oportunidades (Fases 02 a 02.4)
+### Sincronização controlada de oportunidades (Fases 02 a 02.5)
 A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores e o estado de conformidade de cada fonte (`remote_ok`, `jobicy`, `himalayas`, `github_backend_br` e `github_frontend_br`: ativas com intervalo `>= 3600s`; `remotive`: temporariamente desabilitada com `enabled=false` aguardando autorização escrita):
 
 ```powershell
-# Teste de conectividade e parsing sem persistir no banco (apenas fontes habilitadas)
+# Teste de conectividade, validação e métricas sem persistir no banco (apenas fontes habilitadas)
 docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --dry-run
 
-# Sincronização normal de todas as fontes habilitadas
+# Sincronização normal de todas as fontes habilitadas (exibe métricas por fonte e consolidado)
 docker exec job-hunter-backend python -m app.cli sync-opportunities
 
 # Sincronização pontual ignorando apenas o intervalo mínimo (--force nunca ativa fonte desabilitada)
 docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --force
 ```
+
+Na **Fase 02.5**, cada execução registra e exibe separadamente:
+- `recebidas` (`received_count`), `validas` (`valid_count`) e `rejeitadas` (`rejected_count`), garantindo `received_count == valid_count + rejected_count`;
+- `criadas` (`inserted_count`), `atualizadas` (`updated_count`), `dup_interna` (`intra_source_duplicate_count`) e `dup_entre_fontes` (`cross_source_duplicate_count`), garantindo que nenhum registro válido seja contabilizado em categorias incompatíveis;
+- `unicas` (`unique_opportunities_count`), `abertas` (`open_opportunities_count`), `encerradas` (`closed_or_expired_count`) e `nao_confirmadas` (`unconfirmed_count`) por fonte e no total consolidado.
 
 Regras operacionais de habilitação:
 - `--force` ignora **somente** o intervalo mínimo entre execuções; nunca executa coleta de uma fonte com `enabled=false` ou `enabled_by_default=False`.

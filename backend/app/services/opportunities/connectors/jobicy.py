@@ -11,6 +11,7 @@ from app.models.opportunity import (
 from app.services.opportunities.classification import classify_opportunity, normalize_classification_text
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
+    CollectionBatch,
     ConnectorPayloadError,
     NormalizedOpportunityDraft,
     SourceDefinition,
@@ -26,9 +27,18 @@ from app.services.opportunities.sanitization import (
 )
 
 _TRAILING_GEO_SUFFIX_RE = re.compile(
-    r"\s*\|\s*(?:uk|united kingdom|germany|spain|sweden|ireland|france|netherlands|poland|italy|usa|us|canada|emea|apac|latam)\s*(?:\|\s*remote)?\s*$",
+    r"\s*\|\s*(?P<geo>uk|united kingdom|germany|spain|sweden|ireland|france|netherlands|poland|italy|usa|us|canada|brazil|brasil|mexico|argentina|colombia|chile|portugal|australia|india|emea|apac|latam|europe|worldwide)\s*(?:\|\s*remote)?\s*$",
     re.I,
 )
+
+
+def extract_base_title_and_geo_suffix(raw_title: str) -> tuple[str, str | None]:
+    match = _TRAILING_GEO_SUFFIX_RE.search(raw_title)
+    if not match:
+        return (raw_title.strip(), None)
+    geo_suffix = match.group("geo").strip()
+    base_title = raw_title[: match.start()].strip()
+    return (base_title or raw_title.strip(), geo_suffix)
 
 
 def _parse_optional_float(value: Any) -> float | None:
@@ -83,39 +93,42 @@ class JobicyConnector(BaseOpportunityConnector):
             )
 
         drafts: list[NormalizedOpportunityDraft] = []
-        seen_clone_signatures: set[tuple[str, str, str]] = set()
+        raw_jobs = payload["jobs"]
+        rejected_count = 0
+        rejection_breakdown: dict[str, int] = {}
 
-        for item in payload["jobs"]:
+        for item in raw_jobs:
             if not isinstance(item, dict):
+                rejected_count += 1
+                rejection_breakdown["invalid_item"] = (
+                    rejection_breakdown.get("invalid_item", 0) + 1
+                )
                 continue
 
             raw_id = item.get("id")
             raw_title = sanitize_plain_text(item.get("jobTitle"))
             raw_url = item.get("url")
             if raw_id is None or not raw_title or not isinstance(raw_url, str):
+                rejected_count += 1
+                rejection_breakdown["missing_required_fields"] = (
+                    rejection_breakdown.get("missing_required_fields", 0) + 1
+                )
                 continue
 
             try:
                 source_url = normalize_canonical_url(raw_url)
                 application_url = validate_safe_external_url(raw_url)
             except ValueError:
+                rejected_count += 1
+                rejection_breakdown["invalid_url"] = (
+                    rejection_breakdown.get("invalid_url", 0) + 1
+                )
                 continue
 
             company_name = sanitize_plain_text(item.get("companyName"), max_length=200)
             raw_geo = sanitize_plain_text(item.get("jobGeo"))
-
-            # Deduplica clones multi-país idênticos emitidos pela Jobicy no mesmo lote
-            base_title_norm = normalize_classification_text(
-                _TRAILING_GEO_SUFFIX_RE.sub("", raw_title)
-            )
-            clone_sig = (
-                normalize_classification_text(company_name),
-                base_title_norm,
-                normalize_classification_text(raw_geo),
-            )
-            if clone_sig[0] and clone_sig in seen_clone_signatures:
-                continue
-            seen_clone_signatures.add(clone_sig)
+            base_title, geo_suffix = extract_base_title_and_geo_suffix(raw_title)
+            base_title_norm = normalize_classification_text(base_title)
 
             raw_industry = item.get("jobIndustry")
             industries = (
@@ -165,6 +178,15 @@ class JobicyConnector(BaseOpportunityConnector):
                     emp_type = EmploymentType.TEMPORARY.value
 
             eligible_countries, country, eligibility_unknown = parse_geo_eligibility(raw_geo)
+            if (
+                geo_suffix
+                and "Worldwide" not in eligible_countries
+                and not any(c.lower() == geo_suffix.lower() for c in eligible_countries)
+            ):
+                eligible_countries.append(geo_suffix)
+                eligibility_unknown = False
+                if country is None and len(eligible_countries) == 1:
+                    country = geo_suffix
 
             salary_min = _parse_optional_float(item.get("salaryMin"))
             salary_max = _parse_optional_float(item.get("salaryMax"))
@@ -211,9 +233,17 @@ class JobicyConnector(BaseOpportunityConnector):
                         "job_slug": sanitize_plain_text(item.get("jobSlug")),
                         "job_level": job_level,
                         "job_type": job_types,
+                        "base_title_norm": base_title_norm,
+                        "geo_suffix": geo_suffix,
                         "source": "jobicy",
                     },
                 )
             )
 
+        self.last_batch = CollectionBatch(
+            received_count=len(raw_jobs),
+            valid_drafts=list(drafts),
+            rejected_count=rejected_count,
+            rejection_breakdown=rejection_breakdown,
+        )
         return drafts

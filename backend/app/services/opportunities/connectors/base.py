@@ -54,6 +54,24 @@ class NormalizedOpportunityDraft:
     raw_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class SourceLifecycleSignal:
+    external_id: str
+    source_url: str
+    status: str
+    deadline_at: datetime | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True)
+class CollectionBatch:
+    received_count: int = 0
+    valid_drafts: list[NormalizedOpportunityDraft] = field(default_factory=list)
+    rejected_count: int = 0
+    rejection_breakdown: dict[str, int] = field(default_factory=dict)
+    lifecycle_signals: list[SourceLifecycleSignal] = field(default_factory=list)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceDefinition:
     slug: str
@@ -130,6 +148,7 @@ class BaseOpportunityConnector(ABC):
         self.max_response_bytes = max_response_bytes or settings.sync_max_response_bytes
         self.max_retries = settings.sync_max_retries if max_retries is None else max_retries
         self.user_agent = user_agent or settings.sync_user_agent
+        self.last_batch: CollectionBatch = CollectionBatch()
 
     def fetch_json(self, url: str) -> Any:
         timeout = httpx.Timeout(
@@ -215,7 +234,27 @@ class BaseOpportunityConnector(ABC):
 
     def collect(self) -> list[NormalizedOpportunityDraft]:
         payload = self.fetch_json(self.definition.base_url)
-        return self.parse_payload(payload)
+        self.last_batch = CollectionBatch()
+        drafts = self.parse_payload(payload)
+        if not self.last_batch.valid_drafts and drafts:
+            self.last_batch.valid_drafts = list(drafts)
+        if self.last_batch.received_count == 0:
+            self.last_batch.received_count = len(drafts) + self.last_batch.rejected_count
+        return drafts
+
+    def collect_batch(self) -> CollectionBatch:
+        drafts = self.collect()
+        self.last_batch.valid_drafts = list(drafts)
+        return self.last_batch
+
+    def check_publication_status(
+        self,
+        external_id: str,
+        source_url: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SourceLifecycleSignal | None:
+        del external_id, source_url, metadata
+        return None
 
 
 def parse_iso_datetime(value: Any) -> datetime | None:
