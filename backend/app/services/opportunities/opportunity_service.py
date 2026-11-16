@@ -6,10 +6,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.opportunity import (
+    EmploymentType,
     ExternalSourceStatus,
     Opportunity,
     OpportunitySource,
     OpportunitySourceLink,
+    OpportunityType,
     OpportunityUserState,
     SeniorityLevel,
     WorkMode,
@@ -378,6 +380,22 @@ def list_opportunities(
         )
         .where(_visible_to_user_filter(user.id))
     )
+    if opportunity_type:
+        stmt = stmt.where(Opportunity.opportunity_type == opportunity_type)
+    if work_mode:
+        stmt = stmt.where(Opportunity.work_mode == work_mode)
+    if employment_type:
+        stmt = stmt.where(Opportunity.employment_type == employment_type)
+    if seniority_level:
+        if seniority_level == SeniorityLevel.UNKNOWN.value:
+            stmt = stmt.where(Opportunity.seniority_level == SeniorityLevel.UNKNOWN.value)
+        else:
+            stmt = stmt.where(
+                or_(
+                    Opportunity.seniority_level == seniority_level,
+                    Opportunity.seniority_level == SeniorityLevel.UNKNOWN.value,
+                )
+            )
     opportunities = db.execute(stmt).scalars().all()
 
     states = db.execute(
@@ -385,13 +403,25 @@ def list_opportunities(
     ).scalars().all()
     state_by_opp_id = {st.opportunity_id: st for st in states}
 
+    effective_target_category = opportunity_type
+    if effective_target_category is None:
+        if seniority_level == SeniorityLevel.INTERNSHIP.value:
+            effective_target_category = OpportunityType.INTERNSHIP.value
+        elif seniority_level in {
+            SeniorityLevel.JUNIOR.value,
+            SeniorityLevel.ENTRY_LEVEL.value,
+        }:
+            effective_target_category = OpportunityType.JUNIOR.value
+        elif employment_type == EmploymentType.FREELANCE.value:
+            effective_target_category = OpportunityType.FREELANCE.value
+
     evaluated: list[tuple[Opportunity, OpportunityUserState | None, OpportunityMatchEvaluation]] = []
     for opp in opportunities:
         state = state_by_opp_id.get(opp.id)
         match = evaluate_opportunity_for_user(
             opp,
             profile,
-            target_category=opportunity_type,
+            target_category=effective_target_category,
             skills=skills,
             experiences=experiences,
             educations=educations,
@@ -527,11 +557,14 @@ def create_manual_opportunity(
         primary_area = decision_manual.professional_area
         secondary_areas = list(decision_manual.secondary_areas)
 
-    resolved_seniority = (
-        payload.seniority_level.value
-        if payload.seniority_level is not None
-        else decision_manual.seniority_level
-    )
+    if payload.seniority_level is not None and payload.seniority_level != SeniorityLevel.UNKNOWN:
+        resolved_seniority = payload.seniority_level.value
+    elif decision_manual.seniority_level != SeniorityLevel.UNKNOWN.value:
+        resolved_seniority = decision_manual.seniority_level
+    elif payload.opportunity_type in {OpportunityType.INTERNSHIP, OpportunityType.JUNIOR}:
+        resolved_seniority = payload.opportunity_type.value
+    else:
+        resolved_seniority = SeniorityLevel.UNKNOWN.value
 
     opp = Opportunity(
         source_id=None,

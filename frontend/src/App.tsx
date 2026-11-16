@@ -184,11 +184,20 @@ export function JobHunterApp() {
         onClose={() => setManualModalOpen(false)}
         onCreated={(created) => {
           setDiscoveryRefreshNonce((n) => n + 1);
-          if (created.opportunity_type === "internship") {
+          if (
+            created.seniority_level === "internship" ||
+            created.opportunity_type === "internship"
+          ) {
             setActiveSection("estagios");
-          } else if (created.opportunity_type === "junior") {
+          } else if (
+            created.seniority_level === "junior" ||
+            created.opportunity_type === "junior"
+          ) {
             setActiveSection("junior");
-          } else if (created.opportunity_type === "freelance") {
+          } else if (
+            created.employment_type === "freelance" ||
+            created.opportunity_type === "freelance"
+          ) {
             setActiveSection("freelancers");
           }
         }}

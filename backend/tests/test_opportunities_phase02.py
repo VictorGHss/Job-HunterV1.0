@@ -22,7 +22,15 @@ from app.models.opportunity import (
     SyncRunStatus,
     WorkMode,
 )
-from app.models.profile import Skill, SkillProficiency, WorkExperience, ExperienceType
+from app.models.profile import (
+    Education,
+    EducationStatus,
+    ExperienceType,
+    ProfessionalProject,
+    Skill,
+    SkillProficiency,
+    WorkExperience,
+)
 from app.services.auth_service import create_user_account
 from app.services.opportunities.classification import (
     classify_experience_requirements,
@@ -2271,13 +2279,13 @@ def test_phase026_seniority_experience_technical_matching_and_reclassification(
     exp_rec = WorkExperience(
         user_id=user.id,
         company="Empresa Local",
-        role="Técnico de TI e Desenvolvimento",
+        role="Desenvolvedor Backend Júnior",
         description="Integração de APIs REST com Java e Spring Boot.",
         start_date=date(2025, 1, 1),
         is_current=True,
-        experience_type=ExperienceType.OTHER.value,
+        experience_type=ExperienceType.PJ.value,
         technologies=["Java", "Spring Boot"],
-        eligible_as_target_role=False,
+        eligible_as_target_role=True,
     )
     db_session.add_all([sk_java, sk_spring, sk_python, exp_rec])
     db_session.commit()
@@ -2607,6 +2615,508 @@ def test_phase026_seniority_experience_technical_matching_and_reclassification(
 
     second_rep = reclassify_opportunities(db_session, dry_run=False)
     assert second_rep.updated_count == 0
+
+
+def test_phase0261_regression_matrix_isolation_independence_and_parsing(
+    db_session, make_client
+):
+    from datetime import date
+    import copy
+
+    # 1. Estágio em Desenvolvimento de Software (título literal PT-BR)
+    intern_sw_literal = classify_opportunity(
+        title="Estágio em Desenvolvimento de Software",
+        tags=[],
+        description="Apoio em desenvolvimento de APIs e testes.",
+    )
+    assert intern_sw_literal.seniority_level == SeniorityLevel.INTERNSHIP.value
+    assert intern_sw_literal.employment_type == EmploymentType.INTERNSHIP.value
+    assert intern_sw_literal.professional_area == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+
+    # 2. Extração singular/plural e faixas PT/EN sem inferir senioridade apenas por anos
+    for phrase, expected_min in (
+        ("Requisito: 1 ano de experiência com Python.", 1),
+        ("Experiência mínima de 2 anos com APIs REST.", 2),
+        ("Requisitos: 3 anos de experiência em backend.", 3),
+        ("Necessário 1+ ano de experiência profissional.", 1),
+        ("Obrigatório 2+ anos de experiência em desenvolvimento.", 2),
+        ("Exige-se 3 a 5 anos de experiência em arquitetura.", 3),
+        ("Requisito: 3-5 anos de experiência em sistemas web.", 3),
+        ("Requirements: 5+ years of experience in Go.", 5),
+        ("Requirements: 1 year of experience building APIs.", 1),
+    ):
+        exp_dec = classify_opportunity(title="Software Developer", description=phrase)
+        assert exp_dec.experience_requirement_mode == ExperienceRequirementMode.REQUIRED.value, phrase
+        assert exp_dec.experience_min_years == expected_min, phrase
+        # Não infere senioridade apenas pela quantidade de anos exigida!
+        assert exp_dec.seniority_level == SeniorityLevel.UNKNOWN.value, phrase
+
+    # 3. Experiência desejável NÃO rebaixa senioridade/opportunity_type para other
+    jr_pref_only = classify_opportunity(
+        title="Desenvolvedor Python Júnior",
+        description="Diferencial: 3 anos de experiência com AWS.",
+    )
+    assert jr_pref_only.seniority_level == SeniorityLevel.JUNIOR.value
+    assert jr_pref_only.experience_requirement_mode == ExperienceRequirementMode.PREFERRED.value
+    assert jr_pref_only.experience_preferred_years == 3
+    assert jr_pref_only.experience_min_years is None
+    assert jr_pref_only.opportunity_type == OpportunityType.JUNIOR.value
+
+    # 4. Experiência técnica com Git/Docker sem tempo profissional NÃO gera falso positivo required
+    tech_git_docker = classify_opportunity(
+        title="Desenvolvedor Backend Júnior",
+        description="Requisitos:\nExperiência com Git ou Docker.",
+    )
+    assert tech_git_docker.experience_requirement_mode == ExperienceRequirementMode.NOT_SPECIFIED.value
+    assert tech_git_docker.experience_min_years is None
+    assert tech_git_docker.required_technologies == ()
+
+    tech_docker_pg = classify_opportunity(
+        title="Desenvolvedor Backend Júnior",
+        description="Requisitos obrigatórios:\nExperiência com PostgreSQL e Docker.",
+    )
+    assert tech_docker_pg.experience_requirement_mode == ExperienceRequirementMode.NOT_SPECIFIED.value
+    assert set(tech_docker_pg.required_technologies) == {"PostgreSQL", "Docker"}
+
+    # 5. Java obrigatório vs Java mencionado incidentalmente
+    java_incidental = classify_opportunity(
+        title="Frontend React Developer",
+        tags=["react", "java"],
+        description=(
+            "Requirements:\nExperience with React and TypeScript.\n"
+            "Collaborate with backend engineers maintaining legacy Java services."
+        ),
+    )
+    assert "React" in java_incidental.required_technologies
+    assert "Java" not in java_incidental.required_technologies
+
+    # 6. Cenário real de perfil: suporte de TI CLT/Other com eligible_as_target_role=False + Projetos + Formação
+    user = create_user_account(
+        db_session,
+        email="phase0261.dev@example.com",
+        display_name="Phase 02.6.1 Dev",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    profile = get_or_create_profile(db_session, user)
+    profile.country = "Brasil"
+    profile.city = "Curitiba"
+    profile.state = "PR"
+    profile.professional_title = "Estudante de ADS | Java / Spring Boot / React"
+    prefs = copy.deepcopy(profile.preferences)
+    prefs["internships"]["enabled"] = True
+    prefs["internships"]["priority_areas"] = [
+        "Desenvolvimento Backend",
+        "Engenharia de software",
+    ]
+    prefs["internships"]["excluded_areas"] = ["Suporte técnico", "Help desk"]
+    prefs["junior_developer"]["enabled"] = True
+    prefs["junior_developer"]["block_clt"] = True
+    prefs["junior_developer"]["accepted_contract_types"] = [
+        "Estágio",
+        "PJ",
+        "Contrato Freelance",
+    ]
+    prefs["junior_developer"]["priority_areas"] = [
+        "Desenvolvimento Backend",
+        "Engenharia de software",
+        "Full Stack",
+        "Frontend",
+    ]
+    prefs["junior_developer"]["excluded_areas"] = ["Suporte técnico", "Help desk"]
+    prefs["freelance"]["enabled"] = True
+    prefs["freelance"]["scopes"] = ["Brasil", "Exterior (Internacional)"]
+    prefs["freelance"]["priority_categories"] = ["APIs", "Python", "Desenvolvimento de sistemas"]
+    profile.preferences = prefs
+
+    sk_java = Skill(
+        user_id=user.id,
+        name="Java (17/21)",
+        category="Linguagens",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    sk_spring = Skill(
+        user_id=user.id,
+        name="Spring Boot",
+        category="Frameworks",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    sk_react = Skill(
+        user_id=user.id,
+        name="React",
+        category="Frontend",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    sk_python = Skill(
+        user_id=user.id,
+        name="Python",
+        category="Linguagens",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    # Suporte CLT marcado como NÃO elegível + data incompleta NÃO devem contar anos de dev!
+    exp_support_clt = WorkExperience(
+        user_id=user.id,
+        company="Suporte Empresa",
+        role="Técnico de TI",
+        description="Atendimento de chamados e suporte técnico N1/N2.",
+        start_date=date(2024, 1, 1),
+        is_current=True,
+        experience_type=ExperienceType.CLT.value,
+        eligible_as_target_role=False,
+    )
+    exp_incomplete = WorkExperience(
+        user_id=user.id,
+        company="Empresa Incompleta",
+        role="Desenvolvedor Júnior",
+        start_date=date(2023, 1, 1),
+        end_date=None,
+        is_current=False,
+        experience_type=ExperienceType.PJ.value,
+        eligible_as_target_role=True,
+    )
+    edu_ads = Education(
+        user_id=user.id,
+        institution="Faculdade Tech",
+        course="Análise e Desenvolvimento de Sistemas",
+        field_of_study="Tecnologia da Informação",
+        education_status=EducationStatus.IN_PROGRESS.value,
+        start_date=date(2024, 2, 1),
+    )
+    proj_api = ProfessionalProject(
+        user_id=user.id,
+        name="API Financeira",
+        description="Projeto pessoal com Java e Spring Boot.",
+        technologies=["Java", "Spring Boot"],
+    )
+    db_session.add_all(
+        [sk_java, sk_spring, sk_react, sk_python, exp_support_clt, exp_incomplete, edu_ads, proj_api]
+    )
+    db_session.commit()
+
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    src = {s.slug: s for s in ensure_default_sources(db_session)}["github_backend_br"]
+    now = datetime.now(UTC)
+
+    def _make_opp(
+        ext_id: str,
+        title: str,
+        description: str,
+        *,
+        opp_type: str | None = None,
+        emp_type: str | None = None,
+        sen_level: str | None = None,
+        eligible_countries: list[str] | None = None,
+        technologies: list[str] | None = None,
+    ) -> Opportunity:
+        dec = classify_opportunity(title=title, tags=technologies or [], description=description)
+        return Opportunity(
+            source_id=src.id,
+            external_id=ext_id,
+            title=title,
+            description=description,
+            opportunity_type=opp_type or dec.opportunity_type,
+            seniority_level=sen_level or dec.seniority_level,
+            experience_requirement_mode=dec.experience_requirement_mode,
+            experience_min_years=dec.experience_min_years,
+            experience_preferred_years=dec.experience_preferred_years,
+            experience_summary=dec.experience_summary,
+            employment_type=emp_type or dec.employment_type,
+            work_mode=WorkMode.REMOTE.value,
+            professional_area=dec.professional_area,
+            secondary_areas=list(dec.secondary_areas),
+            eligible_countries=eligible_countries or ["Brasil"],
+            technologies=technologies or [],
+            source_url=f"https://example.com/{ext_id}",
+            first_seen_at=now,
+            last_seen_at=now,
+            content_hash=f"h-{ext_id}",
+        )
+
+    opps_matrix = [
+        # 1. Estágio em Desenvolvimento de Software
+        _make_opp(
+            "m-01-intern-sw",
+            "Estágio em Desenvolvimento de Software",
+            "Vaga de estágio sem experiência prévia. Aprender APIs REST com Java.",
+            technologies=["Java"],
+        ),
+        # 2. Desenvolvedor Júnior sem experiência
+        _make_opp(
+            "m-02-jr-noexp",
+            "Desenvolvedor Backend Júnior PJ",
+            "Experiência profissional anterior não é obrigatória. Stack: Python.",
+            technologies=["Python"],
+        ),
+        # 3. Desenvolvedor Júnior com 1 ano obrigatório (mesmo com Java no perfil -> requer tempo na área-alvo!)
+        _make_opp(
+            "m-03-jr-1y",
+            "Desenvolvedor Java Júnior PJ",
+            "Requisitos obrigatórios: 1 ano de experiência com Java e Spring Boot.",
+            technologies=["Java", "Spring Boot"],
+        ),
+        # 4. Júnior com 3 anos desejáveis (não rebaixado)
+        _make_opp(
+            "m-04-jr-pref3y",
+            "Desenvolvedor Python Júnior",
+            "Contratação PJ. Diferencial: 3 anos de experiência com AWS.",
+            emp_type=EmploymentType.PJ.value,
+            technologies=["Python"],
+        ),
+        # 5. Pleno Mimix AI com 3 anos obrigatórios / nível Pleno (suporte TI NÃO conta!)
+        _make_opp(
+            "m-05-mimix-pleno",
+            "[Remoto] Desenvolvedor(a) Backend Pleno - White Label e Plataforma - Mimix AI",
+            "Contratação PJ. **Obrigatórios:** 3 anos de experiência em desenvolvimento backend.",
+            emp_type=EmploymentType.PJ.value,
+            technologies=["Python"],
+        ),
+        # 6. Sênior 5 anos
+        _make_opp(
+            "m-06-senior-5y",
+            "Desenvolvedor Backend Sênior",
+            "Contratação PJ. Requirements: 5+ years of experience with Python.",
+            emp_type=EmploymentType.PJ.value,
+            technologies=["Python"],
+        ),
+        # 7. Staff Engineer
+        _make_opp(
+            "m-07-staff",
+            "Staff Software Engineer",
+            "Contratação PJ.",
+            emp_type=EmploymentType.PJ.value,
+        ),
+        # 8. Principal Engineer
+        _make_opp(
+            "m-08-principal",
+            "Principal Engineer",
+            "Contratação PJ.",
+            emp_type=EmploymentType.PJ.value,
+        ),
+        # 9. Freelance Júnior (deve aparecer TANTO em seniority=junior QUANTO em employment_type=freelance!)
+        _make_opp(
+            "m-09-freela-jr",
+            "Freelance Junior Python Developer",
+            "Projeto freelance remoto sem experiência prévia exigida.",
+            opp_type=OpportunityType.FREELANCE.value,
+            sen_level=SeniorityLevel.JUNIOR.value,
+            emp_type=EmploymentType.FREELANCE.value,
+            eligible_countries=["Worldwide"],
+            technologies=["Python"],
+        ),
+        # 10. Freelance Sênior (incompatível para perfil júnior!)
+        _make_opp(
+            "m-10-freela-sr",
+            "Desenvolvedor Sênior Freelance Python",
+            "Projeto freelance sênior.",
+            opp_type=OpportunityType.FREELANCE.value,
+            sen_level=SeniorityLevel.SENIOR.value,
+            emp_type=EmploymentType.FREELANCE.value,
+            eligible_countries=["Worldwide"],
+            technologies=["Python"],
+        ),
+        # 11. Senioridade desconhecida
+        _make_opp(
+            "m-11-unknown-sen",
+            "Software Engineer",
+            "Remoto Worldwide. Build web apps.",
+            eligible_countries=["Worldwide"],
+            technologies=["Python"],
+        ),
+        # 15. Java mencionado incidentalmente
+        _make_opp(
+            "m-15-java-incidental",
+            "Frontend React Developer Junior",
+            "Contratação PJ. Requirements:\nExperience with React.\nCollaborate closely with backend teams maintaining legacy Java microservices.",
+            emp_type=EmploymentType.PJ.value,
+            technologies=["React", "Java"],
+        ),
+        # 16. Git ou Docker sem exigir tempo profissional
+        _make_opp(
+            "m-16-git-docker",
+            "Desenvolvedor Backend Júnior PJ",
+            "Contratação PJ. Requisitos:\nExperiência com Git ou Docker.",
+            emp_type=EmploymentType.PJ.value,
+            technologies=["Git", "Docker"],
+        ),
+    ]
+    db_session.add_all(opps_matrix)
+    db_session.commit()
+
+    client = make_client(("10.10.0.100", 50000))
+    login_and_get_csrf(client, "phase0261.dev@example.com", "StrongPassword123!")
+
+    # Aba Estágios (governada por seniority=internship)
+    intern_res = client.get("/api/v1/opportunities?seniority=internship&page_size=50").json()
+    intern_map = {item["external_id"]: item for item in intern_res["items"]}
+    assert "m-01-intern-sw" in intern_map
+    assert intern_map["m-01-intern-sw"]["professional_area"] == "software_development"
+    assert intern_map["m-01-intern-sw"]["employment_type"] == "internship"
+    assert intern_map["m-01-intern-sw"]["match"]["overall_compatibility"] == "compatible"
+
+    # Aba Desenvolvedor Júnior (seniority=junior):
+    # - inclui m-02-jr-noexp, m-04-jr-pref3y (desejável 3 anos não rebaixa!), m-09-freela-jr, m-15-java-incidental, m-16-git-docker
+    # - NÃO inclui m-03-jr-1y (1 ano obrigatório > 0 dev years mesmo com skill Java!) nem m-10-freela-sr
+    jr_res = client.get("/api/v1/opportunities?seniority=junior&page_size=50").json()
+    jr_map = {item["external_id"]: item for item in jr_res["items"]}
+    for expected_jr in ("m-02-jr-noexp", "m-04-jr-pref3y", "m-09-freela-jr", "m-15-java-incidental", "m-16-git-docker"):
+        assert expected_jr in jr_map, expected_jr
+    assert "m-03-jr-1y" not in jr_map
+    assert "m-10-freela-sr" not in jr_map
+    assert jr_map["m-04-jr-pref3y"]["experience_requirement_mode"] == "preferred"
+    assert jr_map["m-04-jr-pref3y"]["experience_preferred_years"] == 3
+    assert jr_map["m-04-jr-pref3y"]["match"]["overall_compatibility"] == "compatible"
+    assert jr_map["m-16-git-docker"]["experience_requirement_mode"] == "not_specified"
+    assert jr_map["m-16-git-docker"]["match"]["experience_compatibility"] == "compatible"
+    assert jr_map["m-16-git-docker"]["match"]["overall_compatibility"] == "potential"
+
+    # Aba Freelancers (employment_type=freelance):
+    # - inclui m-09-freela-jr (visível NAS DUAS buscas!)
+    # - exclui m-10-freela-sr por padrão, mas exibe em compatibility=incompatible!
+    freela_res = client.get("/api/v1/opportunities?employment_type=freelance&page_size=50").json()
+    freela_ids = {item["external_id"] for item in freela_res["items"]}
+    assert "m-09-freela-jr" in freela_ids
+    assert "m-10-freela-sr" not in freela_ids
+
+    freela_incompat = client.get(
+        "/api/v1/opportunities?employment_type=freelance&compatibility=incompatible&page_size=50"
+    ).json()
+    assert "m-10-freela-sr" in {i["external_id"] for i in freela_incompat["items"]}
+
+    # Combinação independente seniority=junior + employment_type=freelance + paginação exata
+    combo_res = client.get(
+        "/api/v1/opportunities?seniority=junior&employment_type=freelance&page=1&page_size=1"
+    ).json()
+    assert combo_res["total"] == 1
+    assert combo_res["total_pages"] == 1
+    assert combo_res["items"][0]["external_id"] == "m-09-freela-jr"
+
+    # Verifica paginação em página 2 para seniority=junior
+    page1 = client.get("/api/v1/opportunities?seniority=junior&page=1&page_size=2").json()
+    page2 = client.get("/api/v1/opportunities?seniority=junior&page=2&page_size=2").json()
+    assert page1["total"] == 5
+    assert page1["total_pages"] == 3
+    assert len(page1["items"]) == 2
+    assert len(page2["items"]) == 2
+    assert {i["external_id"] for i in page1["items"]}.isdisjoint(
+        {i["external_id"] for i in page2["items"]}
+    )
+
+    # Suporte CLT com eligible_as_target_role=False NÃO promove Mimix AI (Pleno) nem m-03-jr-1y!
+    incompat_res = client.get("/api/v1/opportunities?compatibility=incompatible&page_size=50").json()
+    incompat_map = {item["external_id"]: item for item in incompat_res["items"]}
+    for must_incompat in ("m-03-jr-1y", "m-05-mimix-pleno", "m-06-senior-5y", "m-07-staff", "m-08-principal", "m-10-freela-sr"):
+        assert must_incompat in incompat_map, must_incompat
+    assert incompat_map["m-05-mimix-pleno"]["match"]["seniority_compatibility"] == "incompatible"
+    assert incompat_map["m-03-jr-1y"]["match"]["experience_compatibility"] == "incompatible"
+    assert incompat_map["m-03-jr-1y"]["match"]["technical_compatibility"] == "compatible"
+
+    # Senioridade desconhecida permanece potential (sem transformar ausência em incompatível)
+    pot_res = client.get("/api/v1/opportunities?compatibility=potential&page_size=50").json()
+    assert "m-11-unknown-sen" in {i["external_id"] for i in pot_res["items"]}
+
+    # Cenário 13: Experiências sobrepostas NÃO somam meses duplicados
+    # [2024-01-01..2024-07-01] (6m) + [2024-04-01..2024-10-01] (6m) -> união = 9m (~0.75 ano, < 1 ano!)
+    exp_overlap_1 = WorkExperience(
+        user_id=user.id,
+        company="Startup A",
+        role="Desenvolvedor Júnior",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 7, 1),
+        is_current=False,
+        experience_type=ExperienceType.PJ.value,
+        eligible_as_target_role=True,
+    )
+    exp_overlap_2 = WorkExperience(
+        user_id=user.id,
+        company="Startup B",
+        role="Desenvolvedor Júnior",
+        start_date=date(2024, 4, 1),
+        end_date=date(2024, 10, 1),
+        is_current=False,
+        experience_type=ExperienceType.FREELANCE.value,
+        eligible_as_target_role=True,
+    )
+    db_session.add_all([exp_overlap_1, exp_overlap_2])
+    db_session.commit()
+
+    overlap_pot = client.get("/api/v1/opportunities?seniority=junior&compatibility=potential&page_size=50").json()
+    overlap_pot_ids = {i["external_id"] for i in overlap_pot["items"]}
+    # Com ~0.75 ano real (e não 1.0 ano duplicado!), m-03-jr-1y (1 ano obrigatório) é potential e NÃO compatible!
+    assert "m-03-jr-1y" in overlap_pot_ids
+    overlap_compat = client.get("/api/v1/opportunities?seniority=junior&compatibility=compatible&page_size=50").json()
+    assert "m-03-jr-1y" not in {i["external_id"] for i in overlap_compat["items"]}
+
+    # Quando atinge >= 1.0 ano na área-alvo, m-03-jr-1y passa a compatible!
+    exp_extra = WorkExperience(
+        user_id=user.id,
+        company="Startup C",
+        role="Desenvolvedor Java Júnior",
+        start_date=date(2024, 10, 1),
+        end_date=date(2025, 3, 1),
+        is_current=False,
+        experience_type=ExperienceType.PJ.value,
+        eligible_as_target_role=True,
+    )
+    db_session.add(exp_extra)
+    db_session.commit()
+
+    after_1y_compat = client.get("/api/v1/opportunities?seniority=junior&compatibility=compatible&page_size=50").json()
+    assert "m-03-jr-1y" in {i["external_id"] for i in after_1y_compat["items"]}
+
+    # Cenário 14 & 15 (segundo candidato SEM Java):
+    # - falha technical_compatibility em m-03-jr-1y (Java obrigatório ausente)
+    # - passa em m-15-java-incidental (React obrigatório presente; Java era apenas incidental)
+    user_no_java = create_user_account(
+        db_session,
+        email="phase0261.reactonly@example.com",
+        display_name="Phase 02.6.1 React Only",
+        password="StrongPassword123!",
+        is_admin=False,
+    )
+    profile_no_java = get_or_create_profile(db_session, user_no_java)
+    profile_no_java.country = "Brasil"
+    prefs_nj = copy.deepcopy(profile_no_java.preferences)
+    prefs_nj["junior_developer"]["enabled"] = True
+    prefs_nj["junior_developer"]["block_clt"] = True
+    prefs_nj["junior_developer"]["accepted_contract_types"] = ["PJ", "Estágio", "Contrato Freelance"]
+    prefs_nj["junior_developer"]["priority_areas"] = ["Frontend", "Backend", "Full Stack"]
+    profile_no_java.preferences = prefs_nj
+    sk_react_only = Skill(
+        user_id=user_no_java.id,
+        name="React",
+        category="Frontend",
+        proficiency_level=SkillProficiency.INTERMEDIATE.value,
+    )
+    exp_react_2y = WorkExperience(
+        user_id=user_no_java.id,
+        company="React Studio",
+        role="Desenvolvedor Frontend Júnior",
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 6, 1),
+        is_current=False,
+        experience_type=ExperienceType.PJ.value,
+        eligible_as_target_role=True,
+    )
+    db_session.add_all([sk_react_only, exp_react_2y])
+    db_session.commit()
+
+    client_nj = make_client(("10.10.0.101", 50000))
+    login_and_get_csrf(client_nj, "phase0261.reactonly@example.com", "StrongPassword123!")
+
+    nj_compat_ids = {
+        i["external_id"]
+        for i in client_nj.get("/api/v1/opportunities?seniority=junior&compatibility=compatible&page_size=50").json()["items"]
+    }
+    assert "m-15-java-incidental" in nj_compat_ids
+    assert "m-03-jr-1y" not in nj_compat_ids
+
+    nj_incompat = {
+        i["external_id"]: i
+        for i in client_nj.get("/api/v1/opportunities?seniority=junior&compatibility=incompatible&page_size=50").json()["items"]
+    }
+    assert nj_incompat["m-03-jr-1y"]["match"]["technical_compatibility"] == "incompatible"
+    assert "Java" in nj_incompat["m-03-jr-1y"]["match"]["missing_required_technologies"]
 
 
 

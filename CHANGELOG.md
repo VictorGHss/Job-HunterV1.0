@@ -6,6 +6,21 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.2.6.1] - 2026-11-16 — Fase 02.6.1: Correções de Senioridade, Experiência e Independência Dimensional
+
+### Corrigido
+- **Isolamento da Experiência Profissional (`matching.py`):**
+  - Prevalência absoluta de `eligible_as_target_role=False` sobre `experience_type`, exclusão estrita de experiências em suporte técnico/Help Desk e tipo `academic` no cálculo de anos relevantes para o cargo-alvo (`confirmed_target_years`), mesclagem de intervalos de datas sobrepostos sem duplicação de meses, tratamento conservador de datas incompletas (`end_date=None` e `is_current=False`) e separação entre experiência relevante na área-alvo, tempo total de trabalho e evidência prática complementar de projetos (`ProfessionalProject`) e formação (`Education`).
+- **Independência Dimensional entre Senioridade e Regime (`opportunity_service.py`, `OpportunityDiscoveryPage.tsx`, `App.tsx`):**
+  - As abas **Estágios** (`?seniority=internship`), **Desenvolvedor Júnior** (`?seniority=junior`) e **Freelancers** (`?employment_type=freelance`) passaram a utilizar os campos estruturados independentes em vez do campo legado `type`, permitindo que oportunidades com `seniority_level=junior` e `employment_type=freelance` apareçam em ambas as frentes enquanto vagas freelance sênior permanecem excluídas da recomendação para perfil júnior.
+- **Classificador e Extrator de Experiência (`classification.py`):**
+  - Reconhecimento explícito da expressão literal `"Desenvolvimento de Software"` (e equivalentes PT-BR) em `software_development`.
+  - Suporte completo a quantidades singulares e faixas em português e inglês (`1 ano`, `2 anos`, `1+ ano`, `3 a 5 anos`, `3-5 anos`, `5+ years`, `1 year`) sem inferir senioridade apenas por tempo de experiência.
+  - Remoção do acoplamento legado de `_EXPERIENCED_YEARS_RE` em menções desejáveis (`Diferencial: 3 anos...`), impedindo rebaixamento indevido de vagas `junior` para `other`.
+  - Redução de falsos positivos de experiência obrigatória qualitativa para requisitos puramente técnicos de ferramentas (ex.: `"Experiência com Git ou Docker."`) e frases explícitas de não obrigatoriedade/menção incidental.
+
+---
+
 ## [0.2.6] - 2026-11-15 — Fase 02.6: Compatibilidade de Senioridade, Experiência e Requisitos Profissionais
 
 ### Adicionado

@@ -25,6 +25,8 @@ from app.services.opportunities.classification import (
     PROFESSIONAL_AREA_LABELS_PT,
     SENIORITY_LABELS_PT,
     TECH_TARGET_AREAS,
+    _CUSTOMER_SUPPORT_TITLE_RE,
+    _TECH_SUPPORT_TITLE_RE,
     classify_experience_requirements,
     classify_opportunity,
     classify_professional_area,
@@ -372,6 +374,22 @@ def _language_matches(opp_language: str, preferred_languages: list[str]) -> bool
     return False
 
 
+def _merge_date_intervals_years(intervals: list[tuple[date, date]]) -> float:
+    """Mescla intervalos sobrepostos e calcula anos totais sem contagem duplicada."""
+    if not intervals:
+        return 0.0
+    ordered = sorted(intervals, key=lambda pair: (pair[0], pair[1]))
+    merged: list[tuple[date, date]] = [ordered[0]]
+    for start_d, end_d in ordered[1:]:
+        prev_start, prev_end = merged[-1]
+        if start_d <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end_d))
+        else:
+            merged.append((start_d, end_d))
+    total_days = sum(max(0, (end_d - start_d).days) for start_d, end_d in merged)
+    return round(total_days / 365.25, 2)
+
+
 def _estimate_candidate_profile_stage(
     profile: ProfessionalProfile,
     prefs: dict[str, Any],
@@ -379,20 +397,22 @@ def _estimate_candidate_profile_stage(
     experiences: Sequence[WorkExperience] | None,
     educations: Sequence[Education] | None,
     projects: Sequence[ProfessionalProject] | None,
-) -> tuple[float, float, int, set[str], bool, bool]:
+) -> tuple[float, float, int, set[str], bool, bool, bool]:
     """
     Calcula de forma determinística e sem inventar fatos:
-    - `confirmed_target_years`: anos em experiências elegíveis como cargo alvo
-    - `practical_years`: anos totais de experiência prática em tecnologia/trabalho
-    - `candidate_ceiling_rank`: nível máximo compatível com perfil/preferências
-      (1=internship, 2=junior/entry_level, 3=mid_level, 4=senior+)
+    - `confirmed_target_years`: anos em experiências elegíveis e relevantes para o cargo-alvo
+      (nunca inclui experiências com `eligible_as_target_role=False`, suporte de TI ou projetos)
+    - `total_work_years`: anos totais de trabalho datado com intervalos sobrepostos mesclados
+      (informativo apenas; não substitui experiência na área-alvo)
+    - `candidate_ceiling_rank`: nível máximo compatível com perfil/experiência relevante
     - `candidate_skill_tokens`: conjunto normalizado de tecnologias/habilidades declaradas
     - `has_student_status`: se há formação em andamento para estágio
-    - `has_explicit_skills`: se o usuário já possui skills cadastradas ou apenas preferências
+    - `has_explicit_skills`: se o usuário já possui skills cadastradas
+    - `has_practical_projects`: se há projetos práticos como evidência complementar de stack
     """
     today = date.today()
-    target_months = 0
-    total_months = 0
+    target_intervals: list[tuple[date, date]] = []
+    total_intervals: list[tuple[date, date]] = []
     skill_tokens: set[str] = set()
 
     def _collect_tokens(raw_text: str | None) -> None:
@@ -421,27 +441,38 @@ def _estimate_candidate_profile_stage(
 
     if experiences:
         for exp in experiences:
-            if exp.start_date is not None:
-                end_dt = today if (exp.is_current or exp.end_date is None) else exp.end_date
-                months = max(
-                    0,
-                    (end_dt.year - exp.start_date.year) * 12
-                    + (end_dt.month - exp.start_date.month),
-                )
-                total_months += months
-                if exp.eligible_as_target_role or exp.experience_type in {
-                    "junior",
-                    "pj",
-                    "clt",
-                    "freelance",
-                }:
-                    target_months += months
-            _collect_tokens(exp.role)
-            _collect_tokens(exp.description)
-            for t in (exp.technologies or []) + (exp.related_skills or []):
-                _collect_tokens(t)
+            role_norm = normalize_classification_text(exp.role)
+            is_non_target_role = bool(
+                exp.experience_type == "academic"
+                or _TECH_SUPPORT_TITLE_RE.search(role_norm)
+                or _CUSTOMER_SUPPORT_TITLE_RE.search(role_norm)
+            )
+            is_eligible_target = bool(exp.eligible_as_target_role) and not is_non_target_role
 
+            if exp.start_date is not None:
+                # Datas incompletas (sem end_date e is_current=False) não assumem duração até hoje
+                if exp.is_current:
+                    end_dt = today
+                elif exp.end_date is not None:
+                    end_dt = exp.end_date
+                else:
+                    end_dt = None
+
+                if end_dt is not None and end_dt >= exp.start_date:
+                    total_intervals.append((exp.start_date, end_dt))
+                    if is_eligible_target:
+                        target_intervals.append((exp.start_date, end_dt))
+
+            # Apenas experiências elegíveis ao cargo-alvo reforçam tokens de atuação alvo
+            if is_eligible_target:
+                _collect_tokens(exp.role)
+                _collect_tokens(exp.description)
+                for t in (exp.technologies or []) + (exp.related_skills or []):
+                    _collect_tokens(t)
+
+    has_practical_projects = bool(projects)
     if projects:
+        # Projetos fornecem evidência prática complementar de stack, nunca anos de experiência
         for proj in projects:
             _collect_tokens(proj.name)
             _collect_tokens(proj.description)
@@ -461,8 +492,8 @@ def _estimate_candidate_profile_stage(
             if edu.education_status == EducationStatus.IN_PROGRESS.value:
                 has_student_status = True
 
-    confirmed_target_years = round(target_months / 12.0, 2)
-    practical_years = round(total_months / 12.0, 2)
+    confirmed_target_years = _merge_date_intervals_years(target_intervals)
+    total_work_years = _merge_date_intervals_years(total_intervals)
 
     title_norm = normalize_classification_text(profile.professional_title)
     if any(k in title_norm for k in ("staff", "principal", "architect", "head of", "director", "manager")):
@@ -477,11 +508,12 @@ def _estimate_candidate_profile_stage(
 
     return (
         confirmed_target_years,
-        practical_years,
+        total_work_years,
         ceiling_rank,
         skill_tokens,
         has_student_status,
         has_explicit_skills,
+        has_practical_projects,
     )
 
 
@@ -502,7 +534,7 @@ def _skill_matches_tech(tech_label: str, candidate_tokens: set[str]) -> bool:
 def _evaluate_seniority_dimension(
     seniority_level: str,
     ceiling_rank: int,
-    practical_years: float,
+    relevant_target_years: float,
     prefs: dict[str, Any],
 ) -> tuple[str, list[str], list[str], list[str]]:
     inclusions: list[str] = []
@@ -530,13 +562,13 @@ def _evaluate_seniority_dimension(
         if ceiling_rank >= 3:
             inclusions.append(f"Senioridade compatível ({label}).")
             return ("compatible", inclusions, exclusions, uncertainties)
-        if practical_years >= 1.5:
+        if relevant_target_years >= 1.5:
             uncertainties.append(
-                f"Vaga de nível {label}; exige avaliação frente ao perfil júnior/entrada."
+                f"Vaga de nível {label}; exige avaliação frente à experiência relevante no cargo-alvo."
             )
             return ("potential", inclusions, exclusions, uncertainties)
         exclusions.append(
-            f"Senioridade incompatível: vaga requer nível {label}, acima da fase atual do perfil."
+            f"Senioridade incompatível: vaga requer nível {label}, acima da experiência relevante atual no cargo-alvo."
         )
         return ("incompatible", inclusions, exclusions, uncertainties)
 
@@ -565,8 +597,7 @@ def _evaluate_experience_dimension(
     min_years: int | None,
     preferred_years: int | None,
     seniority_level: str,
-    confirmed_target_years: float,
-    practical_years: float,
+    relevant_target_years: float,
 ) -> tuple[str, list[str], list[str], list[str]]:
     inclusions: list[str] = []
     exclusions: list[str] = []
@@ -578,50 +609,39 @@ def _evaluate_experience_dimension(
 
     if exp_mode == ExperienceRequirementMode.REQUIRED.value:
         if min_years is not None:
-            if confirmed_target_years >= min_years or (
-                practical_years >= min_years and min_years <= 2
-            ):
+            unit = "ano" if min_years == 1 else "anos"
+            if relevant_target_years >= min_years:
                 inclusions.append(
-                    f"Requisito mínimo de experiência compatível ({min_years}+ ano(s))."
+                    f"Requisito mínimo de experiência compatível ({min_years}+ {unit} na área-alvo)."
                 )
                 return ("compatible", inclusions, exclusions, uncertainties)
-            if min_years == 1 and practical_years >= 0.5:
-                inclusions.append(
-                    "Requisito inicial de experiência (1+ ano) alinhado à experiência prática."
-                )
-                return ("compatible", inclusions, exclusions, uncertainties)
-            if min_years <= 2 and practical_years >= 1.25:
+            if min_years == 1 and relevant_target_years >= 0.5:
                 uncertainties.append(
-                    f"A vaga solicita {min_years} ano(s) de experiência; perfil possui experiência prática aproximada e requer avaliação."
+                    "A vaga solicita 1+ ano de experiência; perfil possui fração relevante na área-alvo e requer análise."
                 )
                 return ("potential", inclusions, exclusions, uncertainties)
-            if min_years == 1 and practical_years == 0.0:
+            if min_years == 2 and relevant_target_years >= 1.5:
                 uncertainties.append(
-                    "A vaga menciona 1 ano de experiência e o perfil não possui tempo datado suficiente; avaliar requisitos."
+                    "A vaga solicita 2+ anos de experiência; perfil possui experiência relevante próxima e requer avaliação."
                 )
                 return ("potential", inclusions, exclusions, uncertainties)
             exclusions.append(
-                f"Requisito obrigatório de {min_years}+ anos de experiência excede a trajetória atual do perfil."
+                f"Requisito obrigatório de {min_years}+ {unit} de experiência excede o tempo confirmado no cargo-alvo."
             )
             return ("incompatible", inclusions, exclusions, uncertainties)
 
-        # Experiência qualitativa obrigatória (sem contagem explícita de anos)
-        if practical_years >= 1.0:
-            uncertainties.append(
-                "A vaga exige experiência prática obrigatória sem especificar número de anos; validar aderência antes da candidatura."
-            )
-            return ("potential", inclusions, exclusions, uncertainties)
+        # Experiência profissional qualitativa obrigatória (sem contagem explícita de anos)
         uncertainties.append(
-            "A vaga solicita experiência prática prévia; validar compatibilidade."
+            "A vaga exige experiência profissional prévia (sem contagem mínima de anos); validar aderência antes da candidatura."
         )
         return ("potential", inclusions, exclusions, uncertainties)
 
     if exp_mode == ExperienceRequirementMode.PREFERRED.value:
-        pref_note = (
-            f"Experiência indicada apenas como desejável ({preferred_years}+ anos), não obrigatória."
-            if preferred_years is not None
-            else "Experiência citada apenas como desejável ou diferencial."
-        )
+        if preferred_years is not None:
+            unit_p = "ano" if preferred_years == 1 else "anos"
+            pref_note = f"Experiência indicada apenas como desejável ({preferred_years}+ {unit_p}), não obrigatória."
+        else:
+            pref_note = "Experiência citada apenas como desejável ou diferencial."
         inclusions.append(pref_note)
         return ("compatible", inclusions, exclusions, uncertainties)
 
@@ -668,13 +688,33 @@ def evaluate_opportunity_for_user(
     exclusions: list[str] = []
     uncertainty_notes: list[str] = []
 
+    (
+        seniority_level,
+        exp_mode,
+        exp_min_years,
+        exp_pref_years,
+        _exp_summary,
+        required_techs_tuple,
+        desirable_techs_tuple,
+    ) = resolve_opportunity_seniority_and_experience(opportunity)
+
     category = target_category
-    if category is None and opportunity.opportunity_type in {
-        OpportunityType.INTERNSHIP.value,
-        OpportunityType.JUNIOR.value,
-        OpportunityType.FREELANCE.value,
-    }:
-        category = opportunity.opportunity_type
+    if category is None:
+        if seniority_level == SeniorityLevel.INTERNSHIP.value:
+            category = OpportunityType.INTERNSHIP.value
+        elif seniority_level in {
+            SeniorityLevel.JUNIOR.value,
+            SeniorityLevel.ENTRY_LEVEL.value,
+        }:
+            category = OpportunityType.JUNIOR.value
+        elif opportunity.employment_type == EmploymentType.FREELANCE.value:
+            category = OpportunityType.FREELANCE.value
+        elif opportunity.opportunity_type in {
+            OpportunityType.INTERNSHIP.value,
+            OpportunityType.JUNIOR.value,
+            OpportunityType.FREELANCE.value,
+        }:
+            category = opportunity.opportunity_type
 
     # 1. Ciclo de vida e restrições de fontes externas
     opp_status = (getattr(opportunity, "source_status", None) or "active").lower()
@@ -853,9 +893,11 @@ def evaluate_opportunity_for_user(
     if geo_status == "unknown":
         uncertainty_notes.append("Elegibilidade geográfica não confirmada na origem.")
 
-    if category == OpportunityType.FREELANCE.value:
+    if opportunity.employment_type == EmploymentType.FREELANCE.value or category == OpportunityType.FREELANCE.value:
         scopes = [s.lower() for s in (prefs["freelance"].get("scopes") or [])]
-        if scopes and geo_status == "eligible":
+        if not prefs["freelance"].get("enabled", True):
+            exclusions.append("Categoria Freelancers desabilitada nas preferências do usuário.")
+        elif scopes and geo_status == "eligible":
             allows_br = any("brasil" in s or "brazil" in s for s in scopes)
             allows_intl = any(
                 marker in s for s in scopes for marker in ("exterior", "internacional", "global")
@@ -879,26 +921,18 @@ def evaluate_opportunity_for_user(
     # 7. Senioridade, Experiência e Habilidades Técnicas do Candidato
     (
         confirmed_target_years,
-        practical_years,
+        _total_work_years,
         ceiling_rank,
         candidate_tokens,
         _has_student_status,
         has_explicit_skills,
+        _has_practical_projects,
     ) = _estimate_candidate_profile_stage(
         profile, prefs, skills, experiences, educations, projects
     )
-    (
-        seniority_level,
-        exp_mode,
-        exp_min_years,
-        exp_pref_years,
-        _exp_summary,
-        required_techs_tuple,
-        desirable_techs_tuple,
-    ) = resolve_opportunity_seniority_and_experience(opportunity)
 
     seniority_compat, sen_inc, sen_exc, sen_unc = _evaluate_seniority_dimension(
-        seniority_level, ceiling_rank, practical_years, prefs
+        seniority_level, ceiling_rank, confirmed_target_years, prefs
     )
     inclusions.extend(sen_inc)
     exclusions.extend(sen_exc)
@@ -910,7 +944,6 @@ def evaluate_opportunity_for_user(
         exp_pref_years,
         seniority_level,
         confirmed_target_years,
-        practical_years,
     )
     inclusions.extend(exp_inc)
     exclusions.extend(exp_exc)

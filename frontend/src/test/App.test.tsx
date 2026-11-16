@@ -362,16 +362,25 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
     vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
 
     const oppJr = buildMockOpportunity();
+    const oppJrFreela = buildMockOpportunity({
+      id: "opp-jr-freela",
+      external_id: "109002",
+      title: "Freelance Junior Python API Developer",
+      opportunity_type: "freelance",
+      seniority_level: "junior",
+      employment_type: "freelance",
+    });
     const listSpy = vi
       .spyOn(api.opportunities, "list")
       .mockImplementation(async (params = {}) => {
-        if (params.type === "internship") {
+        if (params.seniority === "internship") {
           return {
             items: [
               buildMockOpportunity({
                 id: "opp-intern",
                 title: "Estágio Engenharia de Dados",
                 opportunity_type: "internship",
+                seniority_level: "internship",
                 employment_type: "internship",
                 eligibility_unknown: true,
                 match: {
@@ -390,8 +399,17 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
             total_pages: 1,
           };
         }
+        if (params.employment_type === "freelance") {
+          return {
+            items: [oppJrFreela],
+            total: 1,
+            page: 1,
+            page_size: 10,
+            total_pages: 1,
+          };
+        }
         return {
-          items: [oppJr],
+          items: [oppJr, oppJrFreela],
           total: 20,
           page: params.page || 1,
           page_size: 10,
@@ -413,43 +431,49 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
       expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
     });
 
-    // Navega para Desenvolvedor Júnior
+    // Navega para Desenvolvedor Júnior (filtra por seniority="junior", sem depender de type legado)
     fireEvent.click(screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]);
 
     await waitFor(() => {
       expect(screen.getByText("Junior Python Backend Developer")).toBeInTheDocument();
+      expect(screen.getByText("Freelance Junior Python API Developer")).toBeInTheDocument();
     });
-    expect(screen.getByText(/Área: Backend/i)).toBeInTheDocument();
-    expect(screen.getByText(/Nível: Júnior/i)).toBeInTheDocument();
+    expect(listSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ seniority: "junior" })
+    );
+    expect(listSpy.mock.calls.some((call) => call[0]?.type !== undefined)).toBe(false);
+    expect(screen.getAllByText(/Área: Backend/i).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Nível: Júnior/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText(/^Compatível$/i).length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText(/Experiência: Sem exigência de experiência prévia/i)
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Especialidades secundárias:/i)).toBeInTheDocument();
+      screen.getAllByText(/Experiência: Sem exigência de experiência prévia/i).length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Especialidades secundárias:/i).length).toBeGreaterThanOrEqual(1);
     expect(
       screen.getAllByText(/APIs, Integrações e Automação/i).length
     ).toBeGreaterThanOrEqual(2);
 
     const senioritySelect = screen.getByLabelText(/Senioridade/i);
-    fireEvent.change(senioritySelect, { target: { value: "junior" } });
+    fireEvent.change(senioritySelect, { target: { value: "entry_level" } });
     await waitFor(() => {
       expect(listSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "junior", seniority: "junior" })
+        expect.objectContaining({ seniority: "entry_level" })
       );
     });
+    fireEvent.change(senioritySelect, { target: { value: "junior" } });
 
     const areaSelect = screen.getByLabelText(/Área profissional/i);
     fireEvent.change(areaSelect, { target: { value: "backend" } });
     await waitFor(() => {
       expect(listSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "junior", area: "backend" })
+        expect.objectContaining({ seniority: "junior", area: "backend" })
       );
     });
 
     // Verifica atribuição visível e ausência de nofollow nos links de saída
-    const outboundLink = screen.getByRole("link", {
+    const outboundLink = screen.getAllByRole("link", {
       name: /Ver oportunidade original/i,
-    });
+    })[0];
     expect(outboundLink).toHaveAttribute(
       "href",
       "https://remoteok.com/remote-jobs/junior-python-109001"
@@ -457,7 +481,7 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
     expect(outboundLink.getAttribute("rel") || "").not.toContain("nofollow");
 
     // Salva oportunidade
-    fireEvent.click(screen.getByRole("button", { name: /^Salvar$/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /^Salvar$/i })[0]);
     await waitFor(() => {
       expect(updateStateSpy).toHaveBeenCalledWith("opp-1", { is_saved: true });
     });
@@ -466,12 +490,26 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
     fireEvent.click(screen.getByRole("button", { name: /Próxima/i }));
     await waitFor(() => {
       expect(listSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "junior", page: 2 })
+        expect.objectContaining({ seniority: "junior", page: 2 })
       );
     });
 
-    // Navega para Estágios e verifica sinalização de elegibilidade geográfica desconhecida
+    // Navega para Freelancers e confirma mesma vaga Júnior Freelance via employment_type="freelance"
+    fireEvent.click(screen.getAllByRole("button", { name: /^Freelancers$/i })[0]);
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ employment_type: "freelance" })
+      );
+    });
+    expect(screen.getByText("Freelance Junior Python API Developer")).toBeInTheDocument();
+
+    // Navega para Estágios (filtra por seniority="internship") e verifica elegibilidade geográfica desconhecida
     fireEvent.click(screen.getAllByRole("button", { name: /^Estágios$/i })[0]);
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ seniority: "internship" })
+      );
+    });
     await waitFor(() => {
       expect(screen.getByText("Estágio Engenharia de Dados")).toBeInTheDocument();
     });

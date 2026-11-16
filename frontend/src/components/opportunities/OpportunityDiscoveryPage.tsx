@@ -165,12 +165,24 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [totalPages, setTotalPages] = useState(1);
   const [page, setPage] = useState(1);
 
+  const defaultSeniorityForTab =
+    category === "internship"
+      ? "internship"
+      : category === "junior"
+        ? "junior"
+        : "";
+  const defaultEmploymentForTab = category === "freelance" ? "freelance" : "";
+
   const [queryText, setQueryText] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [workModeFilter, setWorkModeFilter] = useState<string>("");
-  const [employmentFilter, setEmploymentFilter] = useState<string>("");
+  const [employmentFilter, setEmploymentFilter] = useState<string>(
+    defaultEmploymentForTab
+  );
   const [areaFilter, setAreaFilter] = useState<string>("");
-  const [seniorityFilter, setSeniorityFilter] = useState<string>("");
+  const [seniorityFilter, setSeniorityFilter] = useState<string>(
+    defaultSeniorityForTab
+  );
   const [compatibilityFilter, setCompatibilityFilter] = useState<string>("");
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
@@ -183,6 +195,18 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+
+  useEffect(() => {
+    setSeniorityFilter(
+      category === "internship"
+        ? "internship"
+        : category === "junior"
+          ? "junior"
+          : ""
+    );
+    setEmploymentFilter(category === "freelance" ? "freelance" : "");
+    setPage(1);
+  }, [category]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -220,7 +244,6 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     api.opportunities
       .list({
         q: debouncedQuery || undefined,
-        type: category,
         seniority: (seniorityFilter as SeniorityLevel) || undefined,
         compatibility:
           (compatibilityFilter as OverallCompatibility) || undefined,
