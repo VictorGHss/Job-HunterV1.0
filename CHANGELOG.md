@@ -6,6 +6,26 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.1.1] - 2026-11-17 — Subfase 04.1.1: Hardening de Confirmação e Autorização de Oportunidades
+
+### Corrigido / Endurecido
+
+- **Invalidação de Confirmação Após Alteração Factual (`profile_service.py`):**
+  - As cinco funções de atualização de sub-entidades (`update_experience`, `update_education`, `update_skill`, `update_language`, `update_project`) e `update_profile` passaram a usar a política centralizada `_apply_confirmation_policy`, que rebaixa obrigatoriamente para `pending_validation` e limpa `confirmed_at` sempre que o conteúdo factual for alterado, **independentemente** de o cliente ter reenviado `verification_status="confirmed"`.
+  - Adicionado `_normalize_factual_value` para comparação semântica: `None` e `""` são equivalentes em campos opcionais; listas de tags (`technologies`, `related_skills`) são comparadas como conjuntos sem ordem.
+  - Comportamento completo de acordo com os cenários A–G: auto-confirmação de edição bloqueada (A/D); preservação de confirmação quando nada mudou (B/C); reabertura e reconfirmação intencional permitidas (E/F); rascunho nunca confirmado acidentalmente por defaults de PUT (G).
+- **Autorização de Oportunidades Privadas em Materiais (`material_service.py`):**
+  - `_get_opportunity` substituiu `db.get(Opportunity, id)` por `SELECT ... WHERE id = ? AND (source_id IS NOT NULL OR created_by_user_id = ?)`, impedindo acesso a oportunidades privadas de terceiros.
+  - Oportunidades privadas alheias retornam `404 Not Found` idêntico ao de registro inexistente, sem expor título, empresa, descrição, tecnologias ou qualquer metadado.
+  - Proteção aplicada em `pre_analyze_material` e `create_material` via `_resolve_target_context`.
+
+### Testes
+- `tests/test_profile_confirmation_phase0411.py` (31 testes): cobre as seis entidades com cenários A–G, normalização `None/""` e de listas, persistência no banco e quick-confirm via API.
+- `tests/test_opportunity_authorization_phase0411.py` (6 testes): TC-0411-01 a TC-0411-06 — pré-análise e criação com oportunidade privada alheia (`404`), acesso do proprietário (`200/201`), oportunidade pública acessível por qualquer usuário, ID inexistente e isolamento sem exposição indireta.
+- Suíte completa: **85/85 passando** em SQLite e em PostgreSQL 16.
+
+---
+
 ## [0.4.1] - 2026-11-17 — Subfase 04.1: Fundação de Materiais e Currículo Direcionado Determinístico
 
 ### Adicionado

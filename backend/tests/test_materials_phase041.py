@@ -24,9 +24,11 @@ from app.models.opportunity import (
     ExperienceRequirementMode,
     ExternalSourceStatus,
     Opportunity,
+    OpportunitySource,
     OpportunityType,
     ProfessionalArea,
     SeniorityLevel,
+    SourceType,
     WorkMode,
 )
 from app.models.profile import (
@@ -73,12 +75,42 @@ def _create_opportunity(
     technologies: list[str] | None = None,
     requirements: list[str] | None = None,
     seniority_level: str = SeniorityLevel.JUNIOR.value,
+    owner_user_id: uuid.UUID | None = None,
 ) -> Opportunity:
+    """Cria uma oportunidade de teste.
+
+    Por padrão cria uma oportunidade pública/importada (source_id preenchido).
+    Se ``owner_user_id`` for fornecido, cria oportunidade privada (source_id=None,
+    created_by_user_id=owner_user_id).
+    """
     now_dt = datetime.now(UTC)
+
+    source_id: uuid.UUID | None = None
+    if owner_user_id is None:
+        # Oportunidade pública: cria ou reutiliza uma OpportunitySource dummy
+        slug = "test-source-dummy"
+        existing_source = db_session.execute(
+            select(OpportunitySource).where(OpportunitySource.slug == slug)
+        ).scalar_one_or_none()
+        if existing_source is None:
+            dummy_source = OpportunitySource(
+                slug=slug,
+                name="Fonte de Teste",
+                source_type=SourceType.JSON_API.value,
+                base_url="https://test-source.example.com",
+                terms_url="https://test-source.example.com/terms",
+                attribution_text="Teste",
+            )
+            db_session.add(dummy_source)
+            db_session.flush()
+            source_id = dummy_source.id
+        else:
+            source_id = existing_source.id
+
     opp = Opportunity(
         title=title,
         company_name=company_name,
-        external_id=f"ext-{uuid.uuid4().hex[:10]}",
+        external_id=f"ext-{uuid.uuid4().hex[:10]}" if owner_user_id is None else None,
         source_url=f"https://example.com/jobs/{uuid.uuid4().hex[:8]}",
         description=description,
         requirements=requirements if requirements is not None else ["Python", "FastAPI", "PostgreSQL", "Kubernetes"],
@@ -96,6 +128,8 @@ def _create_opportunity(
         first_seen_at=now_dt,
         last_seen_at=now_dt,
         content_hash=uuid.uuid4().hex,
+        source_id=source_id,
+        created_by_user_id=owner_user_id,
     )
     db_session.add(opp)
     db_session.commit()

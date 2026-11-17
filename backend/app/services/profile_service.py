@@ -84,6 +84,83 @@ def _resolve_confirmed_at(
     return None
 
 
+def _normalize_factual_value(value: object) -> object:
+    """Normaliza um valor de campo factual para comparação de igualdade semântica.
+
+    Regras:
+    - None e string vazia são equivalentes quando ambos representam "ausente".
+    - Listas são comparadas como conjuntos ordenados (technologies, related_skills, etc.
+      são sacolas de tags sem ordem semântica).
+    - Demais tipos são retornados sem alteração.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value  # já normalizado pelos validadores do schema
+    if isinstance(value, list):
+        return sorted(str(x) for x in value)
+    return value
+
+
+def _apply_confirmation_policy(
+    entity: object,
+    *,
+    requested_status: str,
+    current_status: str,
+    current_confirmed_at: datetime | None,
+    facts_changed: bool,
+) -> tuple[str, datetime | None]:
+    """Retorna o par (status_final, confirmed_at_final) que deve ser persistido.
+
+    Cenários (ver spec §3.3):
+    A — registro confirmado + alteração factual                        → pending_validation, None
+    B — registro confirmado + sem alteração factual + confirmed explícito → confirmed, preserva data
+    C — registro confirmado + sem alteração factual + status omitido   → confirmed, preserva data
+        (Para sub-entidades o schema sempre envia um valor; o backend não deve
+         regredir uma confirmação quando nada de factual mudou.)
+    D — alteração factual + pending_validation explícito               → pending_validation, None
+    E — pending_validation explícito, sem alteração factual            → pending_validation, None
+    F — confirmed explícito, sem alteração factual, registro pendente  → confirmed, preenche data
+    G — registro draft                                                 → preserva (jamais confirma acidentalmente)
+    """
+    CONFIRMED = VerificationStatus.CONFIRMED.value
+    PENDING = VerificationStatus.PENDING_VALIDATION.value
+    DRAFT = VerificationStatus.DRAFT.value
+
+    # Cenários A / D: qualquer alteração factual revoga a confirmação,
+    # independentemente do que o cliente enviou. Uma edição não pode
+    # auto-confirmar o próprio conteúdo que acabou de alterar.
+    if facts_changed:
+        if current_status == CONFIRMED or requested_status == CONFIRMED:
+            return PENDING, None
+        return requested_status, None
+
+    # Daqui em diante: nenhuma alteração factual.
+
+    # Cenário G: nunca promover um rascunho para confirmado via defaults do PUT.
+    if current_status == DRAFT and requested_status == CONFIRMED:
+        return DRAFT, current_confirmed_at
+
+    # Cenários B/C: já confirmado, nada mudou — preservar, mesmo que o cliente
+    # tenha reenviado "confirmed".
+    if current_status == CONFIRMED:
+        if requested_status == CONFIRMED:
+            # Cenário B: re-confirmação explícita sem alteração → mantém a data original
+            return CONFIRMED, current_confirmed_at if current_confirmed_at else datetime.now(UTC)
+        # Cenário E: reabertura explícita para pendente
+        if requested_status == PENDING:
+            return PENDING, None
+        # Qualquer outro status (ex.: re-atribuição de draft) — permitir
+        return requested_status, None
+
+    # Cenário F: registro pendente, confirmação explícita, sem alteração factual → confirmar
+    if requested_status == CONFIRMED:
+        return CONFIRMED, current_confirmed_at if current_confirmed_at else datetime.now(UTC)
+
+    # Padrão: aplicar o status solicitado
+    return requested_status, None
+
+
 def get_or_create_profile(db: Session, user: User) -> ProfessionalProfile:
     stmt = select(ProfessionalProfile).where(ProfessionalProfile.user_id == user.id)
     profile = db.execute(stmt).scalar_one_or_none()
@@ -131,17 +208,20 @@ def update_profile(
     for field, value in update_data.items():
         setattr(profile, field, value)
 
-    if explicit_status is not None:
-        profile.verification_status = explicit_status
-        profile.confirmed_at = _resolve_confirmed_at(
-            explicit_status,
-            profile.confirmed_at,
-            facts_changed=factual_changed,
-        )
-    elif factual_changed and profile.verification_status == VerificationStatus.CONFIRMED.value:
-        # Edição factual sem confirmação explícita não mantém selo antigo confirmado silenciosamente
-        profile.verification_status = VerificationStatus.PENDING_VALIDATION.value
-        profile.confirmed_at = None
+    # Neste ponto profile.verification_status ainda contém o valor pré-atualização
+    # porque removemos o campo de update_data acima. Aplicar a política de confirmação:
+    # uma edição não pode auto-confirmar suas próprias alterações factuais.
+    old_status = profile.verification_status
+    requested_status = explicit_status if explicit_status is not None else old_status
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        profile,
+        requested_status=requested_status,
+        current_status=old_status,
+        current_confirmed_at=profile.confirmed_at,
+        facts_changed=factual_changed,
+    )
+    profile.verification_status = final_status
+    profile.confirmed_at = final_confirmed_at
 
     db.commit()
     db.refresh(profile)
@@ -452,19 +532,47 @@ def update_experience(
     payload: WorkExperienceUpdate,
 ) -> WorkExperience:
     data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
+    # Normaliza campos enum para seus valores string armazenados
     data["experience_type"] = payload.experience_type.value
-    facts_changed = any(
-        getattr(exp, key) != value
-        for key, value in data.items()
-        if key != "verification_status"
+    requested_status = payload.verification_status.value
+
+    # Verifica se algum campo factual foi alterado, com normalização semântica
+    # para campos onde None/"" são equivalentes e para listas sem ordem significativa.
+    _UNORDERED_LIST_FIELDS = frozenset({"technologies", "related_skills"})
+    _NULLABLE_STR_FIELDS = frozenset({"description"})
+
+    facts_changed = False
+    for key, new_value in data.items():
+        if key == "verification_status":
+            continue
+        current_value = getattr(exp, key)
+        if key in _UNORDERED_LIST_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        elif key in _NULLABLE_STR_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        else:
+            if current_value != new_value:
+                facts_changed = True
+                break
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        exp,
+        requested_status=requested_status,
+        current_status=exp.verification_status,
+        current_confirmed_at=exp.confirmed_at,
+        facts_changed=facts_changed,
     )
-    exp.confirmed_at = _resolve_confirmed_at(
-        status_val, exp.confirmed_at, facts_changed=facts_changed
-    )
+
     for key, value in data.items():
-        setattr(exp, key, value)
+        if key != "verification_status":
+            setattr(exp, key, value)
+    exp.verification_status = final_status
+    exp.confirmed_at = final_confirmed_at
+
     db.commit()
     db.refresh(exp)
     return exp
@@ -511,19 +619,39 @@ def update_education(
     payload: EducationUpdate,
 ) -> Education:
     data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
     data["education_status"] = payload.education_status.value
-    facts_changed = any(
-        getattr(edu, key) != value
-        for key, value in data.items()
-        if key != "verification_status"
+    requested_status = payload.verification_status.value
+
+    _NULLABLE_STR_FIELDS = frozenset({"field_of_study", "current_semester"})
+
+    facts_changed = False
+    for key, new_value in data.items():
+        if key == "verification_status":
+            continue
+        current_value = getattr(edu, key)
+        if key in _NULLABLE_STR_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        else:
+            if current_value != new_value:
+                facts_changed = True
+                break
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        edu,
+        requested_status=requested_status,
+        current_status=edu.verification_status,
+        current_confirmed_at=edu.confirmed_at,
+        facts_changed=facts_changed,
     )
-    edu.confirmed_at = _resolve_confirmed_at(
-        status_val, edu.confirmed_at, facts_changed=facts_changed
-    )
+
     for key, value in data.items():
-        setattr(edu, key, value)
+        if key != "verification_status":
+            setattr(edu, key, value)
+    edu.verification_status = final_status
+    edu.confirmed_at = final_confirmed_at
+
     db.commit()
     db.refresh(edu)
     return edu
@@ -566,19 +694,39 @@ def create_skill(db: Session, user: User, payload: SkillCreate) -> Skill:
 
 def update_skill(db: Session, skill: Skill, payload: SkillUpdate) -> Skill:
     data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
     data["proficiency_level"] = payload.proficiency_level.value
-    facts_changed = any(
-        getattr(skill, key) != value
-        for key, value in data.items()
-        if key != "verification_status"
+    requested_status = payload.verification_status.value
+
+    _NULLABLE_STR_FIELDS = frozenset({"notes"})
+
+    facts_changed = False
+    for key, new_value in data.items():
+        if key == "verification_status":
+            continue
+        current_value = getattr(skill, key)
+        if key in _NULLABLE_STR_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        else:
+            if current_value != new_value:
+                facts_changed = True
+                break
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        skill,
+        requested_status=requested_status,
+        current_status=skill.verification_status,
+        current_confirmed_at=skill.confirmed_at,
+        facts_changed=facts_changed,
     )
-    skill.confirmed_at = _resolve_confirmed_at(
-        status_val, skill.confirmed_at, facts_changed=facts_changed
-    )
+
     for key, value in data.items():
-        setattr(skill, key, value)
+        if key != "verification_status":
+            setattr(skill, key, value)
+    skill.verification_status = final_status
+    skill.confirmed_at = final_confirmed_at
+
     db.commit()
     db.refresh(skill)
     return skill
@@ -621,19 +769,39 @@ def create_language(db: Session, user: User, payload: LanguageCreate) -> Languag
 
 def update_language(db: Session, lang: Language, payload: LanguageUpdate) -> Language:
     data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
     data["proficiency_level"] = payload.proficiency_level.value
-    facts_changed = any(
-        getattr(lang, key) != value
-        for key, value in data.items()
-        if key != "verification_status"
+    requested_status = payload.verification_status.value
+
+    _NULLABLE_STR_FIELDS = frozenset({"cefr_level"})
+
+    facts_changed = False
+    for key, new_value in data.items():
+        if key == "verification_status":
+            continue
+        current_value = getattr(lang, key)
+        if key in _NULLABLE_STR_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        else:
+            if current_value != new_value:
+                facts_changed = True
+                break
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        lang,
+        requested_status=requested_status,
+        current_status=lang.verification_status,
+        current_confirmed_at=lang.confirmed_at,
+        facts_changed=facts_changed,
     )
-    lang.confirmed_at = _resolve_confirmed_at(
-        status_val, lang.confirmed_at, facts_changed=facts_changed
-    )
+
     for key, value in data.items():
-        setattr(lang, key, value)
+        if key != "verification_status":
+            setattr(lang, key, value)
+    lang.verification_status = final_status
+    lang.confirmed_at = final_confirmed_at
+
     db.commit()
     db.refresh(lang)
     return lang
@@ -687,18 +855,45 @@ def update_project(
     payload: ProfessionalProjectUpdate,
 ) -> ProfessionalProject:
     data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    facts_changed = any(
-        getattr(proj, key) != value
-        for key, value in data.items()
-        if key != "verification_status"
+    requested_status = payload.verification_status.value
+
+    # technologies é uma sacola de tags sem ordem; links é um dicionário sem ordem.
+    # description, role e verified_results aceitam equivalência None/"".
+    _UNORDERED_LIST_FIELDS = frozenset({"technologies"})
+    _NULLABLE_STR_FIELDS = frozenset({"description", "role", "verified_results"})
+
+    facts_changed = False
+    for key, new_value in data.items():
+        if key == "verification_status":
+            continue
+        current_value = getattr(proj, key)
+        if key in _UNORDERED_LIST_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        elif key in _NULLABLE_STR_FIELDS:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                facts_changed = True
+                break
+        else:
+            if current_value != new_value:
+                facts_changed = True
+                break
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        proj,
+        requested_status=requested_status,
+        current_status=proj.verification_status,
+        current_confirmed_at=proj.confirmed_at,
+        facts_changed=facts_changed,
     )
-    proj.confirmed_at = _resolve_confirmed_at(
-        status_val, proj.confirmed_at, facts_changed=facts_changed
-    )
+
     for key, value in data.items():
-        setattr(proj, key, value)
+        if key != "verification_status":
+            setattr(proj, key, value)
+    proj.verification_status = final_status
+    proj.confirmed_at = final_confirmed_at
+
     db.commit()
     db.refresh(proj)
     return proj

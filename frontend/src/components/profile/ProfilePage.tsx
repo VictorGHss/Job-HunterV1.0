@@ -248,6 +248,8 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
         linkedin_url: profileForm.linkedin_url || null,
         github_url: profileForm.github_url || null,
         portfolio_url: profileForm.portfolio_url || null,
+        // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+        // degrada para pending_validation independentemente do status enviado aqui.
         verification_status: profileForm.verification_status,
       });
       await onRefresh();
@@ -964,6 +966,8 @@ function ExperiencesSection({
       technologies: splitCommaSeparated(form.technologiesText),
       related_skills: splitCommaSeparated(form.relatedSkillsText),
       eligible_as_target_role: form.eligible_as_target_role,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
@@ -1359,6 +1363,8 @@ function EducationsSection({
       start_date: form.start_date || null,
       expected_graduation_date: form.expected_graduation_date || null,
       education_status: form.education_status,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
@@ -1664,6 +1670,8 @@ function SkillsSection({
       category: form.category,
       proficiency_level: form.proficiency_level,
       notes: form.notes || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
@@ -1920,6 +1928,8 @@ function LanguagesSection({
       language_name: form.language_name,
       proficiency_level: form.proficiency_level,
       cefr_level: form.cefr_level || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
@@ -2190,6 +2200,8 @@ function ProjectsSection({
       technologies: splitCommaSeparated(form.technologiesText),
       links,
       verified_results: form.verified_results || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 

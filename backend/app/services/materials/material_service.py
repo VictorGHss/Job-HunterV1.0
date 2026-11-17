@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -114,8 +114,24 @@ def _get_user_application(
     return app
 
 
-def _get_opportunity(db: Session, opportunity_id: uuid.UUID) -> Opportunity:
-    opp = db.get(Opportunity, opportunity_id)
+def _get_opportunity(db: Session, user: User, opportunity_id: uuid.UUID) -> Opportunity:
+    """Carrega uma oportunidade verificando a política de autorização de acesso.
+
+    Permite:
+    - Oportunidades públicas/importadas: source_id IS NOT NULL.
+    - Oportunidades privadas criadas pelo próprio usuário autenticado.
+
+    Oportunidades privadas de terceiros retornam 404 idêntico ao de registro inexistente,
+    sem revelar se a oportunidade existe.
+    """
+    stmt = select(Opportunity).where(
+        Opportunity.id == opportunity_id,
+        or_(
+            Opportunity.source_id.is_not(None),
+            Opportunity.created_by_user_id == user.id,
+        ),
+    )
+    opp = db.scalar(stmt)
     if opp is None:
         raise MaterialNotFoundError("Oportunidade não encontrada.")
     return opp
@@ -130,7 +146,7 @@ def _resolve_target_context(
 ) -> tuple[Opportunity | None, Application | None]:
     application = _get_user_application(db, user, application_id) if application_id else None
     if opportunity_id is not None:
-        opportunity = _get_opportunity(db, opportunity_id)
+        opportunity = _get_opportunity(db, user, opportunity_id)
         if (
             application is not None
             and application.opportunity_id is not None
