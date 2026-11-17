@@ -6,6 +6,17 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.3.2.1] - 2026-11-16 — Fase 03.2.1: Correção da Referência Temporal de Interações Externas
+
+### Corrigido / Endurecido
+- **Monotonicidade da Última Interação Externa (`application_process_service.py`):**
+  - Corrigida `record_external_interaction` e unificada com `_maybe_record_interview_interaction` por meio de atualização condicional atômica (`_apply_monotonic_external_interaction_summary`) em `applications` restrita a `last_external_interaction_at IS NULL OR last_external_interaction_at <= interaction_at`.
+  - O resumo (`last_external_interaction_at`, `last_external_interaction_type`, `last_external_interaction_note`) agora representa sempre o **maior timestamp conhecido** como unidade lógica indivisível (atualizado de forma determinística apenas para instantes `>=` ao atual, inclusive sob transações concorrentes no PostgreSQL 16), enquanto interações retroativas seguem integralmente preservadas em `application_status_history` com sua data efetiva real, sem reiniciar nem distorcer o contador de `get_stale_applications`.
+- **Cobertura de Regressão e Isolamento Entre Candidaturas (`test_applications_phase032.py`):**
+  - Adicionados os testes `TC-0321-01` a `TC-0321-10` cobrindo interação retroativa, interação mais recente, primeira interação, timestamp igual, impacto na detecção de estagnação, normalização UTC de timezones distintos, preservação histórica, corrida concorrente (`threading.Barrier`) e tentativa cruzada (`GET`, `PATCH`, `DELETE`) entre duas candidaturas distintas pertencentes ao mesmo usuário (`404 Not Found`).
+
+---
+
 ## [0.3.2] - 2026-11-16 — Fase 03.2: Gestão Avançada de Processos Seletivos
 
 ### Adicionado

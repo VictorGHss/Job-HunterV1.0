@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.application import (
@@ -218,21 +218,77 @@ def sync_application_assessment_summary(
         app_row.assessment_deadline_at = None
 
 
+def _apply_monotonic_external_interaction_summary(
+    db: Session,
+    *,
+    application_id: uuid.UUID,
+    user_id: uuid.UUID,
+    interaction_at: datetime,
+    interaction_type: str,
+    interaction_note: str | None,
+    updated_at: datetime,
+) -> bool:
+    """
+    Atualiza atomicamente os 3 campos de resumo da última interação externa apenas
+    quando ainda não houver registro ou o novo instante normalizado em UTC for
+    >= ao timestamp atualmente armazenado (garantindo monotonicidade mesmo sob
+    transações concorrentes). Para timestamps idênticos (`==`), atualiza os três
+    campos em conjunto de forma determinística.
+    """
+    normalized_at = ensure_utc(interaction_at) or updated_at
+    stmt = (
+        update(Application)
+        .where(
+            Application.id == application_id,
+            Application.user_id == user_id,
+            or_(
+                Application.last_external_interaction_at.is_(None),
+                Application.last_external_interaction_at <= normalized_at,
+            ),
+        )
+        .values(
+            last_external_interaction_at=normalized_at,
+            last_external_interaction_type=interaction_type,
+            last_external_interaction_note=interaction_note,
+            updated_at=updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    result = db.execute(stmt)
+    return bool(result.rowcount)
+
+
 def _maybe_record_interview_interaction(
+    db: Session,
+    user: User,
     app_row: Application,
     interview: ApplicationInterview,
     *,
     effective_at: datetime,
+    updated_at: datetime,
 ) -> None:
+    effective_utc = ensure_utc(effective_at) or updated_at
     current_at = ensure_utc(app_row.last_external_interaction_at)
-    if current_at is None or effective_at >= current_at:
-        app_row.last_external_interaction_at = effective_at
-        app_row.last_external_interaction_type = ExternalInteractionType.INTERVIEW.value
-        note_text = f"Entrevista concluída: {interview.round_name}"
-        if interview.feedback_received:
-            snippet = interview.feedback_received.strip().splitlines()[0][:240]
-            note_text = f"{note_text} — {snippet}"
-        app_row.last_external_interaction_note = note_text
+    if current_at is not None and effective_utc < current_at:
+        return
+
+    note_text = f"Entrevista concluída: {interview.round_name}"
+    if interview.feedback_received:
+        snippet = interview.feedback_received.strip().splitlines()[0][:240]
+        note_text = f"{note_text} — {snippet}"
+
+    # Persiste alterações ORM pendentes (ex.: `interview_at`) antes do UPDATE atômico
+    db.flush()
+    _apply_monotonic_external_interaction_summary(
+        db,
+        application_id=app_row.id,
+        user_id=user.id,
+        interaction_at=effective_utc,
+        interaction_type=ExternalInteractionType.INTERVIEW.value,
+        interaction_note=note_text,
+        updated_at=updated_at,
+    )
+    db.expire(app_row)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +351,14 @@ def create_application_interview(
     sync_application_interview_summary(db, app_row, now=now)
     if status_val == InterviewStatus.COMPLETED.value:
         effective = ensure_utc(completed_at) or ensure_utc(payload.scheduled_at) or now
-        _maybe_record_interview_interaction(app_row, interview, effective_at=effective)
+        _maybe_record_interview_interaction(
+            db,
+            user,
+            app_row,
+            interview,
+            effective_at=effective,
+            updated_at=now,
+        )
 
     db.commit()
     db.refresh(interview)
@@ -371,7 +434,14 @@ def update_application_interview(
         previous_status != InterviewStatus.COMPLETED.value or "completed_at" in update_data
     ):
         effective = ensure_utc(interview.completed_at) or ensure_utc(interview.scheduled_at) or now
-        _maybe_record_interview_interaction(app_row, interview, effective_at=effective)
+        _maybe_record_interview_interaction(
+            db,
+            user,
+            app_row,
+            interview,
+            effective_at=effective,
+            updated_at=now,
+        )
 
     db.commit()
     db.refresh(interview)
@@ -683,19 +753,16 @@ def record_external_interaction(
         return None
 
     now = datetime.now(UTC)
-    interaction_at = payload.interaction_at or now
+    interaction_at = ensure_utc(payload.interaction_at) or now
     interaction_type = payload.interaction_type.value
     type_label = EXTERNAL_INTERACTION_TYPE_LABELS_PT.get(interaction_type, interaction_type)
-
-    app_row.last_external_interaction_at = interaction_at
-    app_row.last_external_interaction_type = interaction_type
-    app_row.last_external_interaction_note = payload.note
-    app_row.updated_at = now
 
     history_note = f"Interação externa registrada ({type_label})."
     if payload.note:
         history_note = f"{history_note} {payload.note[:380]}"
 
+    # O histórico registra integralmente toda interação informada (inclusive retroativa)
+    # com sua data efetiva real, sem criar transição artificial de etapa.
     db.add(
         ApplicationStatusHistory(
             application_id=app_row.id,
@@ -707,7 +774,24 @@ def record_external_interaction(
             created_at=now,
         )
     )
+    db.flush()
+
+    # Atualiza os 3 campos de resumo de forma atômica e monotônica somente se
+    # não houver interação registrada ou se `interaction_at >= atual` no banco.
+    current_at = ensure_utc(app_row.last_external_interaction_at)
+    if current_at is None or interaction_at >= current_at:
+        _apply_monotonic_external_interaction_summary(
+            db,
+            application_id=app_row.id,
+            user_id=user.id,
+            interaction_at=interaction_at,
+            interaction_type=interaction_type,
+            interaction_note=payload.note,
+            updated_at=now,
+        )
+
     db.commit()
+    db.expire(app_row)
     return _load_owned_application_with_children(db, user, application_id)
 
 
