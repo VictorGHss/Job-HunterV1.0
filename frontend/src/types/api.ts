@@ -807,3 +807,320 @@ export interface ApplicationStatusChangePayload {
   next_action?: string | null;
   next_action_due_at?: string | null;
 }
+
+// ---------- Fase 04.1: Confirmação em lote & Materiais de Candidatura ----------
+
+export interface ProfileConfirmBatchPayload {
+  profile_confirmed?: boolean;
+  experience_ids?: string[];
+  education_ids?: string[];
+  skill_ids?: string[];
+  language_ids?: string[];
+  project_ids?: string[];
+}
+
+export interface ProfileConfirmBatchResponse {
+  confirmed_profile: boolean;
+  confirmed_experiences: number;
+  confirmed_educations: number;
+  confirmed_skills: number;
+  confirmed_languages: number;
+  confirmed_projects: number;
+  total_confirmed: number;
+}
+
+export type MaterialTargetLanguage = "pt-BR" | "en";
+export type MaterialBlockProvenance = "confirmed_fact" | "manual_edit" | "user_authored";
+export type MaterialExportFormat = "markdown" | "text";
+export type MaterialVersionOrigin = "generated" | "manual_edit" | "regenerated" | "derived";
+export type MaterialFactEntityType =
+  | "profile"
+  | "experience"
+  | "project"
+  | "education"
+  | "skill"
+  | "language";
+
+export interface ContactInclusionOptions {
+  include_email: boolean;
+  include_phone: boolean;
+  include_location: boolean;
+  include_links: boolean;
+}
+
+export interface ResumeLinkItem {
+  label: string;
+  url: string;
+}
+
+export interface ResumeHeaderSection {
+  full_name: string | null;
+  professional_title: string | null;
+  location_text: string | null;
+  email: string | null;
+  phone: string | null;
+  links: ResumeLinkItem[];
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeSummarySection {
+  text: string;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeTargetAlignmentSection {
+  target_role: string;
+  company_name: string | null;
+  highlighted_requirements: string[];
+  alignment_note: string | null;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeExperienceItem {
+  entity_id: string | null;
+  company: string;
+  role: string;
+  period_label: string | null;
+  description: string | null;
+  technologies: string[];
+  experience_type: string;
+  eligible_as_target_role: boolean;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeProjectItem {
+  entity_id: string | null;
+  name: string;
+  role: string | null;
+  description: string | null;
+  technologies: string[];
+  links: ResumeLinkItem[];
+  verified_results: string | null;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeEducationItem {
+  entity_id: string | null;
+  institution: string;
+  course: string;
+  field_of_study: string | null;
+  education_status: string;
+  status_label: string;
+  current_semester: string | null;
+  period_label: string | null;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeSkillItem {
+  entity_id: string | null;
+  name: string;
+  category: string;
+  proficiency_level: string;
+  proficiency_label: string;
+  notes: string | null;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeLanguageItem {
+  entity_id: string | null;
+  language_name: string;
+  proficiency_level: string;
+  proficiency_label: string;
+  cefr_level: string | null;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeManualNoteItem {
+  id: string;
+  title: string;
+  content: string;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ResumeStructuredContent {
+  schema_version: 1;
+  language: MaterialTargetLanguage;
+  header: ResumeHeaderSection;
+  summary: ResumeSummarySection | null;
+  target_alignment: ResumeTargetAlignmentSection | null;
+  experiences: ResumeExperienceItem[];
+  projects: ResumeProjectItem[];
+  education: ResumeEducationItem[];
+  skills: ResumeSkillItem[];
+  languages: ResumeLanguageItem[];
+  manual_notes: ResumeManualNoteItem[];
+  has_unverified_manual_edits: boolean;
+}
+
+export interface OpportunityContextInfo {
+  opportunity_id: string | null;
+  application_id: string | null;
+  title: string | null;
+  company_name: string | null;
+  professional_area: string | null;
+  seniority_level: string | null;
+  experience_summary: string | null;
+  required_technologies: string[];
+  desirable_technologies: string[];
+  all_technologies: string[];
+  language: string | null;
+}
+
+export interface SelectedFactReference {
+  fact_key: string;
+  entity_type: MaterialFactEntityType;
+  entity_id: string;
+  confirmed_at: string | null;
+  label: string;
+  summary: string;
+  relevance_score: number;
+  matched_requirements: string[];
+  eligible_as_target_role: boolean | null;
+}
+
+export interface UnconfirmedWarningItem {
+  entity_type: MaterialFactEntityType;
+  entity_id: string;
+  verification_status: "pending_validation" | "draft";
+  label: string;
+  summary: string;
+  details: Record<string, unknown>;
+  reason: string;
+  matched_requirements: string[];
+  can_batch_confirm: boolean;
+}
+
+export interface MissingRequirementItem {
+  requirement: string;
+  requirement_kind:
+    | "required_technology"
+    | "desirable_technology"
+    | "general_technology"
+    | "seniority_or_area";
+  note: string;
+  covered_by_unconfirmed: boolean;
+}
+
+export interface ContactPreviewInfo {
+  profile_confirmed: boolean;
+  has_full_name: boolean;
+  has_email: boolean;
+  has_phone: boolean;
+  has_location: boolean;
+  links_count: number;
+  location_label: string | null;
+}
+
+export interface MaterialPreAnalysisResponse {
+  can_generate: boolean;
+  blocking_reasons: string[];
+  target_language: MaterialTargetLanguage;
+  opportunity_context: OpportunityContextInfo;
+  contact_preview: ContactPreviewInfo;
+  used_facts: SelectedFactReference[];
+  unconfirmed_warnings: UnconfirmedWarningItem[];
+  missing_requirements: MissingRequirementItem[];
+  confirmed_counts: Record<string, number>;
+}
+
+export interface MaterialLinkItem {
+  id: string;
+  application_id: string;
+  application_role_title: string | null;
+  application_company_name: string | null;
+  material_id: string;
+  version_id: string;
+  version_number: number;
+  linked_at: string;
+  unlinked_at: string | null;
+  is_active: boolean;
+}
+
+export interface MaterialVersionItem {
+  id: string;
+  material_id: string;
+  version_number: number;
+  origin: MaterialVersionOrigin | string;
+  parent_version_id: string | null;
+  user_instructions: string | null;
+  structured_content: ResumeStructuredContent;
+  source_facts_snapshot: Record<string, unknown>;
+  unconfirmed_warnings: UnconfirmedWarningItem[];
+  missing_requirements: MissingRequirementItem[];
+  rendered_markdown: string;
+  is_approved: boolean;
+  approved_at: string | null;
+  is_linked_to_any_application: boolean;
+  is_mutable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaterialDetailResponse {
+  id: string;
+  opportunity_id: string | null;
+  opportunity_title: string | null;
+  opportunity_company_name: string | null;
+  material_type: string;
+  title: string;
+  target_language: MaterialTargetLanguage | string;
+  latest_version_number: number;
+  has_approved_version: boolean;
+  versions: MaterialVersionItem[];
+  links: MaterialLinkItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaterialSummaryItem {
+  id: string;
+  opportunity_id: string | null;
+  opportunity_title: string | null;
+  opportunity_company_name: string | null;
+  material_type: string;
+  title: string;
+  target_language: string;
+  latest_version_number: number;
+  latest_version_id: string | null;
+  latest_is_approved: boolean;
+  has_approved_version: boolean;
+  active_links_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaterialExportResponse {
+  material_id: string;
+  version_id: string;
+  version_number: number;
+  format: MaterialExportFormat;
+  filename_suggestion: string;
+  content: string;
+  is_approved: boolean;
+}
+
+export interface MaterialCreatePayload {
+  opportunity_id?: string | null;
+  application_id?: string | null;
+  material_type?: "resume";
+  title?: string | null;
+  target_language?: MaterialTargetLanguage;
+  contact_options?: ContactInclusionOptions;
+  user_instructions?: string | null;
+}
+
+export interface MaterialPreAnalyzePayload {
+  opportunity_id?: string | null;
+  application_id?: string | null;
+  target_language?: MaterialTargetLanguage;
+  contact_options?: ContactInclusionOptions;
+}

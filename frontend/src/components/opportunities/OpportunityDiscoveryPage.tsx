@@ -9,6 +9,7 @@ import {
   ExternalLink,
   EyeOff,
   FileCheck2,
+  FileText,
   Filter,
   Loader2,
   MapPin,
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { ApiError, api } from "@/lib/api";
+import { MaterialWorkspaceModal } from "@/components/materials/MaterialWorkspaceModal";
 import type {
   EmploymentType,
   ExternalSourceStatus,
@@ -214,6 +216,11 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   } | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [materialModalOpp, setMaterialModalOpp] = useState<{
+    id: string;
+    title: string;
+    applicationId?: string | null;
+  } | null>(null);
 
   useEffect(() => {
     setSeniorityFilter(
@@ -893,6 +900,25 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                       <Button
                         type="button"
                         size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() =>
+                          setMaterialModalOpp({
+                            id: opp.id,
+                            title: opp.company_name
+                              ? `${opp.title} — ${opp.company_name}`
+                              : opp.title,
+                            applicationId: opp.tracked_application_id || null,
+                          })
+                        }
+                      >
+                        <FileText className="mr-1.5 h-4 w-4 text-primary" />
+                        Gerar currículo
+                      </Button>
+
+                      <Button
+                        type="button"
+                        size="sm"
                         variant={opp.user_state.is_saved ? "default" : "outline"}
                         disabled={busy}
                         onClick={() => handleToggleSave(opp)}
@@ -1156,6 +1182,16 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
             </div>
           </div>
         </div>
+      )}
+
+      {materialModalOpp && (
+        <MaterialWorkspaceModal
+          open={Boolean(materialModalOpp)}
+          onClose={() => setMaterialModalOpp(null)}
+          opportunityId={materialModalOpp.id}
+          applicationId={materialModalOpp.applicationId || null}
+          targetTitle={materialModalOpp.title}
+        />
       )}
     </div>
   );

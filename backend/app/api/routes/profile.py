@@ -15,6 +15,8 @@ from app.schemas.profile import (
     LanguageCreate,
     LanguageResponse,
     LanguageUpdate,
+    ProfileConfirmBatchRequest,
+    ProfileConfirmBatchResponse,
     ProfessionalProfileResponse,
     ProfessionalProfileUpdate,
     ProfessionalProjectCreate,
@@ -28,6 +30,10 @@ from app.schemas.profile import (
     WorkExperienceUpdate,
 )
 from app.services import profile_service
+from app.services.profile_service import (
+    ProfileBatchInvalidStatusError,
+    ProfileBatchNotFoundError,
+)
 
 router = APIRouter(prefix="/profile", tags=["Perfil Profissional"])
 
@@ -69,6 +75,30 @@ def update_my_profile(
 ) -> ProfessionalProfileResponse:
     profile = profile_service.update_profile(db, current_user, payload)
     return ProfessionalProfileResponse.model_validate(profile)
+
+
+@router.post(
+    "/confirm-batch",
+    response_model=ProfileConfirmBatchResponse,
+    summary="Confirma em lote itens pendentes revisados explicitamente pelo usuário",
+)
+def confirm_profile_items_batch(
+    payload: ProfileConfirmBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProfileConfirmBatchResponse:
+    try:
+        return profile_service.confirm_profile_batch(db, current_user, payload)
+    except ProfileBatchNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ProfileBatchInvalidStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
 
 # --- WorkExperience Endpoints ---

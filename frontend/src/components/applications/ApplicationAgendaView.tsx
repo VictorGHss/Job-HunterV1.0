@@ -32,6 +32,7 @@ export type DetailTabKey =
   | "interviews"
   | "assessments"
   | "contacts"
+  | "materials"
   | "followup";
 
 interface ApplicationAgendaViewProps {

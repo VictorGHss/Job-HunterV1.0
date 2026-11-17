@@ -589,3 +589,66 @@ class ProfileSeedImportSummary(BaseModel):
     languages_skipped: int
     projects_created: int
     projects_skipped: int
+
+
+MAX_BATCH_CONFIRM_ITEMS = 150
+
+
+class ProfileConfirmBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_profile: bool = False
+    experience_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+    education_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+    skill_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+    language_ids: list[uuid.UUID] = Field(default_factory=list, max_length=30)
+    project_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+
+    @field_validator(
+        "experience_ids",
+        "education_ids",
+        "skill_ids",
+        "language_ids",
+        "project_ids",
+    )
+    @classmethod
+    def _deduplicate_ids(cls, values: list[uuid.UUID]) -> list[uuid.UUID]:
+        seen: set[uuid.UUID] = set()
+        ordered: list[uuid.UUID] = []
+        for item in values:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
+
+    @model_validator(mode="after")
+    def _validate_batch_bounds(self) -> "ProfileConfirmBatchRequest":
+        total = (
+            (1 if self.confirm_profile else 0)
+            + len(self.experience_ids)
+            + len(self.education_ids)
+            + len(self.skill_ids)
+            + len(self.language_ids)
+            + len(self.project_ids)
+        )
+        if total == 0:
+            raise ValueError(
+                "Selecione explicitamente ao menos um item pendente de validação para confirmar."
+            )
+        if total > MAX_BATCH_CONFIRM_ITEMS:
+            raise ValueError(
+                f"O lote excede o limite máximo permitido de {MAX_BATCH_CONFIRM_ITEMS} itens por requisição."
+            )
+        return self
+
+
+class ProfileConfirmBatchResponse(BaseModel):
+    confirmed_at: datetime
+    profile_confirmed: bool
+    experiences_confirmed: int
+    educations_confirmed: int
+    skills_confirmed: int
+    languages_confirmed: int
+    projects_confirmed: int
+    total_confirmed: int
+    validation_summary: "ProfileValidationSummary"

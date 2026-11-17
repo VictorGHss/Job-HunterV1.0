@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, Uuid, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, utc_now
@@ -116,6 +116,7 @@ EXTERNAL_INTERACTION_TYPE_LABELS_PT: dict[str, str] = {
 class Application(Base, TimestampMixin):
     __tablename__ = "applications"
     __table_args__ = (
+        UniqueConstraint("user_id", "id", name="uq_applications_user_id_id"),
         Index("ix_applications_user_status", "user_id", "status"),
         Index("ix_applications_user_opportunity_status", "user_id", "opportunity_id", "status"),
         Index(
@@ -237,6 +238,12 @@ class Application(Base, TimestampMixin):
         back_populates="application",
         cascade="all, delete-orphan",
         order_by="ApplicationContact.created_at.asc()",
+    )
+    material_links = relationship(
+        "ApplicationMaterialLink",
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="ApplicationMaterialLink.linked_at.desc()",
     )
 
 

@@ -823,7 +823,8 @@ def test_phase032_migration_0009_upgrade_and_downgrade_preserves_existing_data(
     alembic_cfg.set_main_option("sqlalchemy.url", mig_url)
 
     script_dir = ScriptDirectory.from_config(alembic_cfg)
-    assert script_dir.get_heads() == ["0009_followup_interview_logs"]
+    assert len(script_dir.get_heads()) == 1
+    assert script_dir.get_revision("0009_followup_interview_logs") is not None
 
     user_id = uuid.uuid4()
     app_id = uuid.uuid4()

@@ -5,6 +5,8 @@ import { ApiError, api } from "@/lib/api";
 import type {
   ApplicationItem,
   FullProfileBundle,
+  MaterialDetailResponse,
+  MaterialPreAnalysisResponse,
   Opportunity,
   OpportunityListResponse,
   OpportunitySourcePublic,
@@ -1414,6 +1416,441 @@ describe("Job Hunter Frontend - Fase 03.2 Gestão Avançada de Processos Seletiv
       expect(
         screen.getByText(/Retorno por e-mail confirmando próxima etapa\./i)
       ).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Job Hunter Frontend - Fase 04.1 Materiais & Currículo Direcionado Determinístico", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+  });
+
+  function buildSampleMaterial(overrides?: Partial<MaterialDetailResponse>): MaterialDetailResponse {
+    return {
+      id: "mat-41-1",
+      opportunity_id: "opp-1",
+      opportunity_title: "Junior Python Backend Developer",
+      opportunity_company_name: "Orbit Cloud",
+      material_type: "resume",
+      title: "Currículo — Junior Python Backend Developer (Orbit Cloud)",
+      target_language: "pt-BR",
+      latest_version_number: 1,
+      has_approved_version: false,
+      versions: [
+        {
+          id: "ver-41-1",
+          material_id: "mat-41-1",
+          version_number: 1,
+          origin: "generated",
+          parent_version_id: null,
+          user_instructions: null,
+          structured_content: {
+            schema_version: 1,
+            language: "pt-BR",
+            header: {
+              full_name: "Usuário Teste",
+              professional_title: "Desenvolvedor Backend Python",
+              location_text: "Cidade Exemplo, Estado Exemplo, Brasil",
+              email: "usuario@example.com",
+              phone: null,
+              links: [],
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            summary: {
+              text: "Desenvolvedor focado em Python e FastAPI.",
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            target_alignment: {
+              target_role: "Junior Python Backend Developer",
+              company_name: "Orbit Cloud",
+              highlighted_requirements: ["Python", "FastAPI"],
+              alignment_note: "Evidências confirmadas aderentes aos requisitos: Python, FastAPI.",
+              source_fact_keys: [],
+              provenance: "confirmed_fact",
+            },
+            experiences: [
+              {
+                entity_id: "exp-1",
+                company: "Suporte Central",
+                role: "Suporte Técnico",
+                period_label: "01/2023 – 06/2024",
+                description: "Automação de rotinas em Python.",
+                technologies: ["Python"],
+                experience_type: "other",
+                eligible_as_target_role: false,
+                source_fact_keys: ["experience:exp-1"],
+                provenance: "confirmed_fact",
+              },
+            ],
+            projects: [
+              {
+                entity_id: "proj-1",
+                name: "Job Hunter",
+                role: "Desenvolvedor",
+                description: "Sistema determinístico em FastAPI e PostgreSQL.",
+                technologies: ["Python", "FastAPI"],
+                links: [],
+                verified_results: "Cobertura de testes determinísticos.",
+                source_fact_keys: ["project:proj-1"],
+                provenance: "confirmed_fact",
+              },
+            ],
+            education: [
+              {
+                entity_id: "edu-1",
+                institution: "UF Teste",
+                course: "Ciência da Computação",
+                field_of_study: "Computação",
+                education_status: "in_progress",
+                status_label: "Em andamento",
+                current_semester: "5º semestre",
+                period_label: null,
+                source_fact_keys: ["education:edu-1"],
+                provenance: "confirmed_fact",
+              },
+            ],
+            skills: [
+              {
+                entity_id: "sk-1",
+                name: "FastAPI",
+                category: "Backend",
+                proficiency_level: "intermediate",
+                proficiency_label: "Intermediário",
+                notes: null,
+                source_fact_keys: ["skill:sk-1"],
+                provenance: "confirmed_fact",
+              },
+            ],
+            languages: [
+              {
+                entity_id: "lg-1",
+                language_name: "Português",
+                proficiency_level: "native",
+                proficiency_label: "Nativo",
+                cefr_level: null,
+                source_fact_keys: ["language:lg-1"],
+                provenance: "confirmed_fact",
+              },
+            ],
+            manual_notes: [],
+            has_unverified_manual_edits: false,
+          },
+          source_facts_snapshot: { schema_version: 1, facts: {} },
+          unconfirmed_warnings: [],
+          missing_requirements: [],
+          rendered_markdown: "# Usuário Teste\n\n## Resumo Profissional\nDesenvolvedor focado em Python e FastAPI.\n",
+          is_approved: false,
+          approved_at: null,
+          is_linked_to_any_application: false,
+          is_mutable: true,
+          created_at: "2026-11-17T18:00:00Z",
+          updated_at: "2026-11-17T18:00:00Z",
+        },
+      ],
+      links: [],
+      created_at: "2026-11-17T18:00:00Z",
+      updated_at: "2026-11-17T18:00:00Z",
+      ...overrides,
+    };
+  }
+
+  it("permite pré-análise com bloqueio, confirmação em lote seletiva sem pré-seleção, geração, edição, aprovação, exportação e vínculo em 390x844 e 768x1024", async () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-41",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [
+        buildMockOpportunity({
+          tracked_application_id: "app-41-1",
+          tracked_application_status: "interested",
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+
+    const blockedPreAnalysis: MaterialPreAnalysisResponse = {
+      can_generate: false,
+      blocking_reasons: [
+        "Nenhum bloco substantivo confirmado foi encontrado no seu perfil.",
+      ],
+      target_language: "pt-BR",
+      opportunity_context: {
+        opportunity_id: "opp-1",
+        application_id: "app-41-1",
+        title: "Junior Python Backend Developer",
+        company_name: "Orbit Cloud",
+        professional_area: "backend",
+        seniority_level: "junior",
+        experience_summary: null,
+        required_technologies: ["Python"],
+        desirable_technologies: ["FastAPI"],
+        all_technologies: ["Python", "FastAPI"],
+        language: "pt-BR",
+      },
+      contact_preview: {
+        profile_confirmed: true,
+        has_full_name: true,
+        has_email: true,
+        has_phone: false,
+        has_location: true,
+        links_count: 1,
+        location_label: "Cidade Exemplo, Estado Exemplo, Brasil",
+      },
+      used_facts: [],
+      unconfirmed_warnings: [
+        {
+          entity_type: "skill",
+          entity_id: "sk-pending-1",
+          verification_status: "pending_validation",
+          label: "FastAPI",
+          summary: "Backend · intermediate",
+          details: {},
+          reason: "Habilidade técnica aguardando confirmação.",
+          matched_requirements: ["FastAPI"],
+          can_batch_confirm: true,
+        },
+        {
+          entity_type: "project",
+          entity_id: "proj-draft-1",
+          verification_status: "draft",
+          label: "Projeto Rascunho",
+          summary: "Projeto profissional",
+          details: {},
+          reason: "Projeto em rascunho.",
+          matched_requirements: [],
+          can_batch_confirm: false,
+        },
+      ],
+      missing_requirements: [
+        {
+          requirement: "FastAPI",
+          requirement_kind: "desirable_technology",
+          note: "Existe item não confirmado relacionado.",
+          covered_by_unconfirmed: true,
+        },
+      ],
+      confirmed_counts: {
+        profile: 1,
+        experiences: 0,
+        projects: 0,
+        educations: 0,
+        skills: 0,
+        languages: 1,
+      },
+    };
+
+    const unblockedPreAnalysis: MaterialPreAnalysisResponse = {
+      ...blockedPreAnalysis,
+      can_generate: true,
+      blocking_reasons: [],
+      unconfirmed_warnings: [blockedPreAnalysis.unconfirmed_warnings[1]],
+      missing_requirements: [],
+      confirmed_counts: {
+        ...blockedPreAnalysis.confirmed_counts,
+        skills: 1,
+      },
+    };
+
+    const preSpy = vi
+      .spyOn(api.materials, "preAnalyze")
+      .mockResolvedValueOnce(blockedPreAnalysis)
+      .mockResolvedValue(unblockedPreAnalysis);
+
+    const confirmBatchSpy = vi
+      .spyOn(api, "profileConfirmBatch")
+      .mockResolvedValue({
+        confirmed_profile: false,
+        confirmed_experiences: 0,
+        confirmed_educations: 0,
+        confirmed_skills: 1,
+        confirmed_languages: 0,
+        confirmed_projects: 0,
+        total_confirmed: 1,
+      });
+
+    const initialMat = buildSampleMaterial();
+    const editedMat = buildSampleMaterial({
+      versions: [
+        {
+          ...initialMat.versions[0],
+          origin: "manual_edit",
+          structured_content: {
+            ...initialMat.versions[0].structured_content,
+            summary: {
+              text: "Resumo revisado para Orbit Cloud.",
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "manual_edit",
+            },
+            has_unverified_manual_edits: true,
+          },
+          rendered_markdown: "# Usuário Teste\n\n## Resumo Profissional\nResumo revisado para Orbit Cloud.\n",
+        },
+      ],
+    });
+    const approvedMat = buildSampleMaterial({
+      has_approved_version: true,
+      versions: [
+        {
+          ...editedMat.versions[0],
+          is_approved: true,
+          approved_at: "2026-11-17T18:10:00Z",
+          is_mutable: false,
+        },
+      ],
+    });
+    const linkedMat = buildSampleMaterial({
+      has_approved_version: true,
+      versions: approvedMat.versions,
+      links: [
+        {
+          id: "lnk-1",
+          application_id: "app-41-1",
+          application_role_title: "Junior Python Backend Developer",
+          application_company_name: "Orbit Cloud",
+          material_id: "mat-41-1",
+          version_id: "ver-41-1",
+          version_number: 1,
+          linked_at: "2026-11-17T18:15:00Z",
+          unlinked_at: null,
+          is_active: true,
+        },
+      ],
+    });
+
+    vi.spyOn(api.materials, "create").mockResolvedValue(initialMat);
+    const updateVerSpy = vi
+      .spyOn(api.materials, "updateVersion")
+      .mockResolvedValue(editedMat);
+    const approveSpy = vi
+      .spyOn(api.materials, "approveVersion")
+      .mockResolvedValue(approvedMat);
+    const exportSpy = vi
+      .spyOn(api.materials, "exportVersion")
+      .mockResolvedValue({
+        material_id: "mat-41-1",
+        version_id: "ver-41-1",
+        version_number: 1,
+        format: "markdown",
+        filename_suggestion: "curriculo-v1.md",
+        content: editedMat.versions[0].rendered_markdown,
+        is_approved: true,
+      });
+    const linkSpy = vi
+      .spyOn(api.materials, "link")
+      .mockResolvedValue(linkedMat);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerar currículo/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+
+    // 1. Verifica bloqueio inicial e checkbox SEM pré-seleção
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Geração bloqueada por integridade factual/i)
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: /Gerar Currículo Direcionado/i })
+    ).toBeDisabled();
+    const fastApiCheckbox = screen.getByRole("checkbox", { name: /FastAPI/i });
+    expect(fastApiCheckbox).not.toBeChecked();
+    expect(
+      screen.getByRole("button", { name: /Confirmar selecionados \(0\)/i })
+    ).toBeDisabled();
+
+    // 2. Seleciona explicitamente FastAPI pendente e confirma em lote
+    fireEvent.click(fastApiCheckbox);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Confirmar selecionados \(1\)/i })
+    );
+    await waitFor(() => {
+      expect(confirmBatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ skill_ids: ["sk-pending-1"] })
+      );
+      expect(preSpy).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByRole("button", { name: /Gerar Currículo Direcionado/i })
+      ).not.toBeDisabled();
+    });
+
+    // 3. Muda viewport para tablet 768x1024, gera currículo e verifica separação Experiência vs Projeto + Educação Em andamento
+    window.innerWidth = 768;
+    window.innerHeight = 1024;
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerar Currículo Direcionado/i })
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/Experiência Profissional \(1\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/Projetos \(1\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/UF Teste · Em andamento/i)).toBeInTheDocument();
+    });
+
+    // 4. Edita resumo e salva rascunho -> exibe aviso de alteração manual antes de aprovar
+    const summaryTextarea = screen.getByDisplayValue(
+      "Desenvolvedor focado em Python e FastAPI."
+    );
+    fireEvent.change(summaryTextarea, {
+      target: { value: "Resumo revisado para Orbit Cloud." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Salvar rascunho/i }));
+    await waitFor(() => {
+      expect(updateVerSpy).toHaveBeenCalled();
+      expect(
+        screen.getByText(/Este rascunho contém alterações manuais/i)
+      ).toBeInTheDocument();
+    });
+
+    // 5. Aprova versão e vincula à candidatura; valida exportação em Markdown
+    fireEvent.click(screen.getByRole("button", { name: /Aprovar versão/i }));
+    await waitFor(() => {
+      expect(approveSpy).toHaveBeenCalledWith("mat-41-1", "ver-41-1");
+      expect(
+        screen.getByRole("button", { name: /Vincular à candidatura/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Vincular à candidatura/i })
+    );
+    await waitFor(() => {
+      expect(linkSpy).toHaveBeenCalledWith("mat-41-1", {
+        application_id: "app-41-1",
+        version_id: "ver-41-1",
+      });
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Pré-visualização & Exportação/i })
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Copiar Markdown/i }));
+    await waitFor(() => {
+      expect(exportSpy).toHaveBeenCalledWith("mat-41-1", "ver-41-1", "markdown");
     });
   });
 });

@@ -3,6 +3,7 @@ import {
   Briefcase,
   CheckCircle2,
   Edit3,
+  FileText,
   FolderGit2,
   GraduationCap,
   Languages,
@@ -23,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input, Label, Textarea } from "@/components/ui/input";
+import { MaterialWorkspaceModal } from "@/components/materials/MaterialWorkspaceModal";
 import { api } from "@/lib/api";
 import { cn, joinCommaSeparated, splitCommaSeparated } from "@/lib/utils";
 import type {
@@ -118,6 +120,7 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
     text: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
 
   const showSuccess = (text: string) => {
     setFeedback({ type: "success", text });
@@ -321,6 +324,15 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
             que já foi revisado por você.
           </p>
         </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setStudioOpen(true)}
+        >
+          <FileText className="mr-1.5 h-4 w-4 text-primary" />
+          Estúdio de Currículo ({bundle.validation_summary.confirmed_count} confirmados)
+        </Button>
       </div>
 
       {/* Feedback Banner */}
@@ -866,6 +878,19 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
             </form>
           </CardContent>
         </Card>
+      )}
+      {studioOpen && (
+        <MaterialWorkspaceModal
+          open={studioOpen}
+          onClose={() => {
+            setStudioOpen(false);
+            void onRefresh();
+          }}
+          targetTitle="Currículo Direcionado Geral (baseado no Perfil)"
+          onMaterialChanged={() => {
+            void onRefresh();
+          }}
+        />
       )}
     </div>
   );
