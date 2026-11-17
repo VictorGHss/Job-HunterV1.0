@@ -2,21 +2,18 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   Archive,
   CalendarClock,
+  CalendarDays,
   CheckCircle2,
   ClipboardCheck,
   Clock,
-  ExternalLink,
   FileCheck2,
-  History,
   Kanban,
   Loader2,
-  MapPin,
+  MessageSquareText,
   Plus,
   RefreshCw,
   Search,
   Send,
-  ShieldAlert,
-  Trash2,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -31,14 +28,22 @@ import {
 import { Input, Label, Textarea } from "@/components/ui/input";
 import { ApiError, api } from "@/lib/api";
 import type {
+  ApplicationAgendaResponse,
   ApplicationCreatePayload,
   ApplicationItem,
   ApplicationKanbanResponse,
   ApplicationStatus,
   EmploymentType,
   SeniorityLevel,
+  StaleApplicationsResponse,
   WorkMode,
 } from "@/types/api";
+import {
+  ApplicationAgendaView,
+  type DetailTabKey,
+} from "./ApplicationAgendaView";
+import { ApplicationDetailModal } from "./ApplicationDetailModal";
+import { ApplicationFollowUpView } from "./ApplicationFollowUpView";
 
 interface ApplicationsPipelinePageProps {
   initialApplicationId?: string | null;
@@ -99,31 +104,6 @@ function formatDateTimePtBr(iso: string | null | undefined): string {
   }
 }
 
-function formatHistoryDateTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString("pt-BR", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function toInputDateValue(iso: string | null | undefined): string {
-  if (!iso) return "";
-  try {
-    const dt = new Date(iso);
-    if (Number.isNaN(dt.getTime())) return "";
-    return dt.toISOString().slice(0, 10);
-  } catch {
-    return "";
-  }
-}
-
 function fromInputDateValue(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -144,6 +124,9 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
   onClearInitialApplication,
   onNavigateProfile,
 }) => {
+  const [atsView, setAtsView] = useState<"pipeline" | "agenda" | "followup">(
+    "pipeline"
+  );
   const [kanban, setKanban] = useState<ApplicationKanbanResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -153,23 +136,26 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
   const [showClosedSection, setShowClosedSection] = useState(true);
   const [mobileStage, setMobileStage] = useState<ApplicationStatus>("interested");
 
-  const [selectedApp, setSelectedApp] = useState<ApplicationItem | null>(null);
-  const [detailSaving, setDetailSaving] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [confirmHistoryDeleteId, setConfirmHistoryDeleteId] = useState<string | null>(null);
+  // Estados da Agenda unificada (Fase 03.2)
+  const [agendaData, setAgendaData] = useState<ApplicationAgendaResponse | null>(
+    null
+  );
+  const [agendaLoading, setAgendaLoading] = useState(false);
+  const [agendaError, setAgendaError] = useState<string | null>(null);
+  const [agendaDays, setAgendaDays] = useState(30);
+  const [agendaIncludeOverdue, setAgendaIncludeOverdue] = useState(true);
 
-  // Campos editáveis no painel de detalhes
-  const [editNextAction, setEditNextAction] = useState("");
-  const [editNextDue, setEditNextDue] = useState("");
-  const [editAppliedAt, setEditAppliedAt] = useState("");
-  const [editInterviewAt, setEditInterviewAt] = useState("");
-  const [editAssessmentDue, setEditAssessmentDue] = useState("");
-  const [editExpectedReturn, setEditExpectedReturn] = useState("");
-  const [editSummary, setEditSummary] = useState("");
-  const [editNotes, setEditNotes] = useState("");
-  const [moveTargetStatus, setMoveTargetStatus] =
-    useState<ApplicationStatus>("interested");
-  const [moveNote, setMoveNote] = useState("");
+  // Estados de Acompanhamento / Estagnação (Fase 03.2)
+  const [staleData, setStaleData] = useState<StaleApplicationsResponse | null>(
+    null
+  );
+  const [staleLoading, setStaleLoading] = useState(false);
+  const [staleError, setStaleError] = useState<string | null>(null);
+  const [staleDays, setStaleDays] = useState(7);
+
+  const [selectedApp, setSelectedApp] = useState<ApplicationItem | null>(null);
+  const [selectedDetailTab, setSelectedDetailTab] =
+    useState<DetailTabKey>("general");
 
   // Modal de criação manual
   const [manualOpen, setManualOpen] = useState(false);
@@ -215,28 +201,82 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
     loadKanban();
   }, [loadKanban]);
 
-  const hydrateDetailEditor = useCallback((item: ApplicationItem) => {
-    setSelectedApp(item);
-    setEditNextAction(item.next_action || "");
-    setEditNextDue(toInputDateValue(item.next_action_due_at));
-    setEditAppliedAt(toInputDateValue(item.applied_at));
-    setEditInterviewAt(toInputDateValue(item.interview_at));
-    setEditAssessmentDue(toInputDateValue(item.assessment_deadline_at));
-    setEditExpectedReturn(toInputDateValue(item.expected_response_at));
-    setEditSummary(item.personal_summary || "");
-    setEditNotes(item.notes || "");
-    setMoveTargetStatus(item.status);
-    setMoveNote("");
-    setDetailError(null);
-    setConfirmHistoryDeleteId(null);
-  }, []);
+  const loadAgenda = useCallback(async () => {
+    setAgendaLoading(true);
+    setAgendaError(null);
+    try {
+      const res = await api.applications.agenda(agendaDays, agendaIncludeOverdue);
+      setAgendaData(res);
+    } catch (err) {
+      setAgendaError(
+        err instanceof ApiError
+          ? err.message
+          : "Não foi possível carregar a agenda de candidaturas."
+      );
+    } finally {
+      setAgendaLoading(false);
+    }
+  }, [agendaDays, agendaIncludeOverdue]);
+
+  const loadStale = useCallback(async () => {
+    setStaleLoading(true);
+    setStaleError(null);
+    try {
+      const res = await api.applications.stale(staleDays);
+      setStaleData(res);
+    } catch (err) {
+      setStaleError(
+        err instanceof ApiError
+          ? err.message
+          : "Não foi possível analisar processos sem interação registrada."
+      );
+    } finally {
+      setStaleLoading(false);
+    }
+  }, [staleDays]);
+
+  useEffect(() => {
+    if (atsView === "agenda") {
+      loadAgenda();
+    }
+  }, [atsView, loadAgenda]);
+
+  useEffect(() => {
+    if (atsView === "followup") {
+      loadStale();
+    }
+  }, [atsView, loadStale]);
+
+  const hydrateDetailEditor = useCallback(
+    (item: ApplicationItem, tab: DetailTabKey = "general") => {
+      setSelectedDetailTab(tab);
+      setSelectedApp(item);
+    },
+    []
+  );
+
+  const openApplicationById = useCallback(
+    async (applicationId: string, tab: DetailTabKey = "general") => {
+      try {
+        const item = await api.applications.get(applicationId);
+        hydrateDetailEditor(item, tab);
+      } catch (err) {
+        setErrorMessage(
+          err instanceof ApiError
+            ? err.message
+            : "Não foi possível abrir os detalhes da candidatura."
+        );
+      }
+    },
+    [hydrateDetailEditor]
+  );
 
   useEffect(() => {
     if (!initialApplicationId) return;
     api.applications
       .get(initialApplicationId)
       .then((item) => {
-        hydrateDetailEditor(item);
+        hydrateDetailEditor(item, "general");
       })
       .catch(() => {
         /* Ignora se o usuário fechou ou excluiu antes de abrir */
@@ -313,64 +353,25 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
     }
   }
 
-  async function handleSaveDetails(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selectedApp) return;
-    setDetailSaving(true);
-    setDetailError(null);
-    try {
-      let updated = await api.applications.update(selectedApp.id, {
-        next_action: editNextAction.trim() || null,
-        next_action_due_at: fromInputDateValue(editNextDue),
-        applied_at: fromInputDateValue(editAppliedAt),
-        interview_at: fromInputDateValue(editInterviewAt),
-        assessment_deadline_at: fromInputDateValue(editAssessmentDue),
-        expected_response_at: fromInputDateValue(editExpectedReturn),
-        personal_summary: editSummary.trim() || null,
-        notes: editNotes.trim() || null,
-      });
-      if (moveTargetStatus !== selectedApp.status || moveNote.trim()) {
-        updated = await api.applications.changeStatus(selectedApp.id, {
-          status: moveTargetStatus,
-          note: moveNote.trim() || null,
-        });
-      }
-      hydrateDetailEditor(updated);
-      await loadKanban();
-    } catch (err) {
-      setDetailError(
-        err instanceof ApiError
-          ? err.message
-          : "Não foi possível salvar as alterações da candidatura."
-      );
-    } finally {
-      setDetailSaving(false);
+  const refreshAllViews = useCallback(async () => {
+    const tasks: Array<Promise<unknown>> = [loadKanban()];
+    if (atsView === "agenda") {
+      tasks.push(loadAgenda());
     }
+    if (atsView === "followup") {
+      tasks.push(loadStale());
+    }
+    await Promise.all(tasks);
+  }, [atsView, loadAgenda, loadKanban, loadStale]);
+
+  async function handleRefreshApplicationFromModal(updated: ApplicationItem) {
+    setSelectedApp(updated);
+    await refreshAllViews();
   }
 
-  async function handleDeleteSelected(forceHistoryDeletion = false) {
-    if (!selectedApp) return;
-    setDetailSaving(true);
-    setDetailError(null);
-    try {
-      await api.applications.remove(selectedApp.id, forceHistoryDeletion);
-      setSelectedApp(null);
-      setConfirmHistoryDeleteId(null);
-      await loadKanban();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409 && !forceHistoryDeletion) {
-        setConfirmHistoryDeleteId(selectedApp.id);
-        setDetailError(err.message);
-      } else {
-        setDetailError(
-          err instanceof ApiError
-            ? err.message
-            : "Não foi possível excluir a candidatura."
-        );
-      }
-    } finally {
-      setDetailSaving(false);
-    }
+  async function handleDeletedApplicationFromModal() {
+    setSelectedApp(null);
+    await refreshAllViews();
   }
 
   async function handleCreateManual(e: React.FormEvent) {
@@ -445,8 +446,16 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
             type="button"
             variant="outline"
             size="sm"
-            onClick={loadKanban}
-            disabled={loading}
+            onClick={() => {
+              if (atsView === "agenda") {
+                loadAgenda();
+              } else if (atsView === "followup") {
+                loadStale();
+              } else {
+                loadKanban();
+              }
+            }}
+            disabled={loading || agendaLoading || staleLoading}
           >
             <RefreshCw className="mr-1.5 h-4 w-4" />
             Atualizar
@@ -464,6 +473,72 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
           </Button>
         </div>
       </div>
+
+      {/* Navegação interna das três visões principais do ATS */}
+      <div
+        className="flex flex-wrap gap-2 border-b border-border pb-3"
+        role="tablist"
+        aria-label="Visões do ATS"
+      >
+        <Button
+          type="button"
+          size="sm"
+          role="tab"
+          aria-selected={atsView === "pipeline"}
+          variant={atsView === "pipeline" ? "default" : "outline"}
+          onClick={() => setAtsView("pipeline")}
+        >
+          <Kanban className="mr-1.5 h-4 w-4" />
+          Pipeline
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          role="tab"
+          aria-selected={atsView === "agenda"}
+          variant={atsView === "agenda" ? "default" : "outline"}
+          onClick={() => setAtsView("agenda")}
+        >
+          <CalendarDays className="mr-1.5 h-4 w-4" />
+          Agenda
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          role="tab"
+          aria-selected={atsView === "followup"}
+          variant={atsView === "followup" ? "default" : "outline"}
+          onClick={() => setAtsView("followup")}
+        >
+          <MessageSquareText className="mr-1.5 h-4 w-4" />
+          Acompanhamento
+        </Button>
+      </div>
+
+      {atsView === "agenda" ? (
+        <ApplicationAgendaView
+          agenda={agendaData}
+          loading={agendaLoading}
+          error={agendaError}
+          days={agendaDays}
+          includeOverdue={agendaIncludeOverdue}
+          onChangeDays={(d) => setAgendaDays(d)}
+          onToggleOverdue={(inc) => setAgendaIncludeOverdue(inc)}
+          onReload={loadAgenda}
+          onOpenApplication={openApplicationById}
+        />
+      ) : atsView === "followup" ? (
+        <ApplicationFollowUpView
+          staleData={staleData}
+          loading={staleLoading}
+          error={staleError}
+          staleDays={staleDays}
+          onChangeStaleDays={(d) => setStaleDays(d)}
+          onReload={loadStale}
+          onOpenApplication={openApplicationById}
+        />
+      ) : (
+        <>
 
       {/* Indicadores reais do usuário */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -896,6 +971,8 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
           )}
         </>
       )}
+        </>
+      )}
 
       {/* Aviso compacto de governança do perfil */}
       {onNavigateProfile && (
@@ -1126,299 +1203,19 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
         </div>
       )}
 
-      {/* Modal / Painel de Detalhes da Candidatura */}
+      {/* Modal / Painel de Detalhes da Candidatura (Fases 03.1 + 03.2) */}
       {selectedApp && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="application-detail-title"
-        >
-          <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xl space-y-5">
-            <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={statusBadgeVariant(selectedApp.status)}>
-                    {selectedApp.status_label}
-                  </Badge>
-                  {selectedApp.source_name && (
-                    <Badge variant="outline">{selectedApp.source_name}</Badge>
-                  )}
-                  <Badge variant="outline">
-                    {SENIORITY_LABELS[selectedApp.seniority_level] ||
-                      selectedApp.seniority_level}
-                  </Badge>
-                  <Badge variant="outline">
-                    {EMPLOYMENT_LABELS[selectedApp.employment_type] ||
-                      selectedApp.employment_type}
-                  </Badge>
-                  <Badge variant="outline">
-                    {WORK_MODE_LABELS[selectedApp.work_mode] ||
-                      selectedApp.work_mode}
-                  </Badge>
-                </div>
-                <h2 id="application-detail-title" className="text-xl font-bold">
-                  {selectedApp.role_title}
-                </h2>
-                <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span>{selectedApp.company_name || "Empresa não informada"}</span>
-                  {selectedApp.location_text && (
-                    <>
-                      <span>•</span>
-                      <span className="inline-flex items-center gap-1">
-                        <MapPin className="h-3 w-3" />
-                        {selectedApp.location_text}
-                      </span>
-                    </>
-                  )}
-                  <span>•</span>
-                  <span>Criada: {formatDateTimePtBr(selectedApp.created_at)}</span>
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => setSelectedApp(null)}
-                aria-label="Fechar detalhes da candidatura"
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-
-            {/* Links preservados */}
-            {(selectedApp.source_url || selectedApp.application_url) && (
-              <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-muted/30 px-3.5 py-2.5 text-xs">
-                {selectedApp.source_url && (
-                  <a
-                    href={selectedApp.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-primary hover:underline"
-                  >
-                    Publicação original
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
-                {selectedApp.application_url && (
-                  <a
-                    href={selectedApp.application_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-primary hover:underline"
-                  >
-                    Link de candidatura
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
-              </div>
-            )}
-
-            <form onSubmit={handleSaveDetails} className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1">
-                  <Label htmlFor="detail-status">Etapa atual</Label>
-                  <select
-                    id="detail-status"
-                    value={moveTargetStatus}
-                    onChange={(e) =>
-                      setMoveTargetStatus(e.target.value as ApplicationStatus)
-                    }
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  >
-                    {ALL_STATUS_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-move-note">
-                    Nota da movimentação (opcional)
-                  </Label>
-                  <Input
-                    id="detail-move-note"
-                    value={moveNote}
-                    onChange={(e) => setMoveNote(e.target.value)}
-                    placeholder="Ex.: Entrevista agendada para sexta"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-applied-at">Data de candidatura</Label>
-                  <Input
-                    id="detail-applied-at"
-                    type="date"
-                    value={editAppliedAt}
-                    onChange={(e) => setEditAppliedAt(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-interview-at">Data de entrevista</Label>
-                  <Input
-                    id="detail-interview-at"
-                    type="date"
-                    value={editInterviewAt}
-                    onChange={(e) => setEditInterviewAt(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-assessment-due">Prazo de teste técnico</Label>
-                  <Input
-                    id="detail-assessment-due"
-                    type="date"
-                    value={editAssessmentDue}
-                    onChange={(e) => setEditAssessmentDue(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-expected-return">
-                    Data prevista de retorno
-                  </Label>
-                  <Input
-                    id="detail-expected-return"
-                    type="date"
-                    value={editExpectedReturn}
-                    onChange={(e) => setEditExpectedReturn(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-next-action">Próxima ação</Label>
-                  <Input
-                    id="detail-next-action"
-                    value={editNextAction}
-                    onChange={(e) => setEditNextAction(e.target.value)}
-                    placeholder="Ex.: Enviar solução do repositório"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="detail-next-due">Prazo da próxima ação</Label>
-                  <Input
-                    id="detail-next-due"
-                    type="date"
-                    value={editNextDue}
-                    onChange={(e) => setEditNextDue(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1 sm:col-span-2">
-                  <Label htmlFor="detail-summary">Resumo da oportunidade / processo</Label>
-                  <Textarea
-                    id="detail-summary"
-                    rows={3}
-                    value={editSummary}
-                    onChange={(e) => setEditSummary(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1 sm:col-span-2">
-                  <Label htmlFor="detail-notes">Anotações privadas</Label>
-                  <Textarea
-                    id="detail-notes"
-                    rows={3}
-                    value={editNotes}
-                    onChange={(e) => setEditNotes(e.target.value)}
-                    placeholder="Registre feedbacks, pontos técnicos e observações pessoais."
-                  />
-                </div>
-              </div>
-
-              {detailError && (
-                <div className="flex flex-col gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-xs text-destructive">
-                  <div className="flex items-start gap-2">
-                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>{detailError}</span>
-                  </div>
-                  {confirmHistoryDeleteId === selectedApp.id && (
-                    <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmHistoryDeleteId(null)}
-                      >
-                        Manter histórico
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                        disabled={detailSaving}
-                        onClick={() => handleDeleteSelected(true)}
-                      >
-                        Confirmar exclusão definitiva do processo e histórico
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:text-destructive"
-                  disabled={detailSaving}
-                  onClick={() => handleDeleteSelected(false)}
-                >
-                  <Trash2 className="mr-1.5 h-4 w-4" />
-                  Excluir candidatura
-                </Button>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setSelectedApp(null)}
-                  >
-                    Fechar
-                  </Button>
-                  <Button type="submit" disabled={detailSaving}>
-                    {detailSaving ? "Salvando..." : "Salvar alterações"}
-                  </Button>
-                </div>
-              </div>
-            </form>
-
-            {/* Linha do tempo do histórico */}
-            <div className="space-y-2.5 border-t border-border pt-4">
-              <h3 className="flex items-center gap-2 text-sm font-semibold">
-                <History className="h-4 w-4 text-primary" />
-                Histórico de Movimentações ({selectedApp.status_history.length})
-              </h3>
-              <div className="space-y-2">
-                {selectedApp.status_history.map((hist) => (
-                  <div
-                    key={hist.id}
-                    className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs"
-                  >
-                    <div className="space-y-0.5">
-                      <p className="font-medium text-foreground">
-                        {hist.from_status_label
-                          ? `${hist.from_status_label} -> ${hist.to_status_label}`
-                          : `Início em ${hist.to_status_label}`}
-                      </p>
-                      {hist.note && (
-                        <p className="text-muted-foreground">{hist.note}</p>
-                      )}
-                    </div>
-                    <span className="text-[11px] text-muted-foreground">
-                      {formatHistoryDateTime(hist.changed_at)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
+        <ApplicationDetailModal
+          selectedApp={selectedApp}
+          initialTab={selectedDetailTab}
+          allStatusOptions={ALL_STATUS_OPTIONS}
+          workModeLabels={WORK_MODE_LABELS}
+          employmentLabels={EMPLOYMENT_LABELS}
+          seniorityLabels={SENIORITY_LABELS}
+          onClose={() => setSelectedApp(null)}
+          onRefreshApplication={handleRefreshApplicationFromModal}
+          onDeletedApplication={handleDeletedApplicationFromModal}
+        />
       )}
     </div>
   );

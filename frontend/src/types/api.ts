@@ -498,6 +498,185 @@ export interface ApplicationStatusHistoryItem {
   changed_at: string;
 }
 
+export type InterviewFormat = "online" | "in_person" | "phone";
+export type InterviewStatus = "scheduled" | "completed" | "cancelled";
+export type AssessmentStatus =
+  | "pending"
+  | "in_progress"
+  | "submitted"
+  | "feedback_received"
+  | "cancelled";
+export type ExternalInteractionType =
+  | "email"
+  | "phone"
+  | "linkedin"
+  | "interview"
+  | "other";
+
+export interface ApplicationInterviewItem {
+  id: string;
+  application_id: string;
+  round_name: string;
+  interview_format: InterviewFormat | string;
+  interview_format_label: string;
+  scheduled_at: string;
+  previous_scheduled_at: string | null;
+  duration_minutes: number | null;
+  meeting_url: string | null;
+  interviewers: string | null;
+  notes: string | null;
+  feedback_received: string | null;
+  status: InterviewStatus | string;
+  status_label: string;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApplicationInterviewPayload {
+  round_name?: string;
+  interview_format?: InterviewFormat;
+  scheduled_at?: string;
+  duration_minutes?: number | null;
+  meeting_url?: string | null;
+  interviewers?: string | null;
+  notes?: string | null;
+  feedback_received?: string | null;
+  status?: InterviewStatus;
+  completed_at?: string | null;
+}
+
+export interface ApplicationAssessmentItem {
+  id: string;
+  application_id: string;
+  title: string;
+  description: string | null;
+  platform: string | null;
+  instructions_url: string | null;
+  submission_url: string | null;
+  deadline_at: string | null;
+  submitted_at: string | null;
+  status: AssessmentStatus | string;
+  status_label: string;
+  is_overdue: boolean;
+  is_due_soon_24h: boolean;
+  feedback: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApplicationAssessmentPayload {
+  title?: string;
+  description?: string | null;
+  platform?: string | null;
+  instructions_url?: string | null;
+  submission_url?: string | null;
+  deadline_at?: string | null;
+  submitted_at?: string | null;
+  status?: AssessmentStatus;
+  feedback?: string | null;
+  notes?: string | null;
+}
+
+export interface ApplicationContactItem {
+  id: string;
+  application_id: string;
+  name: string;
+  role_title: string | null;
+  email: string | null;
+  linkedin_url: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApplicationContactPayload {
+  name?: string;
+  role_title?: string | null;
+  email?: string | null;
+  linkedin_url?: string | null;
+  notes?: string | null;
+}
+
+export interface ExternalInteractionRecordPayload {
+  interaction_type: ExternalInteractionType;
+  interaction_at?: string | null;
+  note?: string | null;
+}
+
+export interface AgendaEventItem {
+  id: string;
+  event_type: "interview" | "assessment" | "next_action" | "expected_response";
+  source_kind: "structured" | "legacy";
+  entity_id: string;
+  application_id: string;
+  company_name: string | null;
+  role_title: string;
+  application_status: ApplicationStatus | string;
+  application_status_label: string;
+  title: string;
+  subtitle: string | null;
+  scheduled_at: string;
+  status: string;
+  status_label: string;
+  is_overdue: boolean;
+  is_today: boolean;
+  is_imminent: boolean;
+  urgency: "overdue" | "imminent" | "upcoming";
+  action_url: string | null;
+}
+
+export interface AgendaSummary {
+  total_count: number;
+  overdue_count: number;
+  imminent_24h_count: number;
+  today_count: number;
+  interviews_count: number;
+  assessments_count: number;
+  actions_count: number;
+  reference_now_utc: string;
+}
+
+export interface ApplicationAgendaResponse {
+  days: number;
+  summary: AgendaSummary;
+  events: AgendaEventItem[];
+}
+
+export interface StaleApplicationItem {
+  application_id: string;
+  company_name: string | null;
+  role_title: string;
+  status: ApplicationStatus | string;
+  status_label: string;
+  last_external_interaction_at: string | null;
+  reference_timestamp_at: string;
+  reference_kind: "external_interaction" | "completed_interview" | "applied_at";
+  reference_description: string;
+  days_without_external_interaction: number;
+  threshold_days: number;
+  notice: string;
+  recommended_follow_up: string;
+}
+
+export interface StaleApplicationsResponse {
+  stale_days_param: number;
+  total_count: number;
+  items: StaleApplicationItem[];
+}
+
+export interface FollowUpTemplateResponse {
+  application_id: string;
+  subject: string;
+  message: string;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  context_summary: string;
+  used_facts: string[];
+  disclaimer: string;
+}
+
 export interface ApplicationItem {
   id: string;
   opportunity_id: string | null;
@@ -525,9 +704,16 @@ export interface ApplicationItem {
   next_deadline_label: string | null;
   notes: string | null;
   closed_at: string | null;
+  last_external_interaction_at?: string | null;
+  last_external_interaction_type?: ExternalInteractionType | string | null;
+  last_external_interaction_type_label?: string | null;
+  last_external_interaction_note?: string | null;
   created_at: string;
   updated_at: string;
   status_history: ApplicationStatusHistoryItem[];
+  interviews?: ApplicationInterviewItem[];
+  assessments?: ApplicationAssessmentItem[];
+  contacts?: ApplicationContactItem[];
 }
 
 export interface ApplicationListResponse {

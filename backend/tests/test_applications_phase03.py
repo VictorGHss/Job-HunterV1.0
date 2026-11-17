@@ -846,7 +846,7 @@ def test_phase0311_migration_0008_upgrade_and_downgrade_preserves_data(tmp_path)
     alembic_cfg.set_main_option("sqlalchemy.url", mig_url)
 
     script_dir = ScriptDirectory.from_config(alembic_cfg)
-    assert script_dir.get_heads() == ["0008_active_app_uniq"]
+    assert len(script_dir.get_heads()) == 1
 
     user_id = uuid.uuid4()
     app_id = uuid.uuid4()
@@ -886,7 +886,7 @@ def test_phase0311_migration_0008_upgrade_and_downgrade_preserves_data(tmp_path)
     # Upgrade incremental para 0008 preserva os registros e adiciona apenas o índice único parcial
     with engine.begin() as conn:
         alembic_cfg.attributes["connection"] = conn
-        command.upgrade(alembic_cfg, "head")
+        command.upgrade(alembic_cfg, "0008_active_app_uniq")
 
     idx_after_up = {idx["name"]: idx for idx in inspect(engine).get_indexes("applications")}
     assert "uq_active_application_per_user_opp" in idx_after_up

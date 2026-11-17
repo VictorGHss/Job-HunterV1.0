@@ -1,6 +1,13 @@
 import type {
+  ApplicationAgendaResponse,
+  ApplicationAssessmentItem,
+  ApplicationAssessmentPayload,
+  ApplicationContactItem,
+  ApplicationContactPayload,
   ApplicationCreatePayload,
   ApplicationIndicators,
+  ApplicationInterviewItem,
+  ApplicationInterviewPayload,
   ApplicationItem,
   ApplicationKanbanResponse,
   ApplicationListResponse,
@@ -10,6 +17,8 @@ import type {
   AuthSessionResponse,
   Education,
   EducationPayload,
+  ExternalInteractionRecordPayload,
+  FollowUpTemplateResponse,
   FullProfileBundle,
   Language,
   LanguagePayload,
@@ -26,6 +35,7 @@ import type {
   ProfessionalProjectPayload,
   Skill,
   SkillPayload,
+  StaleApplicationsResponse,
   WorkExperience,
   WorkExperiencePayload,
 } from "@/types/api";
@@ -374,6 +384,153 @@ export const api = {
       return request<void>(`/applications/${id}${suffix}`, {
         method: "DELETE",
       });
+    },
+    agenda(days = 30, includeOverdue = true): Promise<ApplicationAgendaResponse> {
+      return request<ApplicationAgendaResponse>(
+        `/applications/agenda?days=${days}&include_overdue=${includeOverdue}`
+      );
+    },
+    stale(staleDays = 7): Promise<StaleApplicationsResponse> {
+      return request<StaleApplicationsResponse>(
+        `/applications/stale?stale_days=${staleDays}`
+      );
+    },
+    followUpTemplate(applicationId: string): Promise<FollowUpTemplateResponse> {
+      return request<FollowUpTemplateResponse>(
+        `/applications/${applicationId}/follow-up-template`
+      );
+    },
+    recordExternalInteraction(
+      applicationId: string,
+      payload: ExternalInteractionRecordPayload
+    ): Promise<ApplicationItem> {
+      return request<ApplicationItem>(
+        `/applications/${applicationId}/external-interaction`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    // Entrevistas
+    listInterviews(applicationId: string): Promise<ApplicationInterviewItem[]> {
+      return request<ApplicationInterviewItem[]>(
+        `/applications/${applicationId}/interviews`
+      );
+    },
+    createInterview(
+      applicationId: string,
+      payload: ApplicationInterviewPayload
+    ): Promise<ApplicationInterviewItem> {
+      return request<ApplicationInterviewItem>(
+        `/applications/${applicationId}/interviews`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    updateInterview(
+      applicationId: string,
+      interviewId: string,
+      payload: ApplicationInterviewPayload
+    ): Promise<ApplicationInterviewItem> {
+      return request<ApplicationInterviewItem>(
+        `/applications/${applicationId}/interviews/${interviewId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    deleteInterview(applicationId: string, interviewId: string): Promise<void> {
+      return request<void>(
+        `/applications/${applicationId}/interviews/${interviewId}`,
+        {
+          method: "DELETE",
+        }
+      );
+    },
+    // Testes técnicos
+    listAssessments(applicationId: string): Promise<ApplicationAssessmentItem[]> {
+      return request<ApplicationAssessmentItem[]>(
+        `/applications/${applicationId}/assessments`
+      );
+    },
+    createAssessment(
+      applicationId: string,
+      payload: ApplicationAssessmentPayload
+    ): Promise<ApplicationAssessmentItem> {
+      return request<ApplicationAssessmentItem>(
+        `/applications/${applicationId}/assessments`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    updateAssessment(
+      applicationId: string,
+      assessmentId: string,
+      payload: ApplicationAssessmentPayload
+    ): Promise<ApplicationAssessmentItem> {
+      return request<ApplicationAssessmentItem>(
+        `/applications/${applicationId}/assessments/${assessmentId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    deleteAssessment(
+      applicationId: string,
+      assessmentId: string
+    ): Promise<void> {
+      return request<void>(
+        `/applications/${applicationId}/assessments/${assessmentId}`,
+        {
+          method: "DELETE",
+        }
+      );
+    },
+    // Contatos
+    listContacts(applicationId: string): Promise<ApplicationContactItem[]> {
+      return request<ApplicationContactItem[]>(
+        `/applications/${applicationId}/contacts`
+      );
+    },
+    createContact(
+      applicationId: string,
+      payload: ApplicationContactPayload
+    ): Promise<ApplicationContactItem> {
+      return request<ApplicationContactItem>(
+        `/applications/${applicationId}/contacts`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    updateContact(
+      applicationId: string,
+      contactId: string,
+      payload: ApplicationContactPayload
+    ): Promise<ApplicationContactItem> {
+      return request<ApplicationContactItem>(
+        `/applications/${applicationId}/contacts/${contactId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    deleteContact(applicationId: string, contactId: string): Promise<void> {
+      return request<void>(
+        `/applications/${applicationId}/contacts/${contactId}`,
+        {
+          method: "DELETE",
+        }
+      );
     },
   },
 };

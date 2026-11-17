@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { ApiError, api } from "@/lib/api";
 import type {
+  ApplicationItem,
   FullProfileBundle,
   Opportunity,
   OpportunityListResponse,
@@ -884,6 +885,534 @@ describe("Job Hunter Frontend - Fase 03.1 Pipeline de Candidaturas", () => {
     await waitFor(() => {
       expect(
         screen.getByText(/Histórico de Movimentações \(1\)/i)
+      ).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Job Hunter Frontend - Fase 03.2 Gestão Avançada de Processos Seletivos", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+  });
+
+  function buildBaseKanbanItem(): ApplicationItem {
+    return {
+      id: "app-32-1",
+      opportunity_id: "opp-1",
+      opportunity_source_status: "active",
+      company_name: "Orbit Cloud",
+      role_title: "Backend Python Engineer Junior",
+      personal_summary: "Atuação com FastAPI e PostgreSQL.",
+      source_name: "Remote OK",
+      source_url: "https://remoteok.com/remote-jobs/orbit-32",
+      application_url: "https://apply.example.org/orbit-32",
+      location_text: "Remoto - Brasil",
+      employment_type: "pj" as const,
+      work_mode: "remote" as const,
+      seniority_level: "junior" as const,
+      status: "interview" as const,
+      status_label: "Entrevista",
+      is_closed: false,
+      applied_at: "2026-11-01T12:00:00Z",
+      interview_at: "2026-11-20T18:00:00Z",
+      assessment_deadline_at: null,
+      expected_response_at: null,
+      next_action: "Revisar arquitetura REST",
+      next_action_due_at: null,
+      next_deadline_at: "2026-11-20T18:00:00Z",
+      next_deadline_label: "Entrevista (Entrevista Técnica)",
+      notes: "Processo estratégico.",
+      closed_at: null,
+      last_external_interaction_at: null,
+      last_external_interaction_type: null,
+      last_external_interaction_type_label: null,
+      last_external_interaction_note: null,
+      created_at: "2026-11-01T10:00:00Z",
+      updated_at: "2026-11-10T10:00:00Z",
+      status_history: [
+        {
+          id: "hist-32-1",
+          from_status: null,
+          from_status_label: null,
+          to_status: "interview",
+          to_status_label: "Entrevista",
+          note: "Avançou para entrevista.",
+          changed_at: "2026-11-10T10:00:00Z",
+        },
+      ],
+      interviews: [
+        {
+          id: "iv-32-1",
+          application_id: "app-32-1",
+          round_name: "Triagem RH",
+          interview_format: "online",
+          interview_format_label: "Online / Vídeo",
+          scheduled_at: "2026-11-20T18:00:00Z",
+          previous_scheduled_at: null,
+          duration_minutes: 45,
+          meeting_url: "https://meet.google.com/aaa-bbbb-ccc",
+          interviewers: "Mariana",
+          notes: "Conversa sobre trajetória.",
+          feedback_received: null,
+          status: "scheduled",
+          status_label: "Agendada",
+          completed_at: null,
+          created_at: "2026-11-10T10:00:00Z",
+          updated_at: "2026-11-10T10:00:00Z",
+        },
+      ],
+      assessments: [],
+      contacts: [],
+    };
+  }
+
+  function mockKanbanResponse(item: ReturnType<typeof buildBaseKanbanItem>) {
+    return {
+      columns: [
+        { status: "interested" as const, label: "Interesse", is_closed: false, count: 0, items: [] },
+        { status: "preparing" as const, label: "Preparação", is_closed: false, count: 0, items: [] },
+        { status: "applied" as const, label: "Candidatura enviada", is_closed: false, count: 0, items: [] },
+        { status: "assessment" as const, label: "Teste técnico", is_closed: false, count: 0, items: [] },
+        { status: "interview" as const, label: "Entrevista", is_closed: false, count: 1, items: [item] },
+        { status: "offer" as const, label: "Proposta", is_closed: false, count: 0, items: [] },
+      ],
+      closed_columns: [],
+      closed_items: [],
+      indicators: {
+        total_count: 1,
+        active_count: 1,
+        applied_count: 1,
+        assessment_count: 0,
+        interview_count: 1,
+        offer_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        withdrawn_count: 0,
+        closed_count: 0,
+        status_counts: { interview: 1 },
+      },
+      labels: { interview: "Entrevista" },
+    };
+  }
+
+  it("exibe Agenda responsiva em 390x844 com retry de erro, estado vazio e Acompanhamento com cópia de follow-up", async () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+    window.dispatchEvent(new Event("resize"));
+
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: writeTextMock },
+      configurable: true,
+    });
+
+    const baseItem = buildBaseKanbanItem();
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 10,
+      total_pages: 1,
+    });
+    vi.spyOn(api.applications, "kanban").mockResolvedValue(
+      mockKanbanResponse(baseItem)
+    );
+
+    const imminentIso = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    const expectedLocalTime = new Date(imminentIso).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    let agendaCall = 0;
+    vi.spyOn(api.applications, "agenda").mockImplementation(async () => {
+      agendaCall += 1;
+      if (agendaCall === 1) {
+        throw new ApiError("Erro temporário na agenda", 500);
+      }
+      if (agendaCall === 2) {
+        return {
+          days: 30,
+          summary: {
+            total_count: 2,
+            overdue_count: 1,
+            imminent_24h_count: 1,
+            today_count: 1,
+            interviews_count: 1,
+            assessments_count: 1,
+            actions_count: 0,
+            reference_now_utc: new Date().toISOString(),
+          },
+          events: [
+            {
+              id: "assessment:a-overdue",
+              event_type: "assessment",
+              source_kind: "structured",
+              entity_id: "a-overdue",
+              application_id: "app-32-1",
+              company_name: "Orbit Cloud",
+              role_title: "Backend Python Engineer Junior",
+              application_status: "interview",
+              application_status_label: "Entrevista",
+              title: "Teste técnico: API Python",
+              subtitle: "Plataforma: GitHub",
+              scheduled_at: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+              status: "pending",
+              status_label: "Pendente",
+              is_overdue: true,
+              is_today: false,
+              is_imminent: false,
+              urgency: "overdue",
+              action_url: "https://github.com/orbit/challenge",
+            },
+            {
+              id: "interview:iv-32-1",
+              event_type: "interview",
+              source_kind: "structured",
+              entity_id: "iv-32-1",
+              application_id: "app-32-1",
+              company_name: "Orbit Cloud",
+              role_title: "Backend Python Engineer Junior",
+              application_status: "interview",
+              application_status_label: "Entrevista",
+              title: "Entrevista: Triagem RH",
+              subtitle: "Online / Vídeo • Mariana",
+              scheduled_at: imminentIso,
+              status: "scheduled",
+              status_label: "Agendada",
+              is_overdue: false,
+              is_today: true,
+              is_imminent: true,
+              urgency: "imminent",
+              action_url: "https://meet.google.com/aaa-bbbb-ccc",
+            },
+          ],
+        };
+      }
+      return {
+        days: 7,
+        summary: {
+          total_count: 0,
+          overdue_count: 0,
+          imminent_24h_count: 0,
+          today_count: 0,
+          interviews_count: 0,
+          assessments_count: 0,
+          actions_count: 0,
+          reference_now_utc: new Date().toISOString(),
+        },
+        events: [],
+      };
+    });
+
+    vi.spyOn(api.applications, "stale").mockResolvedValue({
+      stale_days_param: 7,
+      total_count: 1,
+      items: [
+        {
+          application_id: "app-32-1",
+          company_name: "Orbit Cloud",
+          role_title: "Backend Python Engineer Junior",
+          status: "applied",
+          status_label: "Candidatura enviada",
+          last_external_interaction_at: null,
+          reference_timestamp_at: "2026-11-01T12:00:00Z",
+          reference_kind: "applied_at",
+          reference_description: "Data de envio da candidatura",
+          days_without_external_interaction: 15,
+          threshold_days: 10,
+          notice: "Sem interação externa registrada há 15 dia(s).",
+          recommended_follow_up:
+            "Enviar mensagem cordial de acompanhamento da candidatura.",
+        },
+      ],
+    });
+
+    vi.spyOn(api.applications, "followUpTemplate").mockResolvedValue({
+      application_id: "app-32-1",
+      subject: "Acompanhamento — Processo seletivo Backend Python Engineer Junior",
+      message:
+        "Olá, Mariana,\n\nGostaria de acompanhar minha candidatura na Orbit Cloud.",
+      recipient_name: "Mariana",
+      recipient_email: "mariana@orbit.example.com",
+      context_summary: "Baseado no envio da candidatura.",
+      used_facts: ["Cargo: Backend Python Engineer Junior"],
+      disclaimer: "Mensagem determinística gerada com base nos registros salvos.",
+    });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /^Candidaturas$/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Candidaturas$/i })[0]
+    );
+
+    // Muda para aba Agenda: 1a chamada falha -> Retry carrega compromissos com hora local
+    fireEvent.click(screen.getByRole("tab", { name: /^Agenda$/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Erro temporário na agenda/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Tentar novamente/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Entrevista: Triagem RH/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Teste técnico: API Python/i)).toBeInTheDocument();
+    expect(screen.getByText(expectedLocalTime)).toBeInTheDocument();
+    expect(screen.getByTestId("agenda-chronological-list")).toBeInTheDocument();
+
+    // Testa estado vazio ao filtrar para 7 dias (3a chamada mockada vazia)
+    fireEvent.click(screen.getByRole("button", { name: /^7 dias$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Nenhum compromisso ou prazo encontrado nesta janela/i)
+      ).toBeInTheDocument();
+    });
+
+    // Muda para Acompanhamento e copia follow-up determinístico
+    fireEvent.click(screen.getByRole("tab", { name: /^Acompanhamento$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/15 dia\(s\) sem interação registrada/i)
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Copiar follow-up/i }));
+    await waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith(
+        expect.stringContaining("Olá, Mariana")
+      );
+      expect(screen.getByText(/Mensagem copiada!/i)).toBeInTheDocument();
+    });
+  });
+
+  it("gerencia Entrevistas (com reagendamento), Testes Técnicos, Contatos e Interação Externa no modal de detalhes", async () => {
+    const initialItem = buildBaseKanbanItem();
+    let currentItem = { ...initialItem };
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 10,
+      total_pages: 1,
+    });
+    vi.spyOn(api.applications, "kanban").mockImplementation(async () =>
+      mockKanbanResponse(currentItem)
+    );
+    vi.spyOn(api.applications, "get").mockImplementation(async () => currentItem);
+
+    const updateIvSpy = vi
+      .spyOn(api.applications, "updateInterview")
+      .mockImplementation(async (_appId, ivId, payload) => {
+        const baseIv = (currentItem.interviews ?? [])[0];
+        const updatedIv = {
+          ...baseIv,
+          id: ivId,
+          previous_scheduled_at: baseIv.scheduled_at,
+          scheduled_at: payload.scheduled_at || baseIv.scheduled_at,
+        };
+        currentItem = {
+          ...currentItem,
+          interviews: [updatedIv],
+        };
+        return updatedIv;
+      });
+
+    const createAsmtSpy = vi
+      .spyOn(api.applications, "createAssessment")
+      .mockImplementation(async (_appId, payload) => {
+        const createdAsmt = {
+          id: "asmt-new-1",
+          application_id: "app-32-1",
+          title: payload.title || "Desafio Novo",
+          description: payload.description || null,
+          platform: payload.platform || null,
+          instructions_url: payload.instructions_url || null,
+          submission_url: payload.submission_url || null,
+          deadline_at: payload.deadline_at || null,
+          submitted_at: null,
+          status: payload.status || "pending",
+          status_label: "Pendente",
+          is_overdue: false,
+          is_due_soon_24h: false,
+          feedback: null,
+          notes: null,
+          created_at: "2026-11-16T12:00:00Z",
+          updated_at: "2026-11-16T12:00:00Z",
+        };
+        currentItem = {
+          ...currentItem,
+          assessments: [createdAsmt],
+        };
+        return createdAsmt;
+      });
+
+    const createContactSpy = vi
+      .spyOn(api.applications, "createContact")
+      .mockImplementation(async (_appId, payload) => {
+        const createdCt = {
+          id: "ct-new-1",
+          application_id: "app-32-1",
+          name: payload.name || "Recrutador",
+          role_title: payload.role_title || null,
+          email: payload.email || null,
+          linkedin_url: payload.linkedin_url || null,
+          notes: payload.notes || null,
+          created_at: "2026-11-16T12:00:00Z",
+          updated_at: "2026-11-16T12:00:00Z",
+        };
+        currentItem = {
+          ...currentItem,
+          contacts: [createdCt],
+        };
+        return createdCt;
+      });
+
+    const extSpy = vi
+      .spyOn(api.applications, "recordExternalInteraction")
+      .mockImplementation(async (_appId, payload) => {
+        currentItem = {
+          ...currentItem,
+          last_external_interaction_at:
+            payload.interaction_at || "2026-11-16T15:00:00Z",
+          last_external_interaction_type: payload.interaction_type,
+          last_external_interaction_type_label: "E-mail",
+          last_external_interaction_note: payload.note || null,
+        };
+        return currentItem;
+      });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /^Candidaturas$/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Candidaturas$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /Abrir detalhes/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Abrir detalhes/i })[0]
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Geral$/i })).toBeInTheDocument();
+    });
+
+    // 1. Aba Entrevistas -> reagendar rodada existente
+    fireEvent.click(screen.getByRole("tab", { name: /^Entrevistas/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Triagem RH")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Editar \/ Reagendar/i })
+    );
+    fireEvent.change(screen.getByLabelText(/Data e hora \(local\)/i), {
+      target: { value: "2026-11-25T14:30" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Salvar reagendamento/i })
+    );
+    await waitFor(() => {
+      expect(updateIvSpy).toHaveBeenCalledWith(
+        "app-32-1",
+        "iv-32-1",
+        expect.objectContaining({
+          scheduled_at: new Date("2026-11-25T14:30").toISOString(),
+        })
+      );
+      expect(screen.getByText(/Reagendada \(horário anterior:/i)).toBeInTheDocument();
+    });
+
+    // 2. Aba Testes técnicos -> cadastrar desafio
+    fireEvent.click(screen.getByRole("tab", { name: /^Testes técnicos/i }));
+    fireEvent.change(screen.getByLabelText(/Título do desafio/i), {
+      target: { value: "API REST FastAPI + Testes" },
+    });
+    fireEvent.change(screen.getByLabelText(/Plataforma/i), {
+      target: { value: "GitHub" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Salvar desafio técnico/i })
+    );
+    await waitFor(() => {
+      expect(createAsmtSpy).toHaveBeenCalledWith(
+        "app-32-1",
+        expect.objectContaining({
+          title: "API REST FastAPI + Testes",
+          platform: "GitHub",
+        })
+      );
+      expect(screen.getByText("API REST FastAPI + Testes")).toBeInTheDocument();
+    });
+
+    // 3. Aba Contatos -> adicionar recrutador
+    fireEvent.click(screen.getByRole("tab", { name: /^Contatos/i }));
+    fireEvent.change(screen.getByLabelText(/^Nome \*/i), {
+      target: { value: "Lucas Recruiter" },
+    });
+    fireEvent.change(screen.getByLabelText(/E-mail/i), {
+      target: { value: "lucas@orbit.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Salvar contato/i }));
+    await waitFor(() => {
+      expect(createContactSpy).toHaveBeenCalledWith(
+        "app-32-1",
+        expect.objectContaining({
+          name: "Lucas Recruiter",
+          email: "lucas@orbit.example.com",
+        })
+      );
+      expect(screen.getByText("Lucas Recruiter")).toBeInTheDocument();
+    });
+
+    // 4. Aba Acompanhamento -> registrar interação externa explícita dentro do modal
+    const modalDialog = screen.getByRole("dialog");
+    fireEvent.click(
+      within(modalDialog).getByRole("tab", { name: /^Acompanhamento$/i })
+    );
+    fireEvent.change(screen.getByLabelText(/Resumo da conversa/i), {
+      target: { value: "Retorno por e-mail confirmando próxima etapa." },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Registrar interação externa/i })
+    );
+    await waitFor(() => {
+      expect(extSpy).toHaveBeenCalledWith(
+        "app-32-1",
+        expect.objectContaining({
+          interaction_type: "email",
+          note: "Retorno por e-mail confirmando próxima etapa.",
+        })
+      );
+      expect(
+        screen.getByText(/Retorno por e-mail confirmando próxima etapa\./i)
       ).toBeInTheDocument();
     });
   });

@@ -6,6 +6,21 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.3.2] - 2026-11-16 — Fase 03.2: Gestão Avançada de Processos Seletivos
+
+### Adicionado
+- **Entrevistas, Testes Técnicos, Contatos e Interação Externa (`0009_followup_interview_logs` / `0009_application_followup_and_interview_logs.py`):**
+  - Novas tabelas `application_interviews`, `application_assessments` e `application_contacts` vinculadas a `applications.id` (`ON DELETE CASCADE`), além das colunas `last_external_interaction_at`, `last_external_interaction_type` e `last_external_interaction_note` em `applications`.
+  - Sincronização automática de `Application.interview_at` com a próxima entrevista futura (`scheduled`), registro de `previous_scheduled_at` em reagendamentos, atualização de `last_external_interaction_at` ao concluir entrevistas e estratégia de compatibilidade/fallback exclusivo com `assessment_deadline_at` para evitar duplicações.
+- **API Avançada do ATS (`applications.py`, `application_process_service.py`):**
+  - Endpoints REST completos para entrevistas, desafios técnicos e contatos por candidatura (`/interviews`, `/assessments`, `/contacts`), registro explícito de interação externa (`POST /api/v1/applications/{id}/external-interaction`), agenda cronológica unificada em UTC (`GET /api/v1/applications/agenda`), detecção informativa de processos sem interação externa (`GET /api/v1/applications/stale` ignorando `updated_at` e entrevistas futuras agendadas) e gerador determinístico de follow-up em PT-BR (`GET /api/v1/applications/{id}/follow-up-template`).
+  - Validação estrita de URLs anti-SSRF/XSS, sanitização de textos, exigência de offset/fuso horário explícito nas novas entradas temporais e isolamento estrito multiusuário (`404 Not Found` uniforme).
+- **Interface ATS Integrada (`ApplicationsPipelinePage.tsx`, `ApplicationDetailModal.tsx`, `ApplicationAgendaView.tsx`, `ApplicationFollowUpView.tsx`):**
+  - Navegação integrada no módulo **Candidaturas** entre **Pipeline** (Kanban preservado), **Agenda** (lista cronológica/visão semanal no desktop, agrupamento vertical no mobile e horários convertidos ao fuso local do navegador com alertas de vencidos e próximas 24h) e **Acompanhamento** (processos sem interação registrada + cópia rápida de follow-up).
+  - Painel de detalhes da candidatura organizado em 5 abas (`Geral`, `Entrevistas`, `Testes técnicos`, `Contatos`, `Acompanhamento`).
+
+---
+
 ## [0.3.1.1] - 2026-11-16 — Fase 03.1.1: Hardening de Concorrência do Pipeline
 
 ### Corrigido / Endurecido

@@ -55,7 +55,8 @@ job-hunter/
 │   │   │   ├── 0005_lifecycle_traceability.py
 │   │   │   ├── 0006_seniority_experience_matching.py
 │   │   │   ├── 0007_applications_pipeline.py
-│   │   │   └── 0008_active_app_uniq.py
+│   │   │   ├── 0008_active_app_uniq.py
+│   │   │   └── 0009_application_followup_and_interview_logs.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -225,12 +226,13 @@ docker exec job-hunter-backend python -m app.cli reclassify-opportunities --sour
 
 Oportunidades brasileiras locais, estágios acadêmicos ou freelas recebidos fora dos feeds podem ser cadastrados de forma privada pelo botão **Adicionar Oportunidade** ou via **Web Share Target (PWA)** no navegador/Android, sem raspagem automática de HTML pelo servidor.
 
-### 4.6. Pipeline de Gestão de Candidaturas (Fase 03.1)
-A partir de qualquer vaga do catálogo (**Acompanhar candidatura**) ou diretamente na seção **Candidaturas** (cadastro manual avulso):
+### 4.6. Pipeline e Gestão Avançada de Processos Seletivos (Fases 03.1 a 03.2)
+A partir de qualquer vaga do catálogo (**Acompanhar candidatura**) ou diretamente na seção **Candidaturas** (que reúne **Pipeline**, **Agenda** e **Acompanhamento**):
 - **Etapas Kanban (PT-BR):** `Interesse` (`interested`), `Preparação` (`preparing`), `Candidatura enviada` (`applied`), `Teste técnico` (`assessment`), `Entrevista` (`interview`) e `Proposta` (`offer`), mantendo os desfechos encerrados (`Aprovado`, `Rejeitado`, `Desistência`) em seção separada sem poluir o quadro ativo (com navegação em abas no mobile).
 - **Snapshots e Histórico Imutável:** preserva empresa, cargo, fonte, localidade, links, regime, modalidade e senioridade no momento do vínculo (`ON DELETE SET NULL` caso a oportunidade privada original seja removida), além de gravar atomicamente toda transição em `application_status_history`.
 - **Prevenção de Duplicação e Reaplicação (`0008_active_app_uniq`):** além da verificação prévia na camada de serviço, um índice único parcial no banco (`uq_active_application_per_user_opp` em PostgreSQL 16 e SQLite sobre `(user_id, opportunity_id)` para `opportunity_id IS NOT NULL` e status ativos) impede race conditions concorrentes, realizando `rollback()` limpo e retornando `409 Conflict`, enquanto preserva candidaturas avulsas (`opportunity_id = NULL`) e permite nova tentativa após encerramento.
-- **Indicadores Reais e Controle Humano:** calcula métricas por etapa no backend (`GET /api/v1/applications/kanban` e `GET /api/v1/applications/indicators`), registra datas de envio, entrevista, teste técnico, retorno esperado e próxima ação, sem nenhum envio automático.
+- **Entrevistas, Testes Técnicos e Contatos (`0009_followup_interview_logs`):** múltiplas rodadas em `application_interviews` (com reagendamento preservando `previous_scheduled_at` e sincronização contínua de `Application.interview_at` para a próxima entrevista futura), múltiplos desafios em `application_assessments` (com links separados de instruções/entrega, prazo, feedback e sincronização/fallback exclusivo com `assessment_deadline_at` sem duplicação na agenda) e múltiplos contatos em `application_contacts` (`/api/v1/applications/{id}/interviews`, `/assessments`, `/contacts`).
+- **Agenda Unificada, Estagnação e Follow-up Determinístico:** `GET /api/v1/applications/agenda?days=30` consolida eventos em ordem cronológica real UTC (convertidos para o fuso local no navegador, com alertas de 24h e vencidos, visão semanal/cronológica no desktop e lista vertical no mobile); `GET /api/v1/applications/stale?stale_days=7` detecta processos em `applied` (> 10 dias por padrão) ou `interview` (> 7 dias por padrão) sem interação externa registrada (`last_external_interaction_at` atualizado somente via `POST /api/v1/applications/{id}/external-interaction` ou conclusão real de entrevista, nunca por `updated_at`); e `GET /api/v1/applications/{id}/follow-up-template` gera mensagem determinística em PT-BR pronta para cópia manual, sem IA nem envios automáticos.
 
 ### 4.7. Encerrando o Ambiente
 

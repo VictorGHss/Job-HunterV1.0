@@ -12,9 +12,12 @@ from app.models.application import (
     ACTIVE_APPLICATION_UNIQUE_INDEX_NAME,
     APPLICATION_STATUS_LABELS_PT,
     CLOSED_APPLICATION_STATUSES,
+    EXTERNAL_INTERACTION_TYPE_LABELS_PT,
     Application,
     ApplicationStatus,
     ApplicationStatusHistory,
+    AssessmentStatus,
+    InterviewStatus,
 )
 from app.models.opportunity import (
     EmploymentType,
@@ -33,6 +36,11 @@ from app.schemas.application import (
     ApplicationStatusChangeRequest,
     ApplicationStatusHistoryResponse,
     ApplicationUpdate,
+)
+from app.services.application_process_service import (
+    serialize_assessment,
+    serialize_contact,
+    serialize_interview,
 )
 from app.services.opportunities.matching import resolve_opportunity_seniority_and_experience
 from app.services.opportunities.sanitization import (
@@ -175,9 +183,29 @@ def _compute_next_deadline(app_row: Application) -> tuple[datetime | None, str |
         return (None, None)
 
     candidates: list[tuple[datetime, str]] = []
+    if app_row.assessments:
+        for asmt in app_row.assessments:
+            if asmt.status in {AssessmentStatus.PENDING.value, AssessmentStatus.IN_PROGRESS.value}:
+                dt_utc = _ensure_utc(asmt.deadline_at)
+                if dt_utc is not None:
+                    candidates.append((dt_utc, f"Teste técnico ({asmt.title})"))
+    else:
+        dt_utc = _ensure_utc(app_row.assessment_deadline_at)
+        if dt_utc is not None:
+            candidates.append((dt_utc, "Prazo de teste técnico"))
+
+    if app_row.interviews:
+        for iv in app_row.interviews:
+            if iv.status == InterviewStatus.SCHEDULED.value:
+                dt_utc = _ensure_utc(iv.scheduled_at)
+                if dt_utc is not None:
+                    candidates.append((dt_utc, f"Entrevista ({iv.round_name})"))
+    else:
+        dt_utc = _ensure_utc(app_row.interview_at)
+        if dt_utc is not None:
+            candidates.append((dt_utc, "Entrevista"))
+
     for dt_val, label in (
-        (app_row.assessment_deadline_at, "Prazo de teste técnico"),
-        (app_row.interview_at, "Entrevista"),
         (app_row.next_action_due_at, "Próxima ação"),
         (app_row.expected_response_at, "Retorno previsto"),
     ):
@@ -214,6 +242,16 @@ def _serialize_application(app_row: Application) -> ApplicationResponse:
     next_dt, next_label = _compute_next_deadline(app_row)
     opp_status = app_row.opportunity.source_status if app_row.opportunity is not None else None
     history = [_serialize_history(h) for h in (app_row.status_history or [])]
+    now = datetime.now(UTC)
+    interviews = [serialize_interview(iv) for iv in (app_row.interviews or [])]
+    assessments = [serialize_assessment(asmt, now=now) for asmt in (app_row.assessments or [])]
+    contacts = [serialize_contact(c) for c in (app_row.contacts or [])]
+    ext_type = app_row.last_external_interaction_type
+    ext_label = (
+        EXTERNAL_INTERACTION_TYPE_LABELS_PT.get(ext_type, ext_type)
+        if ext_type
+        else None
+    )
 
     return ApplicationResponse(
         id=app_row.id,
@@ -242,9 +280,16 @@ def _serialize_application(app_row: Application) -> ApplicationResponse:
         next_deadline_label=next_label,
         notes=app_row.notes,
         closed_at=_ensure_utc(app_row.closed_at),
+        last_external_interaction_at=_ensure_utc(app_row.last_external_interaction_at),
+        last_external_interaction_type=ext_type,
+        last_external_interaction_type_label=ext_label,
+        last_external_interaction_note=app_row.last_external_interaction_note,
         created_at=_ensure_utc(app_row.created_at) or app_row.created_at,
         updated_at=_ensure_utc(app_row.updated_at) or app_row.updated_at,
         status_history=history,
+        interviews=interviews,
+        assessments=assessments,
+        contacts=contacts,
     )
 
 
@@ -254,6 +299,9 @@ def _base_user_applications_stmt(user_id: uuid.UUID):
         .options(
             selectinload(Application.opportunity),
             selectinload(Application.status_history),
+            selectinload(Application.interviews),
+            selectinload(Application.assessments),
+            selectinload(Application.contacts),
         )
         .where(Application.user_id == user_id)
     )

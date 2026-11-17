@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, utc_now
@@ -54,6 +54,63 @@ ACTIVE_APPLICATION_PREDICATE_SQL = (
     "opportunity_id IS NOT NULL AND status IN "
     "('interested', 'preparing', 'applied', 'assessment', 'interview', 'offer')"
 )
+
+
+class InterviewFormat(StrEnum):
+    ONLINE = "online"
+    IN_PERSON = "in_person"
+    PHONE = "phone"
+
+
+class InterviewStatus(StrEnum):
+    SCHEDULED = "scheduled"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class AssessmentStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    FEEDBACK_RECEIVED = "feedback_received"
+    CANCELLED = "cancelled"
+
+
+class ExternalInteractionType(StrEnum):
+    EMAIL = "email"
+    PHONE = "phone"
+    LINKEDIN = "linkedin"
+    INTERVIEW = "interview"
+    OTHER = "other"
+
+
+INTERVIEW_FORMAT_LABELS_PT: dict[str, str] = {
+    InterviewFormat.ONLINE.value: "Online / Vídeo",
+    InterviewFormat.IN_PERSON.value: "Presencial",
+    InterviewFormat.PHONE.value: "Telefone",
+}
+
+INTERVIEW_STATUS_LABELS_PT: dict[str, str] = {
+    InterviewStatus.SCHEDULED.value: "Agendada",
+    InterviewStatus.COMPLETED.value: "Concluída",
+    InterviewStatus.CANCELLED.value: "Cancelada",
+}
+
+ASSESSMENT_STATUS_LABELS_PT: dict[str, str] = {
+    AssessmentStatus.PENDING.value: "Pendente",
+    AssessmentStatus.IN_PROGRESS.value: "Em andamento",
+    AssessmentStatus.SUBMITTED.value: "Enviado",
+    AssessmentStatus.FEEDBACK_RECEIVED.value: "Feedback recebido",
+    AssessmentStatus.CANCELLED.value: "Cancelado",
+}
+
+EXTERNAL_INTERACTION_TYPE_LABELS_PT: dict[str, str] = {
+    ExternalInteractionType.EMAIL.value: "E-mail",
+    ExternalInteractionType.PHONE.value: "Telefone",
+    ExternalInteractionType.LINKEDIN.value: "LinkedIn",
+    ExternalInteractionType.INTERVIEW.value: "Entrevista",
+    ExternalInteractionType.OTHER.value: "Outro contato",
+}
 
 
 class Application(Base, TimestampMixin):
@@ -146,12 +203,40 @@ class Application(Base, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+    last_external_interaction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    last_external_interaction_type: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    last_external_interaction_note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
 
     opportunity = relationship("Opportunity")
     status_history: Mapped[list["ApplicationStatusHistory"]] = relationship(
         back_populates="application",
         cascade="all, delete-orphan",
         order_by="ApplicationStatusHistory.changed_at.desc(), ApplicationStatusHistory.created_at.desc()",
+    )
+    interviews: Mapped[list["ApplicationInterview"]] = relationship(
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="ApplicationInterview.scheduled_at.asc(), ApplicationInterview.created_at.asc()",
+    )
+    assessments: Mapped[list["ApplicationAssessment"]] = relationship(
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="ApplicationAssessment.deadline_at.asc(), ApplicationAssessment.created_at.desc()",
+    )
+    contacts: Mapped[list["ApplicationContact"]] = relationship(
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="ApplicationContact.created_at.asc()",
     )
 
 
@@ -191,3 +276,130 @@ class ApplicationStatusHistory(Base):
     )
 
     application: Mapped["Application"] = relationship(back_populates="status_history")
+
+
+class ApplicationInterview(Base, TimestampMixin):
+    __tablename__ = "application_interviews"
+    __table_args__ = (
+        Index(
+            "ix_application_interviews_app_status_scheduled",
+            "application_id",
+            "status",
+            "scheduled_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    round_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    interview_format: Mapped[str] = mapped_column(
+        String(32),
+        default=InterviewFormat.ONLINE.value,
+        nullable=False,
+    )
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    previous_scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    meeting_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    interviewers: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feedback_received: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default=InterviewStatus.SCHEDULED.value,
+        nullable=False,
+        index=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    application: Mapped["Application"] = relationship(back_populates="interviews")
+
+
+class ApplicationAssessment(Base, TimestampMixin):
+    __tablename__ = "application_assessments"
+    __table_args__ = (
+        Index(
+            "ix_application_assessments_app_status_deadline",
+            "application_id",
+            "status",
+            "deadline_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    instructions_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    submission_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default=AssessmentStatus.PENDING.value,
+        nullable=False,
+        index=True,
+    )
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    application: Mapped["Application"] = relationship(back_populates="assessments")
+
+
+class ApplicationContact(Base, TimestampMixin):
+    __tablename__ = "application_contacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    role_title: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    linkedin_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    application: Mapped["Application"] = relationship(back_populates="contacts")
