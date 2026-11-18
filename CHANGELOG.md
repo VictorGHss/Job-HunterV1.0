@@ -6,6 +6,32 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.1] - 2026-11-18 — Subfase 04.4.1: Fundação e Infraestrutura de IA Assistida
+
+### Adicionado
+
+- **Configuração Centralizada e Kill Switch (`backend/app/core/config.py`, `.env.example`, `infra/compose.yaml`):**
+  - `AI_ASSISTED_ENABLED=false` por padrão (`AI_PROVIDER=disabled`, `AI_MODEL=none`), sem necessidade de API key nem dependência de provider externo para inicializar, migrar ou utilizar qualquer módulo do sistema.
+  - Cotas e janelas temporais explícitas em UTC (`10 req / 900s` em janela deslizante `[now - 900s, now]`; `30 req/dia/usuário`, `60.000 tokens/dia/usuário` e `100.000 tokens/dia` globais em dia civil fixo UTC `[00:00:00Z, 24:00:00Z)`), TTL de reserva (`60s`), parâmetros de circuit breaker (`3` falhas consecutivas, `120s` de cooldown) e limites de referência para a futura camada HTTP (`24.0s` total `< 25.0s`, `5.0s` connect, `20.0s` read, `256 KiB` máx.).
+  - Bloqueio automático de `AI_PROVIDER=mock` em `ENVIRONMENT=production` (tanto na validação de `Settings` quanto no resolver/construtor de `MockLLMProvider`).
+- **Migration Reversível e Persistência Sem Conteúdo Pessoal (`backend/alembic/versions/0011_ai_usage_ledger.py`, `backend/app/models/ai_usage.py`):**
+  - Tabelas `ai_usage_ledger`, `ai_quota_scope_locks` e `ai_circuit_breakers` compatíveis com SQLite e PostgreSQL 16 (`upgrade` e `downgrade` `0010 -> 0011 -> 0010` e inicialização direta em `head`).
+  - Integridade referencial consciente: `user_id` com `ON DELETE CASCADE` (alinhado à política de conta do projeto) e `material_id` / `version_id` com `ON DELETE SET NULL` (permitindo exclusão de materiais sem quebrar auditoria nem resetar cotas consumidas).
+  - Restrição estrita de privacidade: nenhum campo armazena prompts, respostas, currículos, descrições de vagas, PII ou credenciais; identificadores técnicos passam por `validate_safe_technical_identifier`.
+- **Pacote de Fundação de IA (`backend/app/services/materials/ai/`):**
+  - `contracts.py`: protocolo agnóstico `LLMProvider`, `LLMStructuredRequest`, `LLMStructuredResponse`, `LLMTokenUsage` e exceções normalizadas sem acoplamento a fornecedores externos.
+  - `providers.py`: `DisabledLLMProvider` (padrão seguro quando desabilitado) e `MockLLMProvider` (`MockScenario` para resposta válida, resposta inválida, falha de provider, timeout e omissão de tokens, estritamente bloqueado em `production`), sem nenhuma chamada de rede.
+  - `_db_locks.py` e `quota_service.py`: reservas atômicas (`reserve_ai_quota`, `confirm_ai_quota_usage`, `fail_ai_quota_usage`, `release_ai_quota_reservation`, `expire_abandoned_reservations`, `get_quota_availability`) com ordenação canônica de locks por escopo (`SELECT ... FOR UPDATE` no PostgreSQL 16 e lock transacional imediato com `busy_timeout` no SQLite), isolamento estrito por `user_id`, expiração automática de reservas abandonadas e tratamento explícito para ausência de contagem de tokens (`usage_reported=false`, sem inventar valores).
+  - `circuit_breaker.py` e `execution_guard.py`: circuit breaker compartilhado em SQL (`closed`, `open`, `half_open` com probe único exclusivo) e orquestrador em duas transações curtas que nunca mantém lock ou transação SQL aberta durante chamadas ao provider.
+- **Documentação Canônica (`README.md`, `SECURITY.md`, `DEPLOY.md`, `.env.example`):**
+  - Documentados kill switch, variáveis `AI_*`, semântica UTC das cotas, contabilização de reservas/falhas, escopo e limitações operacionais do circuit breaker SQL, providers disponíveis e itens fora de escopo nesta etapa.
+
+### Testes
+- `tests/test_ai_foundation_phase0441.py`: 10 cenários (`TC-441-01` a `TC-441-10`) cobrindo kill switch, guardas de produção, migration `0010 -> 0011 -> 0010` + startup `head`, integridade referencial `SET NULL` / `CASCADE`, ciclo completo do ledger e expiração de reservas, janelas UTC, concorrência real multi-thread (`Barrier`, mesmo usuário, múltiplos usuários, teto global e falhas concorrentes), ausência de lock SQL durante execução do provider, circuit breaker com probe concorrente em `half_open` e auditoria de privacidade/isolamento/logs.
+- Suíte backend completa: **118/118 passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+
+---
+
 ## [0.4.3] - 2026-11-18 — Subfase 04.3: Exportação Profissional em PDF e DOCX
 
 ### Adicionado

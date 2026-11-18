@@ -54,6 +54,27 @@ class Settings(BaseSettings):
     sync_max_retries: int = 2
     sync_user_agent: str = "JobHunter/0.2 (+https://jobhunter.ctrls.dev.br)"
 
+    # Infraestrutura de IA Assistida (Subfase 04.4.1 — desabilitada por padrão)
+    # Semântica temporal:
+    # - Todas as janelas e datas utilizam exclusivamente UTC.
+    # - ai_rate_limit_window_seconds aplica janela deslizante [now - window, now].
+    # - Limites diários (*_daily_max_*) aplicam dia civil fixo em UTC [00:00:00Z, 24:00:00Z).
+    ai_assisted_enabled: bool = False
+    ai_provider: str = "disabled"
+    ai_model: str = "none"
+    ai_rate_limit_window_seconds: int = 900
+    ai_user_window_max_requests: int = 10
+    ai_user_daily_max_requests: int = 30
+    ai_user_daily_max_tokens: int = 60_000
+    ai_global_daily_max_tokens: int = 100_000
+    ai_reservation_ttl_seconds: int = 60
+    ai_circuit_breaker_failure_threshold: int = 3
+    ai_circuit_breaker_cooldown_seconds: int = 120
+    ai_http_total_timeout_seconds: float = 24.0
+    ai_http_connect_timeout_seconds: float = 5.0
+    ai_http_read_timeout_seconds: float = 20.0
+    ai_http_max_response_bytes: int = 262_144
+
     cors_origins: str = (
         "http://localhost:5180,http://127.0.0.1:5180,"
         "http://localhost:5173,http://127.0.0.1:5173,"
@@ -111,26 +132,80 @@ class Settings(BaseSettings):
                 )
         return value
 
+    @field_validator("ai_provider")
+    @classmethod
+    def normalize_ai_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        return normalized or "disabled"
+
+    @field_validator("ai_model")
+    @classmethod
+    def normalize_ai_model(cls, value: str) -> str:
+        normalized = value.strip()
+        return normalized or "none"
+
     @field_validator(
         "login_rate_limit_window_seconds",
         "login_account_ip_max_attempts",
         "login_ip_max_attempts",
         "login_cooldown_seconds",
+        "ai_rate_limit_window_seconds",
+        "ai_user_window_max_requests",
+        "ai_user_daily_max_requests",
+        "ai_user_daily_max_tokens",
+        "ai_global_daily_max_tokens",
+        "ai_reservation_ttl_seconds",
+        "ai_circuit_breaker_failure_threshold",
+        "ai_circuit_breaker_cooldown_seconds",
+        "ai_http_max_response_bytes",
     )
     @classmethod
     def validate_positive_ints(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("Parâmetros de rate limiting devem ser maiores que zero.")
+            raise ValueError("Parâmetros de limites, cotas e janelas devem ser maiores que zero.")
+        return value
+
+    @field_validator(
+        "ai_http_total_timeout_seconds",
+        "ai_http_connect_timeout_seconds",
+        "ai_http_read_timeout_seconds",
+    )
+    @classmethod
+    def validate_positive_ai_timeouts(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("Parâmetros de timeout de IA devem ser maiores que zero.")
         return value
 
     @model_validator(mode="after")
     def validate_security_posture(self) -> "Settings":
+        if self.ai_http_total_timeout_seconds >= 25.0:
+            raise ValueError(
+                "AI_HTTP_TOTAL_TIMEOUT_SECONDS deve ser estritamente menor que 25 segundos."
+            )
+        if self.ai_http_connect_timeout_seconds >= self.ai_http_total_timeout_seconds:
+            raise ValueError(
+                "AI_HTTP_CONNECT_TIMEOUT_SECONDS deve ser menor que AI_HTTP_TOTAL_TIMEOUT_SECONDS."
+            )
+        if self.ai_http_read_timeout_seconds >= self.ai_http_total_timeout_seconds:
+            raise ValueError(
+                "AI_HTTP_READ_TIMEOUT_SECONDS deve ser menor que AI_HTTP_TOTAL_TIMEOUT_SECONDS."
+            )
+        if float(self.ai_reservation_ttl_seconds) <= self.ai_http_total_timeout_seconds:
+            raise ValueError(
+                "AI_RESERVATION_TTL_SECONDS deve ser maior que AI_HTTP_TOTAL_TIMEOUT_SECONDS."
+            )
+
         if self.cookie_samesite == "none" and not self.cookie_secure:
             raise ValueError(
                 "COOKIE_SAMESITE='none' exige COOKIE_SECURE=true para proteção de cookies."
             )
 
         if self.environment == "production":
+            if self.ai_provider == "mock":
+                raise ValueError(
+                    "Em produção (ENVIRONMENT=production), AI_PROVIDER='mock' não é permitido."
+                )
+
             if not self.cookie_secure:
                 raise ValueError(
                     "Em produção (ENVIRONMENT=production), COOKIE_SECURE deve ser obrigatoriamente true."

@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Subfase 04.3 — Exportação Profissional em PDF e DOCX
+- **Fase atual:** Subfase 04.4.1 — Fundação e Infraestrutura de IA Assistida
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -281,7 +281,15 @@ Todos os cinco tipos de materiais (`resume`, `cover_letter`, `recruiter_message`
 - **Rota binária, headers e rascunhos:** `GET /api/v1/materials/{material_id}/versions/{version_id}/download?format=pdf|docx&template=classic_ats|modern_minimal&allow_draft=false|true` exporta estritamente o `version_id` solicitado com `Content-Disposition` sanitizado, `X-Content-Type-Options: nosniff` e `Cache-Control: no-store`. Versões com pendências obrigatórias são sempre bloqueadas (`422`), e versões não aprovadas só podem ser baixadas com `allow_draft=true`, exibindo `RASCUNHO NÃO APROVADO` / `UNAPPROVED DRAFT` em todas as páginas.
 - **Limites e UX:** limites de `120.000` caracteres de entrada e `5 MiB` por arquivo final; no frontend, a aba **Pré-visualização & Exportação** traz seletor de template, preview documental e downloads Blob com `URL.revokeObjectURL`, além de atalhos **PDF**/**DOCX** na aba **Materiais** da candidatura apontando estritamente para `linked_version_id` (versão histórica vinculada em `application_material_links`).
 
-### 4.10. Encerrando o Ambiente
+### 4.10. Fundação e Infraestrutura de IA Assistida (Subfase 04.4.1)
+Prepara a base de backend para futuro aprimoramento opcional de materiais com IA, mantendo toda a geração, edição, aprovação, versionamento e exportação determinística funcionando sem qualquer alteração de comportamento:
+- **Kill switch e inicialização sem API key:** `AI_ASSISTED_ENABLED=false` e `AI_PROVIDER=disabled` por padrão. Nenhuma chave de API ou SDK externo é exigido para iniciar, testar ou operar o sistema; quando desabilitada, qualquer chamada falha de forma previsível (`AIDisabledError`) antes de alocar recursos.
+- **Cotas configuráveis e semântica temporal explícita (UTC):** todas as janelas operam exclusivamente em UTC — `10` requisições por usuário em janela deslizante de `900s` (`[now - 900s, now]`), `30` requisições/dia por usuário, `60.000` tokens/dia por usuário e `100.000` tokens/dia globais em dia civil fixo UTC (`[00:00:00Z, 24:00:00Z)`), além de limites de referência para a futura camada HTTP (`< 25s` total / `24.0s` padrão, `5.0s` connect, `20.0s` read, `256 KiB` máx.).
+- **Reserva atômica em duas transações curtas (`0011_ai_usage_ledger`):** reservas são gravadas em `ai_usage_ledger` sob lock explícito por escopo (`ai_quota_scope_locks`, adquirido em ordem canônica) **antes** da chamada ao provider, encerrando a transação antes de qualquer I/O externo e reabrindo uma segunda transação curta para confirmar (`completed`) ou registrar falha (`failed`). Reservas canceladas antes da chamada (`released`) ou abandonadas após `AI_RESERVATION_TTL_SECONDS` (`60s` -> `expired`) liberam cota; tentativas que iniciaram execução (`completed` e `failed`) permanecem auditáveis e contam no limite de requisições. Quando um provider não reporta consumo (`usage_reported=false`), os campos de tokens permanecem `NULL` (contribuindo `0` tokens reais sem inventar estimativas).
+- **Circuit breaker compartilhado em SQL (`ai_circuit_breakers`):** estados `closed`, `open` e `half_open` persistidos no banco (`3` falhas consecutivas abrem por `120s`, probe único exclusivo em `half_open`), mantendo proteção consistente entre múltiplos workers/réplicas sem introduzir Redis.
+- **Providers disponíveis e escopo atual:** implementados o protocolo agnóstico `LLMProvider`, `DisabledLLMProvider` e `MockLLMProvider` (restrito a testes e bloqueado em `ENVIRONMENT=production`). **Ainda não estão implementados nesta subfase:** providers HTTP externos (Gemini/OpenAI/Anthropic/Ollama/OpenRouter), `ContextBuilder`, `StructuredGroundingValidator`, geração/overlay de versões `ai_assisted`, endpoints de aprimoramento e interface de revisão/diff no frontend.
+
+### 4.11. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 
@@ -294,10 +302,11 @@ docker compose --env-file .env -f infra/compose.yaml down
 ## 5. Desenvolvimento e Execução de Testes Localmente
 
 ### Backend (Pytest + Alembic)
-Execução rápida local (SQLite):
+Execução rápida local (SQLite — suíte completa ou apenas Subfase 04.4.1):
 ```powershell
 cd backend
 .\.venv\Scripts\pytest.exe
+.\.venv\Scripts\pytest.exe tests\test_ai_foundation_phase0441.py -v
 ```
 
 Validação completa contra **PostgreSQL 16 real** via Docker Compose (usando banco isolado `jobhunter_test`):
