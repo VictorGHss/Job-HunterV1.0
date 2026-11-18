@@ -95,6 +95,17 @@ docker exec job-hunter-backend python -m app.cli reclassify-opportunities --sour
 
 As variáveis `SYNC_HTTP_CONNECT_TIMEOUT_SECONDS`, `SYNC_HTTP_READ_TIMEOUT_SECONDS`, `SYNC_MAX_RESPONSE_BYTES`, `SYNC_MAX_RETRIES` e `SYNC_USER_AGENT` no `.env` controlam timeouts, teto de payload e retentativas HTTP (`429 Retry-After` e backoff em `5xx`).
 
+### Infraestrutura de IA Assistida e Controles Operacionais (Subfase 04.4.1)
+A fundação de IA permanece **desabilitada por padrão** (`AI_ASSISTED_ENABLED=false`, `AI_PROVIDER=disabled`), sem exigir API key ou conectividade externa para subida dos containers, migrações ou uso dos módulos existentes:
+- **Variáveis de cota e janelas temporais (UTC):**
+  - `AI_RATE_LIMIT_WINDOW_SECONDS=900` e `AI_USER_WINDOW_MAX_REQUESTS=10`: janela deslizante em UTC (`[now - 900s, now]`).
+  - `AI_USER_DAILY_MAX_REQUESTS=30`, `AI_USER_DAILY_MAX_TOKENS=60000` e `AI_GLOBAL_DAILY_MAX_TOKENS=100000`: dia civil fixo em UTC (`[00:00:00Z, 24:00:00Z)`).
+  - `AI_RESERVATION_TTL_SECONDS=60`: expira automaticamente reservas abandonadas caso um worker seja interrompido entre a reserva e a consolidação, evitando bloqueio indefinido de cota.
+  - `AI_HTTP_TOTAL_TIMEOUT_SECONDS=24.0` (obrigatoriamente `< 25.0` e `>= AI_HTTP_CONNECT_TIMEOUT_SECONDS`), `AI_HTTP_CONNECT_TIMEOUT_SECONDS=5.0`, `AI_HTTP_READ_TIMEOUT_SECONDS=20.0` e `AI_HTTP_MAX_RESPONSE_BYTES=262144`: parâmetros de referência validados para a futura camada HTTP.
+- **Circuit breaker compartilhado e topologia multi-worker (`AI_CIRCUIT_BREAKER_FAILURE_THRESHOLD=3`, `AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS=120`):**
+  - O estado do circuit breaker (`ai_circuit_breakers`) e os locks de reserva (`ai_quota_scope_locks`) são persistidos no PostgreSQL (`db`), garantindo comportamento idêntico com 1 ou múltiplos workers/réplicas do `backend` sem necessidade de Redis.
+  - **Limitações operacionais explícitas:** como o circuit breaker reside no banco SQL, indisponibilidade do próprio PostgreSQL impede a abertura/consulta do circuito (falhando de forma fechada antes de qualquer chamada externa); além disso, se o processo encerrar abruptamente durante o único probe permitido em `half_open`, um novo probe aguarda a expiração de `AI_RESERVATION_TTL_SECONDS` (`60s`).
+
 ---
 
 ## 3. Preparação para Cloudflare Tunnel (`jobhunter.ctrls.dev.br`)
@@ -117,6 +128,7 @@ Ao habilitar `ENVIRONMENT=production` no `.env`, a aplicação valida automatica
 - `COOKIE_SECURE=true` (obrigatório em HTTPS).
 - `SECRET_KEY` forte (mínimo 32 caracteres e 10 caracteres distintos, sem placeholders).
 - `CORS_ORIGINS` não vazio, sem wildcard `*` e exclusivamente com esquema `https://`.
+- `AI_PROVIDER` diferente de `mock` (o provider de testes `MockLLMProvider` é estritamente recusado no startup em `production`; se `AI_PROVIDER=disabled`, `resolve_llm_provider` retorna `DisabledLLMProvider`, falhando de forma segura sem impedir a subida dos demais módulos).
 
 ```ini
 ENVIRONMENT=production

@@ -1,3 +1,10 @@
+from app.models.ai_usage import (
+    AICircuitBreakerRecord,
+    AICircuitState,
+    AIQuotaScopeLock,
+    AIUsageLedger,
+    AIUsageStatus,
+)
 from app.models.application import (
     ACTIVE_APPLICATION_STATUSES,
     APPLICATION_STATUS_LABELS_PT,
@@ -59,6 +66,11 @@ from app.models.user import AccountStatus, AuthRateLimit, User, UserSession
 
 __all__ = [
     "AccountStatus",
+    "AICircuitBreakerRecord",
+    "AICircuitState",
+    "AIQuotaScopeLock",
+    "AIUsageLedger",
+    "AIUsageStatus",
     "ACTIVE_APPLICATION_STATUSES",
     "APPLICATION_STATUS_LABELS_PT",
     "Application",
