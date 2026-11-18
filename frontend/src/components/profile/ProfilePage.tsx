@@ -3,6 +3,7 @@ import {
   Briefcase,
   CheckCircle2,
   Edit3,
+  FileText,
   FolderGit2,
   GraduationCap,
   Languages,
@@ -23,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input, Label, Textarea } from "@/components/ui/input";
+import { MaterialWorkspaceModal } from "@/components/materials/MaterialWorkspaceModal";
 import { api } from "@/lib/api";
 import { cn, joinCommaSeparated, splitCommaSeparated } from "@/lib/utils";
 import type {
@@ -106,6 +108,41 @@ const LANGUAGE_LEVEL_LABELS: Record<LanguageProficiency, string> = {
   native: "Nativo",
 };
 
+function notifyStatusUpdateResult(
+  entityLabel: string,
+  requestedStatus: VerificationStatus,
+  returnedStatus: VerificationStatus,
+  onSuccess: (msg: string) => void,
+  onError: (err: unknown) => void
+) {
+  if (requestedStatus === "confirmed" && returnedStatus === "draft") {
+    onError(
+      new Error(
+        `${entityLabel} permaneceu em Rascunho e não pôde ser confirmado automaticamente.`
+      )
+    );
+    return;
+  }
+  if (
+    requestedStatus === "confirmed" &&
+    returnedStatus === "pending_validation"
+  ) {
+    onSuccess(
+      `${entityLabel} salvo(a). Como houve alteração factual, a validação foi reaberta para Pendente de Validação.`
+    );
+    return;
+  }
+  if (returnedStatus === "confirmed") {
+    onSuccess(`${entityLabel} salvo(a) com status Confirmado.`);
+    return;
+  }
+  if (returnedStatus === "pending_validation") {
+    onSuccess(`${entityLabel} salvo(a) com status Pendente de Validação.`);
+    return;
+  }
+  onSuccess(`${entityLabel} salvo(a) como Rascunho.`);
+}
+
 interface ProfilePageProps {
   bundle: FullProfileBundle;
   onRefresh: () => Promise<void>;
@@ -118,6 +155,7 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
     text: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
 
   const showSuccess = (text: string) => {
     setFeedback({ type: "success", text });
@@ -233,7 +271,8 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
     setBusy(true);
     setFeedback(null);
     try {
-      await api.profile.updateProfile({
+      const requestedStatus = profileForm.verification_status;
+      const updated = await api.profile.updateProfile({
         full_name: profileForm.full_name || null,
         professional_email: profileForm.professional_email || null,
         phone: profileForm.phone || null,
@@ -245,10 +284,22 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
         linkedin_url: profileForm.linkedin_url || null,
         github_url: profileForm.github_url || null,
         portfolio_url: profileForm.portfolio_url || null,
-        verification_status: profileForm.verification_status,
+        // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+        // degrada para pending_validation independentemente do status enviado aqui.
+        verification_status: requestedStatus,
       });
+      setProfileForm((prev) => ({
+        ...prev,
+        verification_status: updated.verification_status,
+      }));
       await onRefresh();
-      showSuccess("Dados gerais do perfil atualizados com sucesso.");
+      notifyStatusUpdateResult(
+        "Dados gerais do perfil",
+        requestedStatus,
+        updated.verification_status,
+        showSuccess,
+        showError
+      );
     } catch (err) {
       showError(err);
     } finally {
@@ -321,6 +372,15 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
             que já foi revisado por você.
           </p>
         </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setStudioOpen(true)}
+        >
+          <FileText className="mr-1.5 h-4 w-4 text-primary" />
+          Estúdio de Currículo ({bundle.validation_summary.confirmed_count} confirmados)
+        </Button>
       </div>
 
       {/* Feedback Banner */}
@@ -867,6 +927,19 @@ export function ProfilePage({ bundle, onRefresh }: ProfilePageProps) {
           </CardContent>
         </Card>
       )}
+      {studioOpen && (
+        <MaterialWorkspaceModal
+          open={studioOpen}
+          onClose={() => {
+            setStudioOpen(false);
+            void onRefresh();
+          }}
+          targetTitle="Currículo Direcionado Geral (baseado no Perfil)"
+          onMaterialChanged={() => {
+            void onRefresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -939,13 +1012,21 @@ function ExperiencesSection({
       technologies: splitCommaSeparated(form.technologiesText),
       related_skills: splitCommaSeparated(form.relatedSkillsText),
       eligible_as_target_role: form.eligible_as_target_role,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
     try {
       if (editingId) {
-        await api.profile.updateExperience(editingId, payload);
-        onSuccess("Experiência profissional atualizada.");
+        const updated = await api.profile.updateExperience(editingId, payload);
+        notifyStatusUpdateResult(
+          `Experiência em "${updated.company}"`,
+          payload.verification_status ?? "pending_validation",
+          updated.verification_status,
+          onSuccess,
+          onError
+        );
       } else {
         await api.profile.createExperience(payload);
         onSuccess("Nova experiência profissional adicionada.");
@@ -965,7 +1046,7 @@ function ExperiencesSection({
         ? "pending_validation"
         : "confirmed";
     try {
-      await api.profile.updateExperience(exp.id, {
+      const updated = await api.profile.updateExperience(exp.id, {
         company: exp.company,
         role: exp.role,
         description: exp.description,
@@ -979,10 +1060,12 @@ function ExperiencesSection({
         verification_status: nextStatus,
       });
       await onRefresh();
-      onSuccess(
-        nextStatus === "confirmed"
-          ? `Experiência em "${exp.company}" marcada como Confirmada.`
-          : `Experiência em "${exp.company}" movida para Pendente de Validação.`
+      notifyStatusUpdateResult(
+        `Experiência em "${updated.company}"`,
+        nextStatus,
+        updated.verification_status,
+        onSuccess,
+        onError
       );
     } catch (err) {
       onError(err);
@@ -1334,13 +1417,21 @@ function EducationsSection({
       start_date: form.start_date || null,
       expected_graduation_date: form.expected_graduation_date || null,
       education_status: form.education_status,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
     try {
       if (editingId) {
-        await api.profile.updateEducation(editingId, payload);
-        onSuccess("Formação acadêmica atualizada.");
+        const updated = await api.profile.updateEducation(editingId, payload);
+        notifyStatusUpdateResult(
+          `Formação "${updated.course}"`,
+          payload.verification_status ?? "pending_validation",
+          updated.verification_status,
+          onSuccess,
+          onError
+        );
       } else {
         await api.profile.createEducation(payload);
         onSuccess("Formação acadêmica adicionada.");
@@ -1360,7 +1451,7 @@ function EducationsSection({
         ? "pending_validation"
         : "confirmed";
     try {
-      await api.profile.updateEducation(edu.id, {
+      const updated = await api.profile.updateEducation(edu.id, {
         institution: edu.institution,
         course: edu.course,
         field_of_study: edu.field_of_study,
@@ -1371,7 +1462,13 @@ function EducationsSection({
         verification_status: nextStatus,
       });
       await onRefresh();
-      onSuccess("Status de validação da formação atualizado.");
+      notifyStatusUpdateResult(
+        `Formação "${updated.course}"`,
+        nextStatus,
+        updated.verification_status,
+        onSuccess,
+        onError
+      );
     } catch (err) {
       onError(err);
     }
@@ -1639,13 +1736,21 @@ function SkillsSection({
       category: form.category,
       proficiency_level: form.proficiency_level,
       notes: form.notes || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
     try {
       if (editingId) {
-        await api.profile.updateSkill(editingId, payload);
-        onSuccess("Habilidade atualizada.");
+        const updated = await api.profile.updateSkill(editingId, payload);
+        notifyStatusUpdateResult(
+          `Habilidade "${updated.name}"`,
+          payload.verification_status ?? "pending_validation",
+          updated.verification_status,
+          onSuccess,
+          onError
+        );
       } else {
         await api.profile.createSkill(payload);
         onSuccess("Habilidade adicionada.");
@@ -1665,7 +1770,7 @@ function SkillsSection({
         ? "pending_validation"
         : "confirmed";
     try {
-      await api.profile.updateSkill(sk.id, {
+      const updated = await api.profile.updateSkill(sk.id, {
         name: sk.name,
         category: sk.category,
         proficiency_level: sk.proficiency_level,
@@ -1673,7 +1778,13 @@ function SkillsSection({
         verification_status: nextStatus,
       });
       await onRefresh();
-      onSuccess(`Habilidade "${sk.name}" atualizada.`);
+      notifyStatusUpdateResult(
+        `Habilidade "${updated.name}"`,
+        nextStatus,
+        updated.verification_status,
+        onSuccess,
+        onError
+      );
     } catch (err) {
       onError(err);
     }
@@ -1895,13 +2006,21 @@ function LanguagesSection({
       language_name: form.language_name,
       proficiency_level: form.proficiency_level,
       cefr_level: form.cefr_level || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
     try {
       if (editingId) {
-        await api.profile.updateLanguage(editingId, payload);
-        onSuccess("Idioma atualizado.");
+        const updated = await api.profile.updateLanguage(editingId, payload);
+        notifyStatusUpdateResult(
+          `Idioma "${updated.language_name}"`,
+          payload.verification_status ?? "pending_validation",
+          updated.verification_status,
+          onSuccess,
+          onError
+        );
       } else {
         await api.profile.createLanguage(payload);
         onSuccess("Idioma adicionado.");
@@ -1921,14 +2040,20 @@ function LanguagesSection({
         ? "pending_validation"
         : "confirmed";
     try {
-      await api.profile.updateLanguage(lang.id, {
+      const updated = await api.profile.updateLanguage(lang.id, {
         language_name: lang.language_name,
         proficiency_level: lang.proficiency_level,
         cefr_level: lang.cefr_level,
         verification_status: nextStatus,
       });
       await onRefresh();
-      onSuccess(`Idioma "${lang.language_name}" atualizado.`);
+      notifyStatusUpdateResult(
+        `Idioma "${updated.language_name}"`,
+        nextStatus,
+        updated.verification_status,
+        onSuccess,
+        onError
+      );
     } catch (err) {
       onError(err);
     }
@@ -2165,13 +2290,21 @@ function ProjectsSection({
       technologies: splitCommaSeparated(form.technologiesText),
       links,
       verified_results: form.verified_results || null,
+      // O backend aplica a política de confirmação: se o conteúdo factual mudou,
+      // degrada para pending_validation independentemente do status enviado aqui.
       verification_status: form.verification_status,
     };
 
     try {
       if (editingId) {
-        await api.profile.updateProject(editingId, payload);
-        onSuccess("Projeto profissional atualizado.");
+        const updated = await api.profile.updateProject(editingId, payload);
+        notifyStatusUpdateResult(
+          `Projeto "${updated.name}"`,
+          payload.verification_status ?? "draft",
+          updated.verification_status,
+          onSuccess,
+          onError
+        );
       } else {
         await api.profile.createProject(payload);
         onSuccess("Projeto profissional adicionado.");
@@ -2189,7 +2322,7 @@ function ProjectsSection({
     const nextStatus: VerificationStatus =
       proj.verification_status === "confirmed" ? "draft" : "confirmed";
     try {
-      await api.profile.updateProject(proj.id, {
+      const updated = await api.profile.updateProject(proj.id, {
         name: proj.name,
         role: proj.role,
         description: proj.description,
@@ -2199,7 +2332,13 @@ function ProjectsSection({
         verification_status: nextStatus,
       });
       await onRefresh();
-      onSuccess(`Projeto "${proj.name}" atualizado.`);
+      notifyStatusUpdateResult(
+        `Projeto "${updated.name}"`,
+        nextStatus,
+        updated.verification_status,
+        onSuccess,
+        onError
+      );
     } catch (err) {
       onError(err);
     }

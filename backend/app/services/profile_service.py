@@ -22,6 +22,8 @@ from app.schemas.profile import (
     FullProfileBundleResponse,
     LanguageCreate,
     LanguageUpdate,
+    ProfileConfirmBatchRequest,
+    ProfileConfirmBatchResponse,
     ProfessionalProfileResponse,
     ProfessionalProfileUpdate,
     ProfessionalProjectCreate,
@@ -44,14 +46,177 @@ ModelT = TypeVar(
     ProfessionalProject,
 )
 
+_PROFILE_FACTUAL_FIELDS = frozenset(
+    {
+        "full_name",
+        "professional_email",
+        "phone",
+        "city",
+        "state",
+        "country",
+        "professional_title",
+        "professional_summary",
+        "linkedin_url",
+        "github_url",
+        "portfolio_url",
+    }
+)
+
+
+class ProfileBatchNotFoundError(LookupError):
+    """Lançada quando algum ID do lote não existe ou pertence a outro usuário."""
+
+
+class ProfileBatchInvalidStatusError(ValueError):
+    """Lançada quando algum item do lote não está em `pending_validation` (ex.: `draft`)."""
+
 
 def _resolve_confirmed_at(
     new_status: str,
     current_confirmed_at: datetime | None,
+    *,
+    facts_changed: bool = False,
 ) -> datetime | None:
     if new_status == VerificationStatus.CONFIRMED.value:
-        return current_confirmed_at or datetime.now(UTC)
+        if facts_changed or current_confirmed_at is None:
+            return datetime.now(UTC)
+        return current_confirmed_at
     return None
+
+
+def _normalize_factual_value(value: object) -> object:
+    """Normaliza um valor factual para igualdade semântica.
+
+    - None e string vazia são equivalentes ("ausente").
+    - Listas de tags são comparadas sem ordem (sacola ordenada de strings).
+    - Dicionários (ex.: links) são comparados sem ordem de chaves.
+    - Demais tipos permanecem inalterados.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return sorted(str(x) for x in value)
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), "" if v is None else str(v)) for k, v in value.items()))
+    return value
+
+
+def _requested_verification_status(payload: object) -> str | None:
+    """Retorna o status enviado pelo cliente, ou None se o campo foi omitido.
+
+    Distingue omissão real de default do schema via `model_fields_set`.
+    """
+    fields_set = getattr(payload, "model_fields_set", set())
+    if "verification_status" not in fields_set:
+        return None
+    status = getattr(payload, "verification_status", None)
+    if status is None:
+        return None
+    return status.value if hasattr(status, "value") else str(status)
+
+
+def _has_factual_changes(
+    entity: object,
+    data: dict[str, object],
+    *,
+    unordered_list_fields: frozenset[str] = frozenset(),
+    nullable_str_fields: frozenset[str] = frozenset(),
+    unordered_mapping_fields: frozenset[str] = frozenset(),
+) -> bool:
+    for key, new_value in data.items():
+        current_value = getattr(entity, key)
+        use_semantic = (
+            key in unordered_list_fields
+            or key in nullable_str_fields
+            or key in unordered_mapping_fields
+        )
+        if use_semantic:
+            if _normalize_factual_value(current_value) != _normalize_factual_value(new_value):
+                return True
+        elif current_value != new_value:
+            return True
+    return False
+
+
+def _apply_confirmation_policy(
+    *,
+    requested_status: str | None,
+    current_status: str,
+    current_confirmed_at: datetime | None,
+    facts_changed: bool,
+) -> tuple[str, datetime | None]:
+    """Aplica a matriz de transição de verificação.
+
+    `requested_status` é None quando o cliente omitiu o campo (defaults do
+    schema não contam como intenção). Registro `confirmed` com alteração
+    factual sempre reabre, mesmo se o cliente reenviar `confirmed`.
+    Confirmação explícita a partir de `draft` ou `pending_validation` é
+    intencional e permitida, inclusive quando o conteúdo também mudou.
+    """
+    confirmed = VerificationStatus.CONFIRMED.value
+    pending = VerificationStatus.PENDING_VALIDATION.value
+    draft = VerificationStatus.DRAFT.value
+
+    if current_status == confirmed and facts_changed:
+        return pending, None
+
+    if requested_status is None:
+        return current_status, current_confirmed_at
+
+    if requested_status == confirmed:
+        if current_status == confirmed and current_confirmed_at is not None:
+            return confirmed, current_confirmed_at
+        return confirmed, datetime.now(UTC)
+
+    if requested_status == pending:
+        return pending, None
+
+    if requested_status == draft:
+        if current_status == draft:
+            return draft, current_confirmed_at
+        return draft, None
+
+    return requested_status, None
+
+
+def _persist_status_update(
+    db: Session,
+    entity: object,
+    payload: object,
+    *,
+    enum_overrides: dict[str, str] | None = None,
+    unordered_list_fields: frozenset[str] = frozenset(),
+    nullable_str_fields: frozenset[str] = frozenset(),
+    unordered_mapping_fields: frozenset[str] = frozenset(),
+):
+    data = payload.model_dump()
+    if enum_overrides:
+        data.update(enum_overrides)
+    requested_status = _requested_verification_status(payload)
+    data.pop("verification_status", None)
+
+    facts_changed = _has_factual_changes(
+        entity,
+        data,
+        unordered_list_fields=unordered_list_fields,
+        nullable_str_fields=nullable_str_fields,
+        unordered_mapping_fields=unordered_mapping_fields,
+    )
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        requested_status=requested_status,
+        current_status=entity.verification_status,
+        current_confirmed_at=entity.confirmed_at,
+        facts_changed=facts_changed,
+    )
+    for key, value in data.items():
+        setattr(entity, key, value)
+    entity.verification_status = final_status
+    entity.confirmed_at = final_confirmed_at
+    db.commit()
+    db.refresh(entity)
+    return entity
 
 
 def get_or_create_profile(db: Session, user: User) -> ProfessionalProfile:
@@ -88,14 +253,31 @@ def update_profile(
         profile.preferences = payload.preferences.model_dump()
         del update_data["preferences"]
 
-    if "verification_status" in update_data and payload.verification_status is not None:
-        new_status = payload.verification_status.value
-        profile.verification_status = new_status
-        profile.confirmed_at = _resolve_confirmed_at(new_status, profile.confirmed_at)
-        del update_data["verification_status"]
+    requested_status = _requested_verification_status(payload)
+    update_data.pop("verification_status", None)
+
+    factual_data = {
+        field: value
+        for field, value in update_data.items()
+        if field in _PROFILE_FACTUAL_FIELDS
+    }
+    factual_changed = _has_factual_changes(
+        profile,
+        factual_data,
+        nullable_str_fields=_PROFILE_FACTUAL_FIELDS,
+    )
 
     for field, value in update_data.items():
         setattr(profile, field, value)
+
+    final_status, final_confirmed_at = _apply_confirmation_policy(
+        requested_status=requested_status,
+        current_status=profile.verification_status,
+        current_confirmed_at=profile.confirmed_at,
+        facts_changed=factual_changed,
+    )
+    profile.verification_status = final_status
+    profile.confirmed_at = final_confirmed_at
 
     db.commit()
     db.refresh(profile)
@@ -405,16 +587,14 @@ def update_experience(
     exp: WorkExperience,
     payload: WorkExperienceUpdate,
 ) -> WorkExperience:
-    data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    data["experience_type"] = payload.experience_type.value
-    exp.confirmed_at = _resolve_confirmed_at(status_val, exp.confirmed_at)
-    for key, value in data.items():
-        setattr(exp, key, value)
-    db.commit()
-    db.refresh(exp)
-    return exp
+    return _persist_status_update(
+        db,
+        exp,
+        payload,
+        enum_overrides={"experience_type": payload.experience_type.value},
+        unordered_list_fields=frozenset({"technologies", "related_skills"}),
+        nullable_str_fields=frozenset({"description"}),
+    )
 
 
 def delete_experience(db: Session, exp: WorkExperience) -> None:
@@ -457,16 +637,13 @@ def update_education(
     edu: Education,
     payload: EducationUpdate,
 ) -> Education:
-    data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    data["education_status"] = payload.education_status.value
-    edu.confirmed_at = _resolve_confirmed_at(status_val, edu.confirmed_at)
-    for key, value in data.items():
-        setattr(edu, key, value)
-    db.commit()
-    db.refresh(edu)
-    return edu
+    return _persist_status_update(
+        db,
+        edu,
+        payload,
+        enum_overrides={"education_status": payload.education_status.value},
+        nullable_str_fields=frozenset({"field_of_study", "current_semester"}),
+    )
 
 
 def delete_education(db: Session, edu: Education) -> None:
@@ -505,16 +682,13 @@ def create_skill(db: Session, user: User, payload: SkillCreate) -> Skill:
 
 
 def update_skill(db: Session, skill: Skill, payload: SkillUpdate) -> Skill:
-    data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    data["proficiency_level"] = payload.proficiency_level.value
-    skill.confirmed_at = _resolve_confirmed_at(status_val, skill.confirmed_at)
-    for key, value in data.items():
-        setattr(skill, key, value)
-    db.commit()
-    db.refresh(skill)
-    return skill
+    return _persist_status_update(
+        db,
+        skill,
+        payload,
+        enum_overrides={"proficiency_level": payload.proficiency_level.value},
+        nullable_str_fields=frozenset({"notes"}),
+    )
 
 
 def delete_skill(db: Session, skill: Skill) -> None:
@@ -553,16 +727,13 @@ def create_language(db: Session, user: User, payload: LanguageCreate) -> Languag
 
 
 def update_language(db: Session, lang: Language, payload: LanguageUpdate) -> Language:
-    data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    data["proficiency_level"] = payload.proficiency_level.value
-    lang.confirmed_at = _resolve_confirmed_at(status_val, lang.confirmed_at)
-    for key, value in data.items():
-        setattr(lang, key, value)
-    db.commit()
-    db.refresh(lang)
-    return lang
+    return _persist_status_update(
+        db,
+        lang,
+        payload,
+        enum_overrides={"proficiency_level": payload.proficiency_level.value},
+        nullable_str_fields=frozenset({"cefr_level"}),
+    )
 
 
 def delete_language(db: Session, lang: Language) -> None:
@@ -612,15 +783,14 @@ def update_project(
     proj: ProfessionalProject,
     payload: ProfessionalProjectUpdate,
 ) -> ProfessionalProject:
-    data = payload.model_dump()
-    status_val = payload.verification_status.value
-    data["verification_status"] = status_val
-    proj.confirmed_at = _resolve_confirmed_at(status_val, proj.confirmed_at)
-    for key, value in data.items():
-        setattr(proj, key, value)
-    db.commit()
-    db.refresh(proj)
-    return proj
+    return _persist_status_update(
+        db,
+        proj,
+        payload,
+        unordered_list_fields=frozenset({"technologies"}),
+        nullable_str_fields=frozenset({"description", "role", "verified_results"}),
+        unordered_mapping_fields=frozenset({"links"}),
+    )
 
 
 def delete_project(db: Session, proj: ProfessionalProject) -> None:
@@ -663,4 +833,107 @@ def get_full_profile_bundle(db: Session, user: User) -> FullProfileBundleRespons
         languages=languages,
         projects=projects,
         validation_summary=summary,
+    )
+
+
+def _fetch_pending_batch_items(
+    db: Session,
+    model_cls: type[ModelT],
+    user_id: uuid.UUID,
+    entity_ids: list[uuid.UUID],
+    label_pt: str,
+) -> list[ModelT]:
+    if not entity_ids:
+        return []
+    found = list(
+        db.execute(
+            select(model_cls).where(
+                model_cls.user_id == user_id,
+                model_cls.id.in_(entity_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(found) != len(entity_ids):
+        raise ProfileBatchNotFoundError(
+            f"Um ou mais registros de {label_pt} não foram encontrados ou não pertencem ao usuário."
+        )
+    for item in found:
+        if item.verification_status != VerificationStatus.PENDING_VALIDATION.value:
+            raise ProfileBatchInvalidStatusError(
+                f"Somente registros de {label_pt} em 'pending_validation' podem ser confirmados em lote "
+                f"(itens em 'draft' devem ser completados e revisados antes da confirmação)."
+            )
+    return found
+
+
+def confirm_profile_batch(
+    db: Session,
+    user: User,
+    payload: ProfileConfirmBatchRequest,
+) -> ProfileConfirmBatchResponse:
+    """
+    Confirma em lote exclusivamente os itens `pending_validation` explicitamente
+    selecionados pelo usuário autenticado, de forma atômica (tudo ou nada).
+    """
+    now = datetime.now(UTC)
+    try:
+        profile_to_confirm: ProfessionalProfile | None = None
+        if payload.confirm_profile:
+            profile = get_or_create_profile(db, user)
+            if profile.verification_status != VerificationStatus.PENDING_VALIDATION.value:
+                raise ProfileBatchInvalidStatusError(
+                    "Os dados gerais do perfil só podem ser confirmados em lote quando estiverem em 'pending_validation'."
+                )
+            profile_to_confirm = profile
+
+        exps = _fetch_pending_batch_items(
+            db, WorkExperience, user.id, payload.experience_ids, "experiência"
+        )
+        edus = _fetch_pending_batch_items(
+            db, Education, user.id, payload.education_ids, "formação acadêmica"
+        )
+        skills = _fetch_pending_batch_items(
+            db, Skill, user.id, payload.skill_ids, "habilidade"
+        )
+        langs = _fetch_pending_batch_items(
+            db, Language, user.id, payload.language_ids, "idioma"
+        )
+        projs = _fetch_pending_batch_items(
+            db, ProfessionalProject, user.id, payload.project_ids, "projeto"
+        )
+
+        if profile_to_confirm is not None:
+            profile_to_confirm.verification_status = VerificationStatus.CONFIRMED.value
+            profile_to_confirm.confirmed_at = now
+
+        for entity in (*exps, *edus, *skills, *langs, *projs):
+            entity.verification_status = VerificationStatus.CONFIRMED.value
+            entity.confirmed_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    bundle = get_full_profile_bundle(db, user)
+    total_confirmed = (
+        (1 if profile_to_confirm is not None else 0)
+        + len(exps)
+        + len(edus)
+        + len(skills)
+        + len(langs)
+        + len(projs)
+    )
+    return ProfileConfirmBatchResponse(
+        confirmed_at=now,
+        profile_confirmed=profile_to_confirm is not None,
+        experiences_confirmed=len(exps),
+        educations_confirmed=len(edus),
+        skills_confirmed=len(skills),
+        languages_confirmed=len(langs),
+        projects_confirmed=len(projs),
+        total_confirmed=total_confirmed,
+        validation_summary=bundle.validation_summary,
     )

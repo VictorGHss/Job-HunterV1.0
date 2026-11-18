@@ -1215,6 +1215,7 @@ export const ApplicationsPipelinePage: React.FC<ApplicationsPipelinePageProps> =
           onClose={() => setSelectedApp(null)}
           onRefreshApplication={handleRefreshApplicationFromModal}
           onDeletedApplication={handleDeletedApplicationFromModal}
+          onNavigateProfile={onNavigateProfile}
         />
       )}
     </div>

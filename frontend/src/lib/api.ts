@@ -23,6 +23,14 @@ import type {
   Language,
   LanguagePayload,
   ManualOpportunityCreatePayload,
+  MaterialCreatePayload,
+  MaterialDetailResponse,
+  MaterialExportFormat,
+  MaterialExportResponse,
+  MaterialPreAnalysisResponse,
+  MaterialPreAnalyzePayload,
+  MaterialSummaryItem,
+  MaterialTargetLanguage,
   Opportunity,
   OpportunityListParams,
   OpportunityListResponse,
@@ -33,6 +41,10 @@ import type {
   ProfessionalProfileUpdatePayload,
   ProfessionalProject,
   ProfessionalProjectPayload,
+  ProfileConfirmBatchPayload,
+  ProfileConfirmBatchResponse,
+  ResumeStructuredContent,
+  ContactInclusionOptions,
   Skill,
   SkillPayload,
   StaleApplicationsResponse,
@@ -531,6 +543,127 @@ export const api = {
           method: "DELETE",
         }
       );
+    },
+  },
+  profileConfirmBatch(
+    payload: ProfileConfirmBatchPayload
+  ): Promise<ProfileConfirmBatchResponse> {
+    return request<ProfileConfirmBatchResponse>("/profile/confirm-batch", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  materials: {
+    preAnalyze(payload: MaterialPreAnalyzePayload): Promise<MaterialPreAnalysisResponse> {
+      return request<MaterialPreAnalysisResponse>("/materials/pre-analyze", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    list(params?: {
+      opportunity_id?: string;
+      application_id?: string;
+    }): Promise<MaterialSummaryItem[]> {
+      const qs = new URLSearchParams();
+      if (params?.opportunity_id) qs.set("opportunity_id", params.opportunity_id);
+      if (params?.application_id) qs.set("application_id", params.application_id);
+      const query = qs.toString();
+      return request<MaterialSummaryItem[]>(`/materials${query ? `?${query}` : ""}`);
+    },
+    create(payload: MaterialCreatePayload): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>("/materials", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    get(materialId: string): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(`/materials/${materialId}`);
+    },
+    updateVersion(
+      materialId: string,
+      versionId: string,
+      payload: {
+        structured_content: ResumeStructuredContent;
+        user_instructions?: string | null;
+      }
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(
+        `/materials/${materialId}/versions/${versionId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    deriveVersion(
+      materialId: string,
+      versionId: string,
+      payload?: {
+        structured_content?: ResumeStructuredContent | null;
+        user_instructions?: string | null;
+      }
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(
+        `/materials/${materialId}/versions/${versionId}/derive`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload ?? {}),
+        }
+      );
+    },
+    regenerate(
+      materialId: string,
+      payload?: {
+        target_language?: MaterialTargetLanguage | null;
+        contact_options?: ContactInclusionOptions;
+        user_instructions?: string | null;
+      }
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(`/materials/${materialId}/regenerate`, {
+        method: "POST",
+        body: JSON.stringify(payload ?? {}),
+      });
+    },
+    approveVersion(
+      materialId: string,
+      versionId: string
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(
+        `/materials/${materialId}/versions/${versionId}/approve`,
+        { method: "POST" }
+      );
+    },
+    exportVersion(
+      materialId: string,
+      versionId: string,
+      format: MaterialExportFormat = "markdown"
+    ): Promise<MaterialExportResponse> {
+      return request<MaterialExportResponse>(
+        `/materials/${materialId}/versions/${versionId}/export?format=${format}`
+      );
+    },
+    link(
+      materialId: string,
+      payload: { application_id: string; version_id: string }
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(`/materials/${materialId}/link`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    unlink(
+      materialId: string,
+      payload: { application_id: string }
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(`/materials/${materialId}/unlink`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    remove(materialId: string): Promise<void> {
+      return request<void>(`/materials/${materialId}`, {
+        method: "DELETE",
+      });
     },
   },
 };

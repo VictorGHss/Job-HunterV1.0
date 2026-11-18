@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 03.1 — Pipeline de Gestão de Candidaturas
+- **Fase atual:** Fase 04.1 — Fundação de Materiais e Currículo Direcionado Determinístico
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -56,7 +56,8 @@ job-hunter/
 │   │   │   ├── 0006_seniority_experience_matching.py
 │   │   │   ├── 0007_applications_pipeline.py
 │   │   │   ├── 0008_active_app_uniq.py
-│   │   │   └── 0009_application_followup_and_interview_logs.py
+│   │   │   ├── 0009_application_followup_and_interview_logs.py
+│   │   │   └── 0010_application_materials.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -65,6 +66,7 @@ job-hunter/
 │   │   │   │   ├── applications.py
 │   │   │   │   ├── auth.py
 │   │   │   │   ├── health.py
+│   │   │   │   ├── materials.py
 │   │   │   │   ├── opportunities.py
 │   │   │   │   └── profile.py
 │   │   │   └── deps.py
@@ -76,15 +78,21 @@ job-hunter/
 │   │   │   └── session.py
 │   │   ├── models/
 │   │   │   ├── application.py
+│   │   │   ├── material.py
 │   │   │   ├── opportunity.py
 │   │   │   ├── profile.py
 │   │   │   └── user.py
 │   │   ├── schemas/
 │   │   │   ├── application.py
 │   │   │   ├── auth.py
+│   │   │   ├── material.py
 │   │   │   ├── opportunity.py
 │   │   │   └── profile.py
 │   │   ├── services/
+│   │   │   ├── materials/
+│   │   │   │   ├── fact_selector.py
+│   │   │   │   ├── material_service.py
+│   │   │   │   └── resume_composer.py
 │   │   │   ├── opportunities/
 │   │   │   │   ├── connectors/
 │   │   │   │   ├── matching.py
@@ -234,7 +242,14 @@ A partir de qualquer vaga do catálogo (**Acompanhar candidatura**) ou diretamen
 - **Entrevistas, Testes Técnicos e Contatos (`0009_followup_interview_logs`):** múltiplas rodadas em `application_interviews` (com reagendamento preservando `previous_scheduled_at` e sincronização contínua de `Application.interview_at` para a próxima entrevista futura), múltiplos desafios em `application_assessments` (com links separados de instruções/entrega, prazo, feedback e sincronização/fallback exclusivo com `assessment_deadline_at` sem duplicação na agenda) e múltiplos contatos em `application_contacts` (`/api/v1/applications/{id}/interviews`, `/assessments`, `/contacts`).
 - **Agenda Unificada, Estagnação e Follow-up Determinístico:** `GET /api/v1/applications/agenda?days=30` consolida eventos em ordem cronológica real UTC (convertidos para o fuso local no navegador, com alertas de 24h e vencidos, visão semanal/cronológica no desktop e lista vertical no mobile); `GET /api/v1/applications/stale?stale_days=7` detecta processos em `applied` (> 10 dias por padrão) ou `interview` (> 7 dias por padrão) sem interação externa registrada (`last_external_interaction_at` atualizado somente via `POST /api/v1/applications/{id}/external-interaction` ou conclusão real de entrevista, **nunca** por `updated_at`, representando estritamente o **maior timestamp conhecido** — interações retroativas seguem preservadas no histórico sem fazer o resumo retroceder no tempo); e `GET /api/v1/applications/{id}/follow-up-template` gera mensagem determinística em PT-BR pronta para cópia manual, sem IA nem envios automáticos.
 
-### 4.7. Encerrando o Ambiente
+### 4.7. Materiais e Currículo Direcionado Determinístico (Subfase 04.1)
+Nos cards de oportunidades (**Gerar currículo**), na aba **Materiais** dos detalhes de candidatura ou pelo **Estúdio de Currículo** no Perfil:
+- **Pré-análise transparente:** identifica fatos confirmados relevantes para a vaga, separa itens `pending_validation` (elegíveis para confirmação em lote seletiva via `POST /api/v1/profile/confirm-batch` sem pré-seleção) de itens `draft`, lista requisitos sem evidência confirmada e bloqueia geração caso não haja conteúdo substantivo confirmado.
+- **Política de confirmação factual obrigatória (Subfases 04.1.1 e 04.1.2):** qualquer edição que altere o conteúdo factual de um registro confirmado revoga automaticamente a confirmação (`pending_validation`, `confirmed_at = None`), mesmo que o cliente reenvie `verification_status="confirmed"`. A confirmação pertence ao conteúdo revisado, não ao valor de status carregado anteriormente pelo formulário. Já registros em `draft` ou `pending_validation` aceitam confirmação intencional (`confirmed`) explicitamente solicitada pelo usuário (com ou sem edição simultânea), enquanto requisições sem alteração factual que omitam `verification_status` no payload preservam o estado atual via `model_fields_set`. Oportunidades privadas de terceiros retornam `404 Not Found` sem expor nenhum dado em pré-análise ou geração de materiais.
+- **Geração determinística e fidelidade estrita (`pt-BR` e `en`):** compõe currículo estruturado (`structured_content` JSONB) sem IA externa, preservando separação entre `WorkExperience` e `ProfessionalProject`, `eligible_as_target_role`, status acadêmico (`in_progress`, `completed`, `paused`, `planned`), proficiências exatas e opções explícitas de inclusão de contatos.
+- **Versionamento, aprovação, exportação e vínculo:** permite editar seções do rascunho mais recente com reconciliação server-side de proveniência (`confirmed_fact`, `manual_edit`, `user_authored`), aprovar versões tornando-as imutáveis, derivar novas versões (`/derive`) ou regenerar do perfil (`/regenerate`), exportar em Markdown/Texto simples e vincular versões aprovadas a candidaturas preservando histórico completo em `application_material_links`.
+
+### 4.8. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

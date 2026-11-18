@@ -17,6 +17,14 @@ from app.models.application import (
     InterviewFormat,
     InterviewStatus,
 )
+from app.models.material import (
+    ACTIVE_MATERIAL_LINK_UNIQUE_INDEX_NAME,
+    ApplicationMaterial,
+    ApplicationMaterialLink,
+    ApplicationMaterialVersion,
+    MaterialType,
+    MaterialVersionOrigin,
+)
 from app.models.opportunity import (
     EmploymentType,
     ExperienceRequirementMode,
@@ -57,8 +65,12 @@ __all__ = [
     "ApplicationAssessment",
     "ApplicationContact",
     "ApplicationInterview",
+    "ApplicationMaterial",
+    "ApplicationMaterialLink",
+    "ApplicationMaterialVersion",
     "ApplicationStatus",
     "ApplicationStatusHistory",
+    "ACTIVE_MATERIAL_LINK_UNIQUE_INDEX_NAME",
     "ASSESSMENT_STATUS_LABELS_PT",
     "AssessmentStatus",
     "AuthRateLimit",
@@ -77,6 +89,8 @@ __all__ = [
     "InterviewStatus",
     "Language",
     "LanguageProficiency",
+    "MaterialType",
+    "MaterialVersionOrigin",
     "Opportunity",
     "OpportunitySource",
     "OpportunitySourceLink",

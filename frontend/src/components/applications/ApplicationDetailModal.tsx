@@ -7,13 +7,16 @@ import {
   Copy,
   Edit3,
   ExternalLink,
+  FileText,
   History,
+  Link2,
   Mail,
   MapPin,
   MessageSquareText,
   Plus,
   ShieldAlert,
   Trash2,
+  Unlink2,
   Users,
   X,
   XCircle,
@@ -22,6 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Textarea } from "@/components/ui/input";
 import { ApiError, api } from "@/lib/api";
+import { MaterialWorkspaceModal } from "@/components/materials/MaterialWorkspaceModal";
 import type {
   ApplicationAssessmentItem,
   ApplicationContactItem,
@@ -33,6 +37,7 @@ import type {
   ExternalInteractionType,
   FollowUpTemplateResponse,
   InterviewFormat,
+  MaterialSummaryItem,
   SeniorityLevel,
   WorkMode,
 } from "@/types/api";
@@ -54,6 +59,7 @@ interface ApplicationDetailModalProps {
   onClose: () => void;
   onRefreshApplication: (updated: ApplicationItem) => Promise<void>;
   onDeletedApplication: () => Promise<void>;
+  onNavigateProfile?: () => void;
 }
 
 const INTERVIEW_FORMAT_OPTIONS: Array<{
@@ -112,6 +118,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   onClose,
   onRefreshApplication,
   onDeletedApplication,
+  onNavigateProfile,
 }) => {
   const [activeTab, setActiveTab] = useState<DetailTabKey>(initialTab);
   const [detailSaving, setDetailSaving] = useState(false);
@@ -179,9 +186,44 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     useState<FollowUpTemplateResponse | null>(null);
   const [copiedFollowUp, setCopiedFollowUp] = useState(false);
 
+  // Aba Materiais (Fase 04.1)
+  const [linkedMaterials, setLinkedMaterials] = useState<MaterialSummaryItem[]>(
+    []
+  );
+  const [availableMaterials, setAvailableMaterials] = useState<
+    MaterialSummaryItem[]
+  >([]);
+  const [materialsLoading, setMaterialsLoading] = useState(false);
+  const [materialWorkspaceOpen, setMaterialWorkspaceOpen] = useState(false);
+  const [materialWorkspaceId, setMaterialWorkspaceId] = useState<string | null>(
+    null
+  );
+
+  const loadMaterialsForApp = async () => {
+    setMaterialsLoading(true);
+    try {
+      const [linked, all] = await Promise.all([
+        api.materials.list({ application_id: selectedApp.id }),
+        api.materials.list(),
+      ]);
+      setLinkedMaterials(linked);
+      const linkedIds = new Set(linked.map((m) => m.id));
+      setAvailableMaterials(all.filter((m) => !linkedIds.has(m.id)));
+    } catch {
+      // Silencioso para não bloquear abas pré-existentes da candidatura caso materiais falhem
+    } finally {
+      setMaterialsLoading(false);
+    }
+  };
+
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab, selectedApp.id]);
+
+  useEffect(() => {
+    void loadMaterialsForApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedApp.id]);
 
   useEffect(() => {
     setEditNextAction(selectedApp.next_action || "");
@@ -666,6 +708,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     { key: "interviews", label: "Entrevistas", count: interviews.length },
     { key: "assessments", label: "Testes técnicos", count: assessments.length },
     { key: "contacts", label: "Contatos", count: contacts.length },
+    { key: "materials", label: "Materiais", count: linkedMaterials.length },
     { key: "followup", label: "Acompanhamento" },
   ];
 
@@ -1867,7 +1910,188 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
             </div>
           </div>
         )}
+
+        {/* ABA MATERIAIS (FASE 04.1) */}
+        {activeTab === "materials" && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/20 p-4">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold">
+                  <FileText className="h-4 w-4 text-primary" />
+                  Currículos e Versões Vinculadas
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Gere currículos determinísticos com fatos confirmados, edite
+                  blocos estruturados, aprove uma versão e vincule a esta
+                  candidatura.
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => {
+                  setMaterialWorkspaceId(null);
+                  setMaterialWorkspaceOpen(true);
+                }}
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Novo currículo direcionado
+              </Button>
+            </div>
+
+            {materialsLoading ? (
+              <p className="text-xs text-muted-foreground">
+                Carregando materiais vinculados...
+              </p>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <h4 className="text-xs font-semibold text-foreground">
+                    Vinculados a esta candidatura ({linkedMaterials.length})
+                  </h4>
+                  {linkedMaterials.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
+                      Nenhum currículo aprovado vinculado a esta candidatura
+                      ainda.
+                    </div>
+                  ) : (
+                    linkedMaterials.map((mat) => (
+                      <div
+                        key={mat.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-background p-3 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-semibold text-foreground">
+                              {mat.title}
+                            </span>
+                            <Badge variant="secondary">
+                              v{mat.latest_version_number}
+                            </Badge>
+                            {mat.has_approved_version && (
+                              <Badge variant="default">Versão aprovada</Badge>
+                            )}
+                          </div>
+                          <div className="text-muted-foreground">
+                            Idioma: {mat.target_language} · Atualizado em{" "}
+                            {formatLocalDate(mat.updated_at)}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setMaterialWorkspaceId(mat.id);
+                              setMaterialWorkspaceOpen(true);
+                            }}
+                          >
+                            Abrir / Editar
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={detailSaving}
+                            onClick={async () => {
+                              setDetailSaving(true);
+                              setDetailError(null);
+                              try {
+                                await api.materials.unlink(mat.id, {
+                                  application_id: selectedApp.id,
+                                });
+                                setDetailSuccess(
+                                  "Material desvinculado desta candidatura."
+                                );
+                                await loadMaterialsForApp();
+                              } catch (err) {
+                                setDetailError(
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Erro ao desvincular material."
+                                );
+                              } finally {
+                                setDetailSaving(false);
+                              }
+                            }}
+                          >
+                            <Unlink2 className="mr-1.5 h-3.5 w-3.5" />
+                            Desvincular
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {availableMaterials.length > 0 && (
+                  <div className="space-y-2 pt-2">
+                    <h4 className="text-xs font-semibold text-foreground">
+                      Outros materiais seus disponíveis ({availableMaterials.length})
+                    </h4>
+                    {availableMaterials.map((mat) => (
+                      <div
+                        key={mat.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 p-3 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-semibold text-foreground">
+                              {mat.title}
+                            </span>
+                            <Badge variant="outline">
+                              v{mat.latest_version_number}
+                            </Badge>
+                            {mat.has_approved_version ? (
+                              <Badge variant="secondary">Aprovado</Badge>
+                            ) : (
+                              <Badge variant="outline">Aguardando aprovação</Badge>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setMaterialWorkspaceId(mat.id);
+                              setMaterialWorkspaceOpen(true);
+                            }}
+                          >
+                            <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                            Abrir e vincular
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
+
+      {materialWorkspaceOpen && (
+        <MaterialWorkspaceModal
+          open={materialWorkspaceOpen}
+          onClose={() => setMaterialWorkspaceOpen(false)}
+          opportunityId={selectedApp.opportunity_id || null}
+          applicationId={selectedApp.id}
+          targetTitle={
+            selectedApp.company_name
+              ? `${selectedApp.role_title} — ${selectedApp.company_name}`
+              : selectedApp.role_title
+          }
+          initialMaterialId={materialWorkspaceId}
+          onMaterialChanged={() => {
+            void loadMaterialsForApp();
+          }}
+          onNavigateProfile={onNavigateProfile}
+        />
+      )}
     </div>
   );
 };

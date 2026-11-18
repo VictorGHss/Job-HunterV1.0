@@ -6,6 +6,67 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.1.2] - 2026-11-17 — Subfase 04.1.2: Preservação de Confirmação Intencional de Rascunhos e Detecção Real de Omissão
+
+### Corrigido / Endurecido
+
+- **Política de Confirmação e Detecção Real de Omissão (`profile_service.py`):**
+  - Introduzido `_requested_verification_status(payload)` usando `payload.model_fields_set` para diferenciar omissão real de `verification_status` no JSON dos valores default dos schemas Pydantic das sub-entidades (`PENDING_VALIDATION` / `DRAFT`).
+  - Ajustado `_apply_confirmation_policy` para implementar a matriz completa de 12 transições: registros em `draft` e `pending_validation` permitem confirmação intencional (`confirmed`, gravando `confirmed_at`) com ou sem edição simultânea; payloads sem alteração factual e com campo omitido preservam o estado atual (`draft` ou `confirmed` + `confirmed_at` exato); alterações factuais em registros `confirmed` continuam reabrindo obrigatoriamente para `pending_validation` e limpando `confirmed_at`.
+  - `_persist_status_update` e `update_profile` aplicam `_PROFILE_FACTUAL_FIELDS` de forma isolada de metadados (`preferences`), preservando confirmação quando apenas `preferences` muda.
+- **Feedback Fiel na Interface (`ProfilePage.tsx`):**
+  - Centralizado feedback pós-atualização em `notifyStatusUpdateResult`, sincronizando estado local (`profileForm.verification_status`) e mensagens estritamente a partir do `verification_status` retornado pelo servidor em dados gerais e ações rápidas de todas as sub-entidades.
+
+### Testes
+- `tests/test_profile_confirmation_phase0411.py` (37 testes): corrigidos testes anteriores com asserções imprecisas (`notes`/`verified_results` `None -> ""`, listas multi-item e omissão real via HTTP) e adicionada a classe `TestPhase0412ConfirmationMatrixAndOmission` (6 testes cobrindo `draft -> confirmed`, preservação com omissão real em todas as 6 entidades, `preferences`, `links` dict e fluxo quick-confirm de projeto).
+- `frontend/src/test/App.test.tsx` (10 testes no total, +2 para 04.1.2): confirma projeto e perfil inicialmente em `draft` e garante que o feedback da UI reflita fielmente `draft` ou `pending_validation` retornados pelo servidor.
+- Suíte backend completa em SQLite: **91/91 passando**; frontend: `typecheck`, `lint`, `vitest` (10/10) e `build` passando.
+
+---
+
+## [0.4.1.1] - 2026-11-17 — Subfase 04.1.1: Hardening de Confirmação e Autorização de Oportunidades
+
+### Corrigido / Endurecido
+
+- **Invalidação de Confirmação Após Alteração Factual (`profile_service.py`):**
+  - As cinco funções de atualização de sub-entidades (`update_experience`, `update_education`, `update_skill`, `update_language`, `update_project`) e `update_profile` passaram a usar a política centralizada `_apply_confirmation_policy`, que rebaixa obrigatoriamente para `pending_validation` e limpa `confirmed_at` sempre que o conteúdo factual for alterado, **independentemente** de o cliente ter reenviado `verification_status="confirmed"`.
+  - Adicionado `_normalize_factual_value` para comparação semântica: `None` e `""` são equivalentes em campos opcionais; listas de tags (`technologies`, `related_skills`) são comparadas como conjuntos sem ordem.
+  - Comportamento completo de acordo com os cenários A–G: auto-confirmação de edição bloqueada (A/D); preservação de confirmação quando nada mudou (B/C); reabertura e reconfirmação intencional permitidas (E/F); rascunho nunca confirmado acidentalmente por defaults de PUT (G).
+- **Autorização de Oportunidades Privadas em Materiais (`material_service.py`):**
+  - `_get_opportunity` substituiu `db.get(Opportunity, id)` por `SELECT ... WHERE id = ? AND (source_id IS NOT NULL OR created_by_user_id = ?)`, impedindo acesso a oportunidades privadas de terceiros.
+  - Oportunidades privadas alheias retornam `404 Not Found` idêntico ao de registro inexistente, sem expor título, empresa, descrição, tecnologias ou qualquer metadado.
+  - Proteção aplicada em `pre_analyze_material` e `create_material` via `_resolve_target_context`.
+
+### Testes
+- `tests/test_profile_confirmation_phase0411.py` (31 testes): cobre as seis entidades com cenários A–G, normalização `None/""` e de listas, persistência no banco e quick-confirm via API.
+- `tests/test_opportunity_authorization_phase0411.py` (6 testes): TC-0411-01 a TC-0411-06 — pré-análise e criação com oportunidade privada alheia (`404`), acesso do proprietário (`200/201`), oportunidade pública acessível por qualquer usuário, ID inexistente e isolamento sem exposição indireta.
+- Suíte completa: **85/85 passando** em SQLite e em PostgreSQL 16.
+
+---
+
+## [0.4.1] - 2026-11-17 — Subfase 04.1: Fundação de Materiais e Currículo Direcionado Determinístico
+
+### Adicionado
+- **Schema de Materiais Versionados e Rastreabilidade (`0010_application_materials`):**
+  - Novas tabelas `application_materials`, `application_material_versions` e `application_material_links`, além de restrição única composta `uq_applications_user_id_id` em `applications` (`(user_id, id)`).
+  - Integridade referencial multiusuário garantida diretamente no banco por FKs compostas (`fk_mat_links_user_app`, `fk_mat_links_user_mat`, `fk_mat_links_mat_ver`) e índice único parcial `uq_active_link_per_app_material` (`unlinked_at IS NULL`) compatível com PostgreSQL 16 e SQLite.
+- **Seletor Estrito de Fatos Confirmados e Análise de Lacunas (`services/materials/fact_selector.py`, `resume_composer.py`):**
+  - Pré-análise e geração utilizam **exclusivamente** entidades com `verification_status == 'confirmed'` (`ProfessionalProfile`, `WorkExperience`, `Education`, `Skill`, `Language`, `ProfessionalProject`).
+  - Bloqueio determinístico (`422 Unprocessable Content`) quando não há conteúdo substantivo confirmado (ao menos 1 experiência, projeto, formação ou habilidade técnica — contato + idiomas isolados não liberam geração).
+  - Separação estrita entre `WorkExperience` e `ProfessionalProject`, respeito integral a `eligible_as_target_role`, preservação de `EducationStatus` (`in_progress`, `completed`, `paused`, `planned`) e proficiências sem inflar níveis nem inventar métricas/anos.
+  - Suporte bilíngue (`pt-BR` e `en`), opções explícitas de inclusão de contato no cabeçalho e `source_facts_snapshot` sob allowlist estrita sem e-mail/telefone/endereço completo.
+- **Confirmação Seletiva em Lote e Integridade Factual no Perfil (`POST /api/v1/profile/confirm-batch`, `profile_service.py`):**
+  - Confirmação atômica seletiva exclusivamente para itens `pending_validation` marcados pelo usuário (rejeita `draft`, IDs cruzados ou inexistentes com rollback integral, limite de 150 itens por requisição, `extra="forbid"`).
+  - Atualização de fatos em perfil já confirmado sem envio explícito de `verification_status` degrada automaticamente para `pending_validation` e limpa `confirmed_at`.
+- **Ciclo de Vida, Imutabilidade, Edição Estruturada e Concorrência (`/api/v1/materials`, `material_service.py`):**
+  - Endpoints sob `/api/v1/materials` para `POST /pre-analyze`, `GET`, `POST`, `GET /{id}`, `PUT /{id}/versions/{ver_id}`, `POST /{id}/versions/{ver_id}/derive`, `POST /{id}/regenerate`, `POST /{id}/versions/{ver_id}/approve`, `GET /{id}/versions/{ver_id}/export`, `POST /link`, `POST /unlink` e `DELETE /{id}`.
+  - Alocação de versões protegida por `SELECT ... FOR UPDATE` em `application_materials` + retry controlado em `IntegrityError`.
+  - Versões aprovadas ou vinculadas ficam imutáveis (`409 Conflict`), exigindo derivação explícita (`/derive`); reconciliação server-side impede forjar `provenance="confirmed_fact"` em edições manuais ou misturar `project:` em `experiences`.
+- **Interface Integrada (`MaterialWorkspaceModal.tsx`, `OpportunityDiscoveryPage.tsx`, `ApplicationDetailModal.tsx`, `ProfilePage.tsx`):**
+  - Botão **Gerar currículo** nos cards de oportunidades, aba **Materiais** no modal de detalhes da candidatura (com criação, aprovação, exportação em Markdown/Texto e vínculo/desvínculo), e acesso no **Perfil** para revisão seletiva em lote sem pré-seleção automática.
+
+---
+
 ## [0.3.2.1] - 2026-11-16 — Fase 03.2.1: Correção da Referência Temporal de Interações Externas
 
 ### Corrigido / Endurecido
