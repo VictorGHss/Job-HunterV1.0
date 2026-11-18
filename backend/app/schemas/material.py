@@ -813,6 +813,9 @@ class MaterialSummaryResponse(BaseModel):
     latest_version_number: int
     latest_version_id: uuid.UUID | None = None
     latest_is_approved: bool = False
+    linked_version_id: uuid.UUID | None = None
+    linked_version_number: int | None = None
+    linked_version_is_approved: bool = False
     has_approved_version: bool = False
     active_links_count: int = 0
     created_at: datetime

@@ -2996,3 +2996,592 @@ describe("Job Hunter Frontend - Fase 04.2 Propostas, Cartas e Mensagens Direcion
     });
   });
 });
+
+describe("Job Hunter Frontend - Fase 04.3 Exportação Profissional em PDF e DOCX", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+  });
+
+  it("exibe preview documental com templates, download final/rascunho, bloqueio por pendências e tratamento de erro", async () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-43",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [
+        buildMockOpportunity({
+          tracked_application_id: "app-43-1",
+          tracked_application_status: "preparing",
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+    vi.spyOn(api.materials, "preAnalyze").mockResolvedValue({
+      can_generate: true,
+      blocking_reasons: [],
+      material_type: "resume",
+      compatible_material_types: [
+        "resume",
+        "cover_letter",
+        "recruiter_message",
+        "application_answers",
+      ],
+      target_language: "pt-BR",
+      opportunity_context: {
+        opportunity_id: "opp-1",
+        application_id: "app-43-1",
+        title: "Desenvolvedor Python Júnior",
+        company_name: "Orbit Cloud",
+        professional_area: "backend",
+        seniority_level: "junior",
+        employment_type: "clt",
+        opportunity_type: "job",
+        experience_summary: null,
+        required_technologies: ["Python"],
+        desirable_technologies: ["FastAPI"],
+        all_technologies: ["Python", "FastAPI"],
+        language: "pt-BR",
+      },
+      contact_preview: {
+        profile_confirmed: true,
+        has_full_name: true,
+        has_email: true,
+        has_phone: false,
+        has_location: true,
+        links_count: 1,
+        location_label: "Cidade Exemplo, Estado Exemplo, Brasil",
+      },
+      used_facts: [],
+      unconfirmed_warnings: [],
+      missing_requirements: [],
+      additional_info_needed: [],
+      confirmed_counts: {
+        profile: 1,
+        experiences: 1,
+        projects: 1,
+        educations: 1,
+        skills: 1,
+        languages: 1,
+      },
+    });
+
+    const approvedResumeMat: MaterialDetailResponse = {
+      id: "mat-43-res",
+      material_type: "resume",
+      title: "Currículo — Orbit Cloud",
+      target_language: "pt-BR",
+      opportunity_id: "opp-1",
+      opportunity_title: "Desenvolvedor Python Júnior",
+      opportunity_company_name: "Orbit Cloud",
+      latest_version_number: 1,
+      has_approved_version: true,
+      versions: [
+        {
+          id: "ver-43-res-1",
+          material_id: "mat-43-res",
+          material_type: "resume",
+          version_number: 1,
+          origin: "generated",
+          parent_version_id: null,
+          user_instructions: null,
+          structured_content: {
+            schema_version: 1,
+            language: "pt-BR",
+            header: {
+              full_name: "Usuário Teste",
+              professional_title: "Desenvolvedor Backend Python",
+              location_text: "Cidade Exemplo, Estado Exemplo, Brasil",
+              email: "usuario@example.com",
+              phone: null,
+              links: [{ label: "GitHub", url: "https://github.com/usuario" }],
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            summary: {
+              text: "Experiência em Python e FastAPI.",
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            target_alignment: null,
+            experiences: [],
+            projects: [],
+            education: [],
+            skills: [],
+            languages: [],
+            manual_notes: [],
+            has_unverified_manual_edits: false,
+          } satisfies ResumeStructuredContent,
+          source_facts_snapshot: { schema_version: 1, facts: {} },
+          unconfirmed_warnings: [],
+          missing_requirements: [],
+          rendered_markdown: "# Usuário Teste\n\nExperiência em Python e FastAPI.\n",
+          rendered_plain_text: "Usuário Teste\n",
+          has_blocking_pending_fields: false,
+          pending_requirements_count: 0,
+          is_approved: true,
+          approved_at: "2026-11-17T23:00:00Z",
+          is_linked_to_any_application: false,
+          is_mutable: false,
+          created_at: "2026-11-17T23:00:00Z",
+          updated_at: "2026-11-17T23:00:00Z",
+        },
+      ],
+      links: [],
+      created_at: "2026-11-17T23:00:00Z",
+      updated_at: "2026-11-17T23:00:00Z",
+    };
+
+    const draftCoverMat: MaterialDetailResponse = {
+      ...approvedResumeMat,
+      id: "mat-43-cov",
+      material_type: "cover_letter",
+      title: "Carta — Orbit Cloud",
+      has_approved_version: false,
+      versions: [
+        {
+          ...approvedResumeMat.versions[0],
+          id: "ver-43-cov-1",
+          material_id: "mat-43-cov",
+          material_type: "cover_letter",
+          is_approved: false,
+          approved_at: null,
+          is_mutable: true,
+          structured_content: {
+            schema_version: 1,
+            material_type: "cover_letter",
+            language: "pt-BR",
+            header: {
+              full_name: "Usuário Teste",
+              professional_title: "Desenvolvedor Backend Python",
+              email: "usuario@example.com",
+              phone: null,
+              location_text: "Cidade Exemplo",
+              links: [],
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            recipient_line: {
+              text: "À equipe de seleção de Orbit Cloud",
+              source_fact_keys: [],
+              provenance: "confirmed_fact",
+            },
+            greeting: {
+              text: "Prezados(as),",
+              source_fact_keys: [],
+              provenance: "confirmed_fact",
+            },
+            opening: {
+              text: "Apresento minha candidatura.",
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            relevance_highlights: [],
+            opportunity_alignment: null,
+            closing: {
+              text: "Atenciosamente, Usuário Teste.",
+              source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+              provenance: "confirmed_fact",
+            },
+            manual_notes: [],
+            has_unverified_manual_edits: false,
+          } satisfies CoverLetterStructuredContent,
+        },
+      ],
+    };
+
+    vi.spyOn(api.materials, "create")
+      .mockResolvedValueOnce(approvedResumeMat)
+      .mockResolvedValueOnce(draftCoverMat);
+    const downloadSpy = vi
+      .spyOn(api.materials, "downloadVersion")
+      .mockResolvedValueOnce({
+        filename: "curriculo-orbit-cloud-v1.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 2048,
+      })
+      .mockRejectedValueOnce(new ApiError("Falha simulada ao baixar DOCX.", 422))
+      .mockResolvedValueOnce({
+        filename: "carta-apresentacao-orbit-cloud-v1-rascunho.docx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        sizeBytes: 4096,
+      });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerar currículo/i })
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+
+    const genBtn = await screen.findByRole("button", {
+      name: /Gerar Currículo Direcionado/i,
+    });
+    fireEvent.click(genBtn);
+    const previewTabBtn = await screen.findByRole("button", {
+      name: /Pré-visualização & Exportação/i,
+    });
+    fireEvent.click(previewTabBtn);
+
+    // Muda para tablet 768x1024 e altera template para Modern Minimalist
+    window.innerWidth = 768;
+    window.innerHeight = 1024;
+    const modernBtn = await screen.findByRole("button", {
+      name: /^Modern Minimalist$/i,
+    });
+    fireEvent.click(modernBtn);
+    expect(modernBtn).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByLabelText(/Pré-visualização documental \(modern_minimal\)/i)
+    ).toBeInTheDocument();
+
+    // Download PDF aprovado -> allow_draft: false
+    fireEvent.click(screen.getByRole("button", { name: /^Baixar PDF$/i }));
+    await waitFor(() => {
+      expect(downloadSpy).toHaveBeenCalledWith("mat-43-res", "ver-43-res-1", {
+        format: "pdf",
+        template: "modern_minimal",
+        allow_draft: false,
+      });
+      expect(
+        screen.getByText(/Download concluído: curriculo-orbit-cloud-v1\.pdf/i)
+      ).toBeInTheDocument();
+    });
+
+    // Erro de download DOCX exibido sem quebrar UI
+    fireEvent.click(screen.getByRole("button", { name: /^Baixar DOCX$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Falha simulada ao baixar DOCX\./i)
+      ).toBeInTheDocument();
+    });
+
+    // Alterna visualização para Markdown
+    fireEvent.click(screen.getByRole("button", { name: /^Markdown$/i }));
+    expect(screen.getByText(/# Usuário Teste/i)).toBeInTheDocument();
+
+    // Fecha e testa modo Rascunho com Carta não aprovada + versão com pendências bloqueadas
+    fireEvent.click(
+      screen.getByRole("button", { name: /Fechar janela de material/i })
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+    const coverRadio = await screen.findByRole("radio", {
+      name: /Carta de Apresentação/i,
+    });
+    fireEvent.click(coverRadio);
+    const genCoverBtn = await screen.findByRole("button", {
+      name: /Gerar Carta/i,
+    });
+    fireEvent.click(genCoverBtn);
+
+    const coverPreviewTab = await screen.findByRole("button", {
+      name: /Pré-visualização & Exportação/i,
+    });
+    fireEvent.click(coverPreviewTab);
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText(/Pré-visualização documental \(classic_ats\)/i)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Baixar DOCX \(Rascunho\)/i })
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Baixar DOCX \(Rascunho\)/i })
+    );
+    await waitFor(() => {
+      expect(downloadSpy).toHaveBeenLastCalledWith("mat-43-cov", "ver-43-cov-1", {
+        format: "docx",
+        template: "classic_ats",
+        allow_draft: true,
+      });
+    });
+
+    // Também valida bloqueio de downloads quando há pendências obrigatórias na versão
+    const blockedPreviewMat: MaterialDetailResponse = {
+      ...draftCoverMat,
+      id: "mat-43-blocked",
+      material_type: "application_answers",
+      versions: [
+        {
+          ...draftCoverMat.versions[0],
+          id: "ver-43-blocked-1",
+          material_id: "mat-43-blocked",
+          material_type: "application_answers",
+          has_blocking_pending_fields: true,
+          pending_requirements_count: 2,
+        },
+      ],
+    };
+    vi.spyOn(api.materials, "create").mockResolvedValueOnce(blockedPreviewMat);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Fechar janela de material/i })
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+    const genBlockedBtn = await screen.findByRole("button", {
+      name: /Gerar Currículo Direcionado/i,
+    });
+    fireEvent.click(genBlockedBtn);
+    const blockedPreviewTab = await screen.findByRole("button", {
+      name: /Pré-visualização & Exportação/i,
+    });
+    fireEvent.click(blockedPreviewTab);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Downloads PDF\/DOCX bloqueados/i)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Baixar PDF \(Rascunho\)/i })
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: /Baixar DOCX \(Rascunho\)/i })
+      ).toBeDisabled();
+    });
+  });
+
+  it("baixa exatamente a versão histórica vinculada na aba Materiais da candidatura e valida requestBlob", async () => {
+    window.innerWidth = 1280;
+    window.innerHeight = 800;
+
+    // 1. Valida requestBlob real extraindo filename e revogando ObjectURL
+    const createUrlSpy = vi.fn().mockReturnValue("blob:mock-url-43");
+    const revokeUrlSpy = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      value: createUrlSpy,
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: revokeUrlSpy,
+      configurable: true,
+    });
+    const fakeBlob = new Blob(["%PDF-1.4\n%%EOF"], { type: "application/pdf" });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        "content-type": "application/pdf",
+        "content-disposition":
+          'attachment; filename="curriculo-orbit-v1.pdf"; filename*=UTF-8\'\'curriculo-orbit-v1.pdf',
+      }),
+      blob: async () => fakeBlob,
+    } as unknown as Response);
+
+    const blobRes = await api.materials.downloadVersion("mat-x", "ver-x1", {
+      format: "pdf",
+      template: "classic_ats",
+      allow_draft: false,
+    });
+    expect(blobRes.filename).toBe("curriculo-orbit-v1.pdf");
+    expect(blobRes.contentType).toBe("application/pdf");
+    expect(createUrlSpy).toHaveBeenCalledTimes(1);
+    fetchMock.mockRestore();
+
+    // 2. Na aba Materiais de ApplicationDetailModal, material vinculado usa linked_version_id (v1), mesmo com v2 rascunho mais recente
+    const appItem: ApplicationItem = {
+      id: "app-43-hist",
+      opportunity_id: "opp-1",
+      opportunity_source_status: "active",
+      company_name: "Orbit Cloud",
+      role_title: "Backend Python Engineer",
+      personal_summary: null,
+      source_name: "Remote OK",
+      source_url: "https://remoteok.com/jobs/43",
+      application_url: "https://orbit.example.com/jobs/43",
+      location_text: "Remoto",
+      work_mode: "remote",
+      employment_type: "clt",
+      seniority_level: "junior",
+      status: "applied",
+      status_label: "Candidatura enviada",
+      is_closed: false,
+      applied_at: "2026-11-17T10:00:00Z",
+      assessment_deadline_at: null,
+      interview_at: null,
+      expected_response_at: null,
+      last_external_interaction_at: null,
+      last_external_interaction_type: null,
+      last_external_interaction_type_label: null,
+      last_external_interaction_note: null,
+      notes: null,
+      next_action: null,
+      next_action_due_at: null,
+      next_deadline_at: null,
+      next_deadline_label: null,
+      closed_at: null,
+      status_history: [],
+      interviews: [],
+      assessments: [],
+      contacts: [],
+      created_at: "2026-11-17T10:00:00Z",
+      updated_at: "2026-11-17T10:00:00Z",
+    };
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-43-hist",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+    vi.spyOn(api.applications, "kanban").mockResolvedValue({
+      columns: [
+        { status: "interested", label: "Interesse", is_closed: false, count: 0, items: [] },
+        { status: "preparing", label: "Preparação", is_closed: false, count: 0, items: [] },
+        { status: "applied", label: "Candidatura enviada", is_closed: false, count: 1, items: [appItem] },
+        { status: "assessment", label: "Teste técnico", is_closed: false, count: 0, items: [] },
+        { status: "interview", label: "Entrevista", is_closed: false, count: 0, items: [] },
+        { status: "offer", label: "Proposta", is_closed: false, count: 0, items: [] },
+      ],
+      closed_columns: [],
+      closed_items: [],
+      indicators: {
+        total_count: 1,
+        active_count: 1,
+        applied_count: 1,
+        assessment_count: 0,
+        interview_count: 0,
+        offer_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        withdrawn_count: 0,
+        closed_count: 0,
+        status_counts: { applied: 1 },
+      },
+      labels: { applied: "Candidatura enviada" },
+    });
+    vi.spyOn(api.applications, "agenda").mockResolvedValue({
+      days: 30,
+      summary: {
+        total_count: 0,
+        overdue_count: 0,
+        imminent_24h_count: 0,
+        today_count: 0,
+        interviews_count: 0,
+        assessments_count: 0,
+        actions_count: 0,
+        reference_now_utc: new Date().toISOString(),
+      },
+      events: [],
+    });
+    vi.spyOn(api.applications, "stale").mockResolvedValue({
+      stale_days_param: 7,
+      total_count: 0,
+      items: [],
+    });
+    vi.spyOn(api.applications, "get").mockResolvedValue(appItem);
+    vi.spyOn(api.materials, "list").mockImplementation(async (params) => {
+      if (params?.application_id === "app-43-hist") {
+        return [
+          {
+            id: "mat-linked-43",
+            opportunity_id: "opp-1",
+            opportunity_title: "Backend Python Engineer",
+            opportunity_company_name: "Orbit Cloud",
+            material_type: "resume",
+            title: "Currículo Orbit Cloud",
+            target_language: "pt-BR",
+            latest_version_number: 2,
+            latest_version_id: "ver-latest-v2-unapproved",
+            latest_is_approved: false,
+            linked_version_id: "ver-linked-v1-approved",
+            linked_version_number: 1,
+            linked_version_is_approved: true,
+            has_approved_version: true,
+            active_links_count: 1,
+            created_at: "2026-11-17T10:00:00Z",
+            updated_at: "2026-11-17T11:00:00Z",
+          },
+        ];
+      }
+      return [];
+    });
+
+    const downloadVerSpy = vi
+      .spyOn(api.materials, "downloadVersion")
+      .mockResolvedValue({
+        filename: "curriculo-orbit-cloud-v1.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 1500,
+      });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /^Candidaturas$/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Candidaturas$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /Abrir detalhes/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Abrir detalhes/i })[0]
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Materiais/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: /^Materiais/i }));
+
+    const pdfLinkedBtn = await screen.findByRole("button", {
+      name: /Baixar PDF de Currículo Orbit Cloud v1/i,
+    });
+    fireEvent.click(pdfLinkedBtn);
+    await waitFor(() => {
+      expect(downloadVerSpy).toHaveBeenCalledWith(
+        "mat-linked-43",
+        "ver-linked-v1-approved",
+        {
+          format: "pdf",
+          template: "classic_ats",
+          allow_draft: false,
+        }
+      );
+    });
+
+    const docxLinkedBtn = screen.getByRole("button", {
+      name: /Baixar DOCX de Currículo Orbit Cloud v1/i,
+    });
+    fireEvent.click(docxLinkedBtn);
+    await waitFor(() => {
+      expect(downloadVerSpy).toHaveBeenCalledWith(
+        "mat-linked-43",
+        "ver-linked-v1-approved",
+        {
+          format: "docx",
+          template: "classic_ats",
+          allow_draft: false,
+        }
+      );
+    });
+  });
+});

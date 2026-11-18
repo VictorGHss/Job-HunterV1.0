@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Copy,
+  Download,
   Edit3,
   ExternalLink,
   FileText,
@@ -1955,76 +1956,164 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                       ainda.
                     </div>
                   ) : (
-                    linkedMaterials.map((mat) => (
-                      <div
-                        key={mat.id}
-                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-background p-3 text-xs"
-                      >
-                        <div className="space-y-0.5">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-semibold text-foreground">
-                              {mat.title}
-                            </span>
-                            <Badge variant="outline">
-                              {mat.material_type}
-                            </Badge>
-                            <Badge variant="secondary">
-                              v{mat.latest_version_number}
-                            </Badge>
-                            {mat.has_approved_version && (
-                              <Badge variant="default">Versão aprovada</Badge>
+                    linkedMaterials.map((mat) => {
+                      const linkedVersionId =
+                        mat.linked_version_id || mat.latest_version_id;
+                      const linkedVersionNumber =
+                        mat.linked_version_number ?? mat.latest_version_number;
+                      const isLinkedVersionApproved = mat.linked_version_id
+                        ? Boolean(mat.linked_version_is_approved)
+                        : mat.has_approved_version;
+
+                      return (
+                        <div
+                          key={mat.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-background p-3 text-xs"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-semibold text-foreground">
+                                {mat.title}
+                              </span>
+                              <Badge variant="outline">
+                                {mat.material_type}
+                              </Badge>
+                              <Badge variant="secondary">
+                                v{linkedVersionNumber}
+                              </Badge>
+                              {isLinkedVersionApproved && (
+                                <Badge variant="default">Versão aprovada</Badge>
+                              )}
+                            </div>
+                            <div className="text-muted-foreground">
+                              Idioma: {mat.target_language} · Atualizado em{" "}
+                              {formatLocalDate(mat.updated_at)}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {linkedVersionId && isLinkedVersionApproved && (
+                              <>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={detailSaving}
+                                  aria-label={`Baixar PDF de ${mat.title} v${linkedVersionNumber}`}
+                                  onClick={async () => {
+                                    setDetailSaving(true);
+                                    setDetailError(null);
+                                    try {
+                                      const res =
+                                        await api.materials.downloadVersion(
+                                          mat.id,
+                                          linkedVersionId,
+                                          {
+                                            format: "pdf",
+                                            template: "classic_ats",
+                                            allow_draft: false,
+                                          }
+                                        );
+                                      setDetailSuccess(
+                                        `Download concluído: ${res.filename}`
+                                      );
+                                    } catch (err) {
+                                      setDetailError(
+                                        err instanceof Error
+                                          ? err.message
+                                          : "Erro ao baixar PDF vinculado."
+                                      );
+                                    } finally {
+                                      setDetailSaving(false);
+                                    }
+                                  }}
+                                >
+                                  <Download className="mr-1 h-3.5 w-3.5" />
+                                  PDF
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={detailSaving}
+                                  aria-label={`Baixar DOCX de ${mat.title} v${linkedVersionNumber}`}
+                                  onClick={async () => {
+                                    setDetailSaving(true);
+                                    setDetailError(null);
+                                    try {
+                                      const res =
+                                        await api.materials.downloadVersion(
+                                          mat.id,
+                                          linkedVersionId,
+                                          {
+                                            format: "docx",
+                                            template: "classic_ats",
+                                            allow_draft: false,
+                                          }
+                                        );
+                                      setDetailSuccess(
+                                        `Download concluído: ${res.filename}`
+                                      );
+                                    } catch (err) {
+                                      setDetailError(
+                                        err instanceof Error
+                                          ? err.message
+                                          : "Erro ao baixar DOCX vinculado."
+                                      );
+                                    } finally {
+                                      setDetailSaving(false);
+                                    }
+                                  }}
+                                >
+                                  <Download className="mr-1 h-3.5 w-3.5" />
+                                  DOCX
+                                </Button>
+                              </>
                             )}
-                          </div>
-                          <div className="text-muted-foreground">
-                            Idioma: {mat.target_language} · Atualizado em{" "}
-                            {formatLocalDate(mat.updated_at)}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setMaterialWorkspaceId(mat.id);
+                                setMaterialWorkspaceOpen(true);
+                              }}
+                            >
+                              Abrir / Editar
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              disabled={detailSaving}
+                              onClick={async () => {
+                                setDetailSaving(true);
+                                setDetailError(null);
+                                try {
+                                  await api.materials.unlink(mat.id, {
+                                    application_id: selectedApp.id,
+                                  });
+                                  setDetailSuccess(
+                                    "Material desvinculado desta candidatura."
+                                  );
+                                  await loadMaterialsForApp();
+                                } catch (err) {
+                                  setDetailError(
+                                    err instanceof Error
+                                      ? err.message
+                                      : "Erro ao desvincular material."
+                                  );
+                                } finally {
+                                  setDetailSaving(false);
+                                }
+                              }}
+                            >
+                              <Unlink2 className="mr-1.5 h-3.5 w-3.5" />
+                              Desvincular
+                            </Button>
                           </div>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              setMaterialWorkspaceId(mat.id);
-                              setMaterialWorkspaceOpen(true);
-                            }}
-                          >
-                            Abrir / Editar
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            disabled={detailSaving}
-                            onClick={async () => {
-                              setDetailSaving(true);
-                              setDetailError(null);
-                              try {
-                                await api.materials.unlink(mat.id, {
-                                  application_id: selectedApp.id,
-                                });
-                                setDetailSuccess(
-                                  "Material desvinculado desta candidatura."
-                                );
-                                await loadMaterialsForApp();
-                              } catch (err) {
-                                setDetailError(
-                                  err instanceof Error
-                                    ? err.message
-                                    : "Erro ao desvincular material."
-                                );
-                              } finally {
-                                setDetailSaving(false);
-                              }
-                            }}
-                          >
-                            <Unlink2 className="mr-1.5 h-3.5 w-3.5" />
-                            Desvincular
-                          </Button>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 

@@ -4,10 +4,12 @@ from __future__ import annotations
 import logging
 import uuid
 
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
 from app.models.opportunity import EmploymentType, OpportunityType
-from app.models.profile import Skill, SkillProficiency, VerificationStatus
+from app.models.profile import ProfessionalProject, Skill, SkillProficiency, VerificationStatus
 from tests.test_materials_phase041 import (
     _create_application,
     _create_confirmed_rich_profile,
@@ -665,3 +667,218 @@ def test_tc42_26_27_bilingual_generation_without_translating_entities(
     assert "# Application Question Responses" in qa_en
     assert "Job Hunter Engine" in qa_en
     assert "Pending candidate input:" in qa_en
+
+
+def test_l1_regenerate_preserves_freelance_and_contact_inputs(
+    make_client,
+    db_session: Session,
+):
+    """L-1 (Etapa 0): /regenerate preserva campos de freelance_proposal e contato quando omitidos ou parciais."""
+    user, client, csrf = _seed_user_and_csrf(make_client, db_session, "l1_regen@example.com")
+    _create_confirmed_rich_profile(db_session, user.id)
+    opp = _create_opportunity(
+        db_session,
+        title="Backend Freelance API",
+        company_name="Studio Dev",
+    )
+    opp.employment_type = EmploymentType.FREELANCE.value
+    opp.opportunity_type = OpportunityType.FREELANCE.value
+    db_session.commit()
+
+    created = client.post(
+        "/api/v1/materials",
+        json={
+            "opportunity_id": str(opp.id),
+            "material_type": "freelance_proposal",
+            "target_language": "pt-BR",
+            "writing_options": {
+                "freelance_inputs": {
+                    "availability": "20h semanais",
+                    "estimated_delivery": "15 dias corridos",
+                    "budget_or_price": "R$ 3.500",
+                    "scope_clarifications": "Definir formato do webhook.",
+                    "additional_requirements": "Acesso ao repositório Git.",
+                }
+            },
+        },
+        headers=_csrf_headers(csrf),
+    )
+    assert created.status_code == 201, created.text
+    mat_id = created.json()["id"]
+    v1_snapshot = created.json()["versions"][0]
+
+    # 1. Regenerar omitindo writing_options deve preservar os 5 campos comerciais
+    regen1 = client.post(
+        f"/api/v1/materials/{mat_id}/regenerate",
+        json={},
+        headers=_csrf_headers(csrf),
+    )
+    assert regen1.status_code == 201, regen1.text
+    by_num1 = {v["version_number"]: v for v in regen1.json()["versions"]}
+    assert set(by_num1) == {1, 2}
+    v1_after, v2 = by_num1[1], by_num1[2]
+    assert v1_after["structured_content"] == v1_snapshot["structured_content"]
+    v2_fields = {f["field_id"]: f for f in v2["structured_content"]["pending_fields"]}
+    assert v2_fields["availability"]["user_value"] == "20h semanais"
+    assert v2_fields["estimated_delivery"]["user_value"] == "15 dias corridos"
+    assert v2_fields["budget_or_price"]["user_value"] == "R$ 3.500"
+    assert v2_fields["scope_clarifications"]["user_value"] == "Definir formato do webhook."
+    assert v2_fields["additional_requirements"]["user_value"] == "Acesso ao repositório Git."
+    assert all(f["status"] == "provided" for f in v2_fields.values())
+    assert v2["structured_content"]["alignment_points"]["provenance"] == "user_authored"
+    assert v2["has_blocking_pending_fields"] is False
+
+    # 2. Regenerar passando apenas budget_or_price novo não sobrescreve demais campos com defaults vazios
+    regen2 = client.post(
+        f"/api/v1/materials/{mat_id}/regenerate",
+        json={
+            "writing_options": {
+                "freelance_inputs": {
+                    "budget_or_price": "R$ 4.200",
+                }
+            }
+        },
+        headers=_csrf_headers(csrf),
+    )
+    assert regen2.status_code == 201, regen2.text
+    by_num2 = {v["version_number"]: v for v in regen2.json()["versions"]}
+    v3 = by_num2[3]
+    v3_fields = {f["field_id"]: f for f in v3["structured_content"]["pending_fields"]}
+    assert v3_fields["budget_or_price"]["user_value"] == "R$ 4.200"
+    assert v3_fields["availability"]["user_value"] == "20h semanais"
+    assert v3_fields["estimated_delivery"]["user_value"] == "15 dias corridos"
+    assert v3_fields["scope_clarifications"]["user_value"] == "Definir formato do webhook."
+    assert v3_fields["additional_requirements"]["user_value"] == "Acesso ao repositório Git."
+
+    # 3. Também preserva contact_name e contact_context em recruiter_message
+    rm_resp = client.post(
+        "/api/v1/materials",
+        json={
+            "opportunity_id": str(opp.id),
+            "material_type": "recruiter_message",
+            "target_language": "pt-BR",
+            "writing_options": {
+                "channel": "email",
+                "contact_name": "Mariana Costa",
+                "contact_context": "Enviei minha candidatura pela plataforma ontem.",
+            },
+        },
+        headers=_csrf_headers(csrf),
+    )
+    assert rm_resp.status_code == 201
+    rm_id = rm_resp.json()["id"]
+    rm_regen = client.post(
+        f"/api/v1/materials/{rm_id}/regenerate",
+        json={},
+        headers=_csrf_headers(csrf),
+    )
+    assert rm_regen.status_code == 201
+    rm_by_num = {v["version_number"]: v for v in rm_regen.json()["versions"]}
+    rm_v2 = rm_by_num[2]["structured_content"]
+    assert rm_v2["channel"] == "email"
+    assert "Mariana Costa" in rm_v2["greeting"]["text"]
+    assert "Enviei minha candidatura pela plataforma ontem." in rm_v2["body"]["text"]
+
+
+def test_l2_application_answers_regenerate_preserves_questions_manual_answers_and_reevaluates_facts(
+    make_client,
+    db_session: Session,
+):
+    """L-2 (Etapa 0): /regenerate de application_answers mantém perguntas, respostas manuais e reavalia fatos."""
+    user, client, csrf = _seed_user_and_csrf(make_client, db_session, "l2_regen@example.com")
+    _create_confirmed_rich_profile(db_session, user.id)
+    opp = _create_opportunity(
+        db_session,
+        title="Backend Python Engineer",
+        company_name="Orbit Cloud",
+        technologies=["Python", "FastAPI", "Redis"],
+    )
+
+    created = client.post(
+        "/api/v1/materials",
+        json={
+            "opportunity_id": str(opp.id),
+            "material_type": "application_answers",
+            "target_language": "pt-BR",
+            "writing_options": {
+                "questions": [
+                    "Você possui experiência com projetos ou tecnologias desta vaga?",
+                    "Qual sua pretensão salarial?",
+                ]
+            },
+        },
+        headers=_csrf_headers(csrf),
+    )
+    assert created.status_code == 201, created.text
+    mat_id = created.json()["id"]
+    v1 = created.json()["versions"][0]
+    v1_id = v1["id"]
+
+    # Inserir resposta manual na pergunta de pretensão e aprovar v1
+    edited_sc = dict(v1["structured_content"])
+    edited_items = [dict(item) for item in edited_sc["items"]]
+    assert edited_items[0]["status"] == "answered_from_facts"
+    assert edited_items[1]["status"] == "needs_user_input"
+    edited_items[1]["answer_text"] = "R$ 5.000 no modelo CLT."
+    edited_items[1]["requires_user_input"] = False
+    edited_items[1]["status"] = "user_answered"
+    edited_sc["items"] = edited_items
+
+    upd = client.put(
+        f"/api/v1/materials/{mat_id}/versions/{v1_id}",
+        json={"structured_content": edited_sc},
+        headers=_csrf_headers(csrf),
+    )
+    assert upd.status_code == 200, upd.text
+    app_resp = client.post(
+        f"/api/v1/materials/{mat_id}/versions/{v1_id}/approve",
+        headers=_csrf_headers(csrf),
+    )
+    assert app_resp.status_code == 200, app_resp.text
+    v1_approved_snapshot = app_resp.json()["versions"][0]
+
+    # Alterar fato confirmado no perfil: adicionar novo projeto confirmado com Redis
+    new_project = ProfessionalProject(
+        user_id=user.id,
+        name="RedisStreamWorker",
+        role="Autor",
+        description="Processador de filas assíncronas em Python com Redis e FastAPI.",
+        technologies=["Python", "Redis", "FastAPI"],
+        verified_results="Redução de latência em filas",
+        verification_status=VerificationStatus.CONFIRMED.value,
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(new_project)
+    db_session.commit()
+
+    # Regenerar v2 sem enviar writing_options novamente
+    regen = client.post(
+        f"/api/v1/materials/{mat_id}/regenerate",
+        json={},
+        headers=_csrf_headers(csrf),
+    )
+    assert regen.status_code == 201, regen.text
+    by_num = {v["version_number"]: v for v in regen.json()["versions"]}
+    assert set(by_num) == {1, 2}
+    v1_persisted, v2 = by_num[1], by_num[2]
+
+    # Versão anterior v1 não foi alterada
+    assert v1_persisted["structured_content"] == v1_approved_snapshot["structured_content"]
+    assert v1_persisted["is_approved"] is True
+
+    # v2 preserva perguntas originais, resposta manual intacta e reavalia fatos do perfil
+    v2_items = v2["structured_content"]["items"]
+    assert [it["question"] for it in v2_items] == [
+        "Você possui experiência com projetos ou tecnologias desta vaga?",
+        "Qual sua pretensão salarial?",
+    ]
+    assert v2_items[0]["status"] == "answered_from_facts"
+    assert v2_items[0]["provenance"] == "confirmed_fact"
+    assert any(
+        "RedisStreamWorker" in note or "Job Hunter" in note
+        for note in v2_items[0]["evidence_notes"]
+    ) or "Redis" in (v2_items[0]["answer_text"] or "")
+    assert v2_items[1]["answer_text"] == "R$ 5.000 no modelo CLT."
+    assert v2_items[1]["status"] == "user_answered"
+    assert v2_items[1]["provenance"] == "user_authored"
+    assert v2["is_approved"] is False
