@@ -1854,3 +1854,201 @@ describe("Job Hunter Frontend - Fase 04.1 Materiais & Currículo Direcionado Det
     });
   });
 });
+
+describe("Job Hunter Frontend - Fase 04.1.2 Transições de Confirmação no Perfil", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("permite confirmar projeto inicialmente em draft via Confirmar Projeto e confirma perfil em draft", async () => {
+    const draftBundle: FullProfileBundle = {
+      ...mockBundle,
+      profile: {
+        ...mockBundle.profile,
+        verification_status: "draft",
+        confirmed_at: null,
+      },
+      projects: [
+        {
+          ...mockBundle.projects[0],
+          verification_status: "draft",
+          confirmed_at: null,
+        },
+      ],
+    };
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-0412",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(draftBundle);
+
+    const updateProfileSpy = vi
+      .spyOn(api.profile, "updateProfile")
+      .mockResolvedValue({
+        ...draftBundle.profile,
+        verification_status: "confirmed",
+        confirmed_at: "2026-11-17T22:00:00Z",
+      });
+
+    const updateProjectSpy = vi
+      .spyOn(api.profile, "updateProject")
+      .mockResolvedValue({
+        ...draftBundle.projects[0],
+        verification_status: "confirmed",
+        confirmed_at: "2026-11-17T22:01:00Z",
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerenciar Perfil Completo/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerenciar Perfil Completo/i })
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText(/Estado de validação destes dados gerais/i)
+      ).toBeInTheDocument();
+    });
+
+    // Perfil inicialmente em draft seleciona confirmed e salva
+    const profStatusSelect = screen.getByLabelText(
+      /Estado de validação destes dados gerais/i
+    ) as HTMLSelectElement;
+    expect(profStatusSelect.value).toBe("draft");
+    fireEvent.change(profStatusSelect, { target: { value: "confirmed" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Salvar Dados Gerais/i })
+    );
+
+    await waitFor(() => {
+      expect(updateProfileSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ verification_status: "confirmed" })
+      );
+      expect(
+        screen.getByText(/Dados gerais do perfil salvo\(a\) com status Confirmado\./i)
+      ).toBeInTheDocument();
+    });
+
+    // Navega para aba Projetos e clica Confirmar Projeto no item em draft
+    fireEvent.click(screen.getByRole("tab", { name: /Projetos/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Confirmar Projeto/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar Projeto/i }));
+
+    await waitFor(() => {
+      expect(updateProjectSpy).toHaveBeenCalledWith(
+        draftBundle.projects[0].id,
+        expect.objectContaining({ verification_status: "confirmed" })
+      );
+      expect(
+        screen.getByText(/Projeto "Projeto Exemplo" salvo\(a\) com status Confirmado\./i)
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("reflete exatamente o status retornado pelo backend quando permanece draft ou reabre para pending_validation", async () => {
+    const confirmedProfileBundle: FullProfileBundle = {
+      ...mockBundle,
+      profile: {
+        ...mockBundle.profile,
+        verification_status: "confirmed",
+        confirmed_at: "2026-11-17T21:00:00Z",
+      },
+      projects: [
+        {
+          ...mockBundle.projects[0],
+          verification_status: "draft",
+          confirmed_at: null,
+        },
+      ],
+    };
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-0412-b",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(confirmedProfileBundle);
+
+    // Simula backend reabrindo perfil confirmado para pending_validation apos edicao factual
+    vi.spyOn(api.profile, "updateProfile").mockResolvedValue({
+      ...confirmedProfileBundle.profile,
+      professional_title: "Engenheiro Backend Senior",
+      verification_status: "pending_validation",
+      confirmed_at: null,
+    });
+
+    // Simula backend mantendo projeto em draft apesar da solicitacao de confirmacao
+    vi.spyOn(api.profile, "updateProject").mockResolvedValue({
+      ...confirmedProfileBundle.projects[0],
+      verification_status: "draft",
+      confirmed_at: null,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerenciar Perfil Completo/i })
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerenciar Perfil Completo/i })
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText(/Estado de validação destes dados gerais/i)
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Salvar Dados Gerais/i })
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /Como houve alteração factual, a validação foi reaberta para Pendente de Validação\./i
+        )
+      ).toBeInTheDocument();
+      const profStatusSelect = screen.getByLabelText(
+        /Estado de validação destes dados gerais/i
+      ) as HTMLSelectElement;
+      expect(profStatusSelect.value).toBe("pending_validation");
+    });
+
+    expect(
+      screen.queryByText(/salvo\(a\) com status Confirmado/i)
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Projetos/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Confirmar Projeto/i })
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar Projeto/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /Projeto "Projeto Exemplo" permaneceu em Rascunho e não pôde ser confirmado automaticamente\./i
+        )
+      ).toBeInTheDocument();
+    });
+  });
+});

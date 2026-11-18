@@ -6,6 +6,24 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.1.2] - 2026-11-17 — Subfase 04.1.2: Preservação de Confirmação Intencional de Rascunhos e Detecção Real de Omissão
+
+### Corrigido / Endurecido
+
+- **Política de Confirmação e Detecção Real de Omissão (`profile_service.py`):**
+  - Introduzido `_requested_verification_status(payload)` usando `payload.model_fields_set` para diferenciar omissão real de `verification_status` no JSON dos valores default dos schemas Pydantic das sub-entidades (`PENDING_VALIDATION` / `DRAFT`).
+  - Ajustado `_apply_confirmation_policy` para implementar a matriz completa de 12 transições: registros em `draft` e `pending_validation` permitem confirmação intencional (`confirmed`, gravando `confirmed_at`) com ou sem edição simultânea; payloads sem alteração factual e com campo omitido preservam o estado atual (`draft` ou `confirmed` + `confirmed_at` exato); alterações factuais em registros `confirmed` continuam reabrindo obrigatoriamente para `pending_validation` e limpando `confirmed_at`.
+  - `_persist_status_update` e `update_profile` aplicam `_PROFILE_FACTUAL_FIELDS` de forma isolada de metadados (`preferences`), preservando confirmação quando apenas `preferences` muda.
+- **Feedback Fiel na Interface (`ProfilePage.tsx`):**
+  - Centralizado feedback pós-atualização em `notifyStatusUpdateResult`, sincronizando estado local (`profileForm.verification_status`) e mensagens estritamente a partir do `verification_status` retornado pelo servidor em dados gerais e ações rápidas de todas as sub-entidades.
+
+### Testes
+- `tests/test_profile_confirmation_phase0411.py` (37 testes): corrigidos testes anteriores com asserções imprecisas (`notes`/`verified_results` `None -> ""`, listas multi-item e omissão real via HTTP) e adicionada a classe `TestPhase0412ConfirmationMatrixAndOmission` (6 testes cobrindo `draft -> confirmed`, preservação com omissão real em todas as 6 entidades, `preferences`, `links` dict e fluxo quick-confirm de projeto).
+- `frontend/src/test/App.test.tsx` (10 testes no total, +2 para 04.1.2): confirma projeto e perfil inicialmente em `draft` e garante que o feedback da UI reflita fielmente `draft` ou `pending_validation` retornados pelo servidor.
+- Suíte backend completa em SQLite: **91/91 passando**; frontend: `typecheck`, `lint`, `vitest` (10/10) e `build` passando.
+
+---
+
 ## [0.4.1.1] - 2026-11-17 — Subfase 04.1.1: Hardening de Confirmação e Autorização de Oportunidades
 
 ### Corrigido / Endurecido
