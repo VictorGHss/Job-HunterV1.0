@@ -3,13 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { ApiError, api } from "@/lib/api";
 import type {
+  ApplicationAnswersStructuredContent,
   ApplicationItem,
+  CoverLetterStructuredContent,
+  FreelanceProposalStructuredContent,
   FullProfileBundle,
   MaterialDetailResponse,
   MaterialPreAnalysisResponse,
   Opportunity,
   OpportunityListResponse,
   OpportunitySourcePublic,
+  RecruiterMessageStructuredContent,
+  ResumeStructuredContent,
   User,
 } from "@/types/api";
 
@@ -1683,13 +1688,15 @@ describe("Job Hunter Frontend - Fase 04.1 Materiais & Currículo Direcionado Det
       });
 
     const initialMat = buildSampleMaterial();
+    const initialResumeContent = initialMat.versions[0]
+      .structured_content as ResumeStructuredContent;
     const editedMat = buildSampleMaterial({
       versions: [
         {
           ...initialMat.versions[0],
           origin: "manual_edit",
           structured_content: {
-            ...initialMat.versions[0].structured_content,
+            ...initialResumeContent,
             summary: {
               text: "Resumo revisado para Orbit Cloud.",
               source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
@@ -2049,6 +2056,943 @@ describe("Job Hunter Frontend - Fase 04.1.2 Transições de Confirmação no Per
           /Projeto "Projeto Exemplo" permaneceu em Rascunho e não pôde ser confirmado automaticamente\./i
         )
       ).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Job Hunter Frontend - Fase 04.2 Propostas, Cartas e Mensagens Direcionadas", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+  });
+
+  function buildPhase042PreAnalysis(
+    materialType: "resume" | "cover_letter" | "recruiter_message" | "freelance_proposal" | "application_answers"
+  ): MaterialPreAnalysisResponse {
+    return {
+      can_generate: true,
+      blocking_reasons: [],
+      material_type: materialType,
+      compatible_material_types: [
+        "resume",
+        "cover_letter",
+        "recruiter_message",
+        "application_answers",
+      ],
+      target_language: "pt-BR",
+      opportunity_context: {
+        opportunity_id: "opp-1",
+        application_id: "app-42-1",
+        title: "Desenvolvedor Python Júnior",
+        company_name: "Orbit Cloud",
+        professional_area: "backend",
+        seniority_level: "junior",
+        employment_type: "clt",
+        opportunity_type: "job",
+        experience_summary: null,
+        required_technologies: ["Python"],
+        desirable_technologies: ["FastAPI"],
+        all_technologies: ["Python", "FastAPI"],
+        language: "pt-BR",
+      },
+      contact_preview: {
+        profile_confirmed: true,
+        has_full_name: true,
+        has_email: true,
+        has_phone: false,
+        has_location: true,
+        links_count: 1,
+        location_label: "Cidade Exemplo, Estado Exemplo, Brasil",
+      },
+      used_facts: [
+        {
+          fact_key: "project:proj-1",
+          entity_type: "project",
+          entity_id: "proj-1",
+          confirmed_at: "2026-11-17T10:00:00Z",
+          label: "Job Hunter",
+          summary: "Sistema determinístico em Python e FastAPI.",
+          relevance_score: 0.92,
+          matched_requirements: ["Python", "FastAPI"],
+          eligible_as_target_role: null,
+        },
+      ],
+      unconfirmed_warnings: [],
+      missing_requirements: [],
+      additional_info_needed:
+        materialType === "freelance_proposal"
+          ? [
+              {
+                field_id: "availability",
+                label: "Disponibilidade",
+                question: "Informe sua disponibilidade semanal.",
+                required: true,
+                status: "pending",
+                user_value: null,
+              },
+            ]
+          : [],
+      confirmed_counts: {
+        profile: 1,
+        experiences: 1,
+        projects: 1,
+        educations: 1,
+        skills: 1,
+        languages: 1,
+      },
+    };
+  }
+
+  it("permite escolher entre os 5 tipos, bloqueia aprovação de proposta freelance com campos pendentes até preencher em 390x844 e 768x1024 e trata erro de API", async () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-42",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [
+        buildMockOpportunity({
+          tracked_application_id: "app-42-1",
+          tracked_application_status: "preparing",
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+    vi.spyOn(api.materials, "preAnalyze").mockImplementation(async (payload) =>
+      buildPhase042PreAnalysis(payload.material_type || "resume")
+    );
+
+    const fpBlockedContent: FreelanceProposalStructuredContent = {
+      schema_version: 1,
+      material_type: "freelance_proposal",
+      language: "pt-BR",
+      header: {
+        full_name: "Usuário Teste",
+        professional_title: "Desenvolvedor Backend | Python & APIs",
+        email: "usuario@example.com",
+        phone: null,
+        location_text: "Cidade Exemplo, Estado Exemplo, Brasil",
+        links: [],
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      introduction: {
+        text: "Olá! Tenho interesse em colaborar com a entrega técnica de Desenvolvedor Júnior.",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      project_understanding: {
+        text: "O escopo envolve desenvolvimento backend em Python com APIs REST.",
+        source_fact_keys: [],
+        provenance: "confirmed_fact",
+      },
+      relevant_evidence: [
+        {
+          entity_id: "proj-1",
+          entity_type: "project",
+          title: "Job Hunter",
+          summary_text: "Sistema determinístico em Python e FastAPI.",
+          matched_requirements: ["Python", "FastAPI"],
+          source_fact_keys: ["project:proj-1"],
+          provenance: "confirmed_fact",
+        },
+      ],
+      suggested_approach: {
+        text: "Estrutura modular com testes automatizados em Pytest.",
+        source_fact_keys: ["project:proj-1"],
+        provenance: "confirmed_fact",
+      },
+      alignment_points: {
+        text: "Condições comerciais serão confirmadas antes do envio final.",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      pending_fields: [
+        {
+          field_id: "availability",
+          label: "Disponibilidade",
+          question: "Informe sua disponibilidade semanal ou data de início.",
+          required: true,
+          status: "pending",
+          user_value: null,
+        },
+        {
+          field_id: "estimated_delivery",
+          label: "Prazo estimado",
+          question: "Informe o prazo estimado real de entrega.",
+          required: true,
+          status: "pending",
+          user_value: null,
+        },
+        {
+          field_id: "budget_or_price",
+          label: "Valor / Orçamento",
+          question: "Informe o valor fechado ou por hora.",
+          required: true,
+          status: "pending",
+          user_value: null,
+        },
+      ],
+      closing: {
+        text: "À disposição para alinhar detalhes de escopo.",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      manual_notes: [],
+      has_unverified_manual_edits: false,
+    };
+
+    const fpResolvedContent: FreelanceProposalStructuredContent = {
+      ...fpBlockedContent,
+      pending_fields: [
+        {
+          ...fpBlockedContent.pending_fields[0],
+          status: "provided",
+          user_value: "20h semanais",
+        },
+        {
+          ...fpBlockedContent.pending_fields[1],
+          status: "provided",
+          user_value: "15 dias corridos",
+        },
+        {
+          ...fpBlockedContent.pending_fields[2],
+          status: "provided",
+          user_value: "R$ 3.000",
+        },
+      ],
+      has_unverified_manual_edits: true,
+    };
+
+    const blockedMaterial: MaterialDetailResponse = {
+      id: "mat-42-fp",
+      material_type: "freelance_proposal",
+      title: "Proposta Freelance — Desenvolvedor Júnior",
+      target_language: "pt-BR",
+      opportunity_id: "opp-1",
+      opportunity_title: "Desenvolvedor Júnior",
+      opportunity_company_name: "Orbit Cloud",
+      latest_version_number: 1,
+      has_approved_version: false,
+      versions: [
+        {
+          id: "ver-42-fp-1",
+          material_id: "mat-42-fp",
+          material_type: "freelance_proposal",
+          version_number: 1,
+          parent_version_id: null,
+          origin: "generated",
+          user_instructions: null,
+          structured_content: fpBlockedContent,
+          source_facts_snapshot: { schema_version: 1, facts: {} },
+          unconfirmed_warnings: [],
+          missing_requirements: [],
+          rendered_markdown: "# Proposta Freelance\n",
+          rendered_plain_text: "Proposta Freelance\n",
+          has_blocking_pending_fields: true,
+          pending_requirements_count: 3,
+          is_approved: false,
+          approved_at: null,
+          is_linked_to_any_application: false,
+          is_mutable: true,
+          created_at: "2026-11-17T22:10:00Z",
+          updated_at: "2026-11-17T22:10:00Z",
+        },
+      ],
+      links: [],
+      created_at: "2026-11-17T22:10:00Z",
+      updated_at: "2026-11-17T22:10:00Z",
+    };
+
+    const resolvedMaterial: MaterialDetailResponse = {
+      ...blockedMaterial,
+      versions: [
+        {
+          ...blockedMaterial.versions[0],
+          origin: "manual_edit",
+          structured_content: fpResolvedContent,
+          has_blocking_pending_fields: false,
+          pending_requirements_count: 0,
+        },
+      ],
+    };
+
+    const approvedMaterial: MaterialDetailResponse = {
+      ...resolvedMaterial,
+      has_approved_version: true,
+      versions: [
+        {
+          ...resolvedMaterial.versions[0],
+          is_approved: true,
+          approved_at: "2026-11-17T22:15:00Z",
+          is_mutable: false,
+        },
+      ],
+    };
+
+    const createSpy = vi
+      .spyOn(api.materials, "create")
+      .mockRejectedValueOnce(new ApiError("Falha simulada ao gerar proposta.", 422))
+      .mockResolvedValueOnce(blockedMaterial);
+    const updateSpy = vi
+      .spyOn(api.materials, "updateVersion")
+      .mockResolvedValue(resolvedMaterial);
+    const approveSpy = vi
+      .spyOn(api.materials, "approveVersion")
+      .mockResolvedValue(approvedMaterial);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerar currículo/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /Proposta Freelance/i })
+      ).toBeInTheDocument();
+    });
+
+    const fpRadio = screen.getByRole("radio", { name: /Proposta Freelance/i });
+    const coverRadio = screen.getByRole("radio", {
+      name: /Carta de Apresentação/i,
+    });
+    expect(within(fpRadio).getByText(/Sob solicitação/i)).toBeInTheDocument();
+    expect(within(coverRadio).getByText(/Recomendado/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Currículo Direcionado/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Mensagem para Recrutador/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Respostas de Candidatura/i })
+    ).toBeInTheDocument();
+
+    fireEvent.click(fpRadio);
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Disponibilidade/i)).toBeInTheDocument();
+    });
+
+    // Erro de API deve exibir alerta claro sem quebrar modal
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerar Proposta Freelance/i })
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Falha simulada ao gerar proposta\./i)
+      ).toBeInTheDocument();
+    });
+
+    // Segunda tentativa gera proposta com 3 pendencias obrigatorias bloqueando aprovacao
+    fireEvent.click(
+      screen.getByRole("button", { name: /Gerar Proposta Freelance/i })
+    );
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByText(/informação\(ões\) obrigatória\(s\) pendente\(s\)/i)
+      ).toBeInTheDocument();
+    });
+
+    window.innerWidth = 768;
+    window.innerHeight = 1024;
+    expect(
+      screen.getByRole("button", { name: /Aprovar versão/i })
+    ).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/^Disponibilidade$/i), {
+      target: { value: "20h semanais" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Prazo estimado$/i), {
+      target: { value: "15 dias corridos" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Valor \/ Orçamento$/i), {
+      target: { value: "R$ 3.000" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Salvar rascunho/i }));
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalled();
+      expect(
+        screen.getByRole("button", { name: /Aprovar versão/i })
+      ).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Aprovar versão/i }));
+    await waitFor(() => {
+      expect(approveSpy).toHaveBeenCalledWith("mat-42-fp", "ver-42-fp-1");
+      expect(screen.getByText(/Versão v1 está aprovada/i)).toBeInTheDocument();
+    });
+  });
+
+  it("gera respostas para perguntas de candidatura exigindo perguntas válidas, sinalizando gaps e desbloqueando após resposta manual em desktop", async () => {
+    window.innerWidth = 1280;
+    window.innerHeight = 800;
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-42-ans",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [
+        buildMockOpportunity({
+          tracked_application_id: "app-42-2",
+          tracked_application_status: "preparing",
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+    vi.spyOn(api.materials, "preAnalyze").mockResolvedValue(
+      buildPhase042PreAnalysis("application_answers")
+    );
+
+    const ansBlocked: ApplicationAnswersStructuredContent = {
+      schema_version: 1,
+      material_type: "application_answers",
+      language: "pt-BR",
+      items: [
+        {
+          question_id: "q-1",
+          question: "Você já trabalhou com Python?",
+          question_kind: "technical_experience",
+          answer_text:
+            "Sim. Tenho evidência confirmada em Job Hunter com uso de Python e FastAPI.",
+          requires_user_input: false,
+          status: "answered_from_facts",
+          follow_up_prompt: null,
+          source_fact_keys: ["project:proj-1"],
+          evidence_notes: ["Projeto: Job Hunter"],
+          provenance: "confirmed_fact",
+        },
+        {
+          question_id: "q-2",
+          question: "Qual sua pretensão salarial?",
+          question_kind: "compensation",
+          answer_text: null,
+          requires_user_input: true,
+          status: "needs_user_input",
+          follow_up_prompt: "Informe sua pretensão salarial.",
+          source_fact_keys: [],
+          evidence_notes: [],
+          provenance: "user_authored",
+        },
+      ],
+      manual_notes: [],
+      has_unverified_manual_edits: false,
+    };
+
+    const ansResolved: ApplicationAnswersStructuredContent = {
+      ...ansBlocked,
+      items: [
+        ansBlocked.items[0],
+        {
+          ...ansBlocked.items[1],
+          answer_text: "A combinar conforme pacote CLT.",
+          requires_user_input: false,
+          status: "user_answered",
+          follow_up_prompt: null,
+          provenance: "user_authored",
+        },
+      ],
+      has_unverified_manual_edits: true,
+    };
+
+    const initialAnsMat: MaterialDetailResponse = {
+      id: "mat-42-ans",
+      material_type: "application_answers",
+      title: "Respostas — Desenvolvedor Júnior",
+      target_language: "pt-BR",
+      opportunity_id: "opp-1",
+      opportunity_title: "Desenvolvedor Júnior",
+      opportunity_company_name: "Orbit Cloud",
+      latest_version_number: 1,
+      has_approved_version: false,
+      versions: [
+        {
+          id: "ver-42-ans-1",
+          material_id: "mat-42-ans",
+          material_type: "application_answers",
+          version_number: 1,
+          parent_version_id: null,
+          origin: "generated",
+          user_instructions: null,
+          structured_content: ansBlocked,
+          source_facts_snapshot: { schema_version: 1, facts: {} },
+          unconfirmed_warnings: [],
+          missing_requirements: [],
+          rendered_markdown: "## 1. Você já trabalhou com Python?\n",
+          rendered_plain_text: "1. Você já trabalhou com Python?\n",
+          has_blocking_pending_fields: true,
+          pending_requirements_count: 1,
+          is_approved: false,
+          approved_at: null,
+          is_linked_to_any_application: false,
+          is_mutable: true,
+          created_at: "2026-11-17T22:20:00Z",
+          updated_at: "2026-11-17T22:20:00Z",
+        },
+      ],
+      links: [],
+      created_at: "2026-11-17T22:20:00Z",
+      updated_at: "2026-11-17T22:20:00Z",
+    };
+
+    const resolvedAnsMat: MaterialDetailResponse = {
+      ...initialAnsMat,
+      versions: [
+        {
+          ...initialAnsMat.versions[0],
+          origin: "manual_edit",
+          structured_content: ansResolved,
+          has_blocking_pending_fields: false,
+          pending_requirements_count: 0,
+        },
+      ],
+    };
+
+    const approvedAnsMat: MaterialDetailResponse = {
+      ...resolvedAnsMat,
+      has_approved_version: true,
+      versions: [
+        {
+          ...resolvedAnsMat.versions[0],
+          is_approved: true,
+          approved_at: "2026-11-17T22:25:00Z",
+          is_mutable: false,
+        },
+      ],
+    };
+
+    const createSpy = vi
+      .spyOn(api.materials, "create")
+      .mockResolvedValue(initialAnsMat);
+    vi.spyOn(api.materials, "updateVersion").mockResolvedValue(resolvedAnsMat);
+    const approveSpy = vi
+      .spyOn(api.materials, "approveVersion")
+      .mockResolvedValue(approvedAnsMat);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Gerar currículo/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Gerar currículo/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /Respostas de Candidatura/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("radio", { name: /Respostas de Candidatura/i })
+    );
+
+    const generateBtn = await screen.findByRole("button", {
+      name: /Gerar Respostas de Candidatura/i,
+    });
+    expect(generateBtn).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Pergunta 1"), {
+      target: { value: "Você já trabalhou com Python?" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Adicionar pergunta/i })
+    );
+    fireEvent.change(screen.getByLabelText("Pergunta 2"), {
+      target: { value: "Qual sua pretensão salarial?" },
+    });
+    expect(generateBtn).not.toBeDisabled();
+
+    fireEvent.click(generateBtn);
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          material_type: "application_answers",
+          writing_options: expect.objectContaining({
+            questions: [
+              "Você já trabalhou com Python?",
+              "Qual sua pretensão salarial?",
+            ],
+          }),
+        })
+      );
+      expect(screen.getByText(/Baseada em fatos/i)).toBeInTheDocument();
+      expect(screen.getByText(/Exige resposta sua/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Informe sua pretensão salarial\./i)
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole("button", { name: /Aprovar versão/i })
+    ).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Resposta para pergunta 2"), {
+      target: { value: "A combinar conforme pacote CLT." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Salvar rascunho/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Respondida manualmente/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Aprovar versão/i })
+      ).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Aprovar versão/i }));
+    await waitFor(() => {
+      expect(approveSpy).toHaveBeenCalledWith("mat-42-ans", "ver-42-ans-1");
+    });
+  });
+
+  it("abre estúdio via Aplicação -> Materiais -> Novo material direcionado, gera mensagem para recrutador com contagem de caracteres e exporta texto simples", async () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+
+    const appItem: ApplicationItem = {
+      id: "app-42-rm",
+      opportunity_id: "opp-1",
+      opportunity_source_status: "active",
+      company_name: "Orbit Cloud",
+      role_title: "Backend Python Developer",
+      personal_summary: "Atuação com Python e FastAPI.",
+      source_name: "Remote OK",
+      source_url: "https://remoteok.com/jobs/1",
+      application_url: "https://orbit.example.com/jobs/1",
+      location_text: "Remoto",
+      work_mode: "remote",
+      employment_type: "clt",
+      seniority_level: "junior",
+      status: "preparing",
+      status_label: "Preparação",
+      is_closed: false,
+      applied_at: null,
+      assessment_deadline_at: null,
+      interview_at: null,
+      expected_response_at: null,
+      last_external_interaction_at: null,
+      last_external_interaction_type: null,
+      last_external_interaction_type_label: null,
+      last_external_interaction_note: null,
+      notes: null,
+      next_action: null,
+      next_action_due_at: null,
+      next_deadline_at: null,
+      next_deadline_label: null,
+      closed_at: null,
+      status_history: [],
+      interviews: [],
+      assessments: [],
+      contacts: [],
+      created_at: "2026-11-17T20:00:00Z",
+      updated_at: "2026-11-17T20:00:00Z",
+    };
+
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "csrf-42-rm",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 12,
+      total_pages: 1,
+    });
+    vi.spyOn(api.applications, "kanban").mockResolvedValue({
+      columns: [
+        { status: "interested", label: "Interesse", is_closed: false, count: 0, items: [] },
+        { status: "preparing", label: "Preparação", is_closed: false, count: 1, items: [appItem] },
+        { status: "applied", label: "Candidatura enviada", is_closed: false, count: 0, items: [] },
+        { status: "assessment", label: "Teste técnico", is_closed: false, count: 0, items: [] },
+        { status: "interview", label: "Entrevista", is_closed: false, count: 0, items: [] },
+        { status: "offer", label: "Proposta", is_closed: false, count: 0, items: [] },
+      ],
+      closed_columns: [],
+      closed_items: [],
+      indicators: {
+        total_count: 1,
+        active_count: 1,
+        applied_count: 0,
+        assessment_count: 0,
+        interview_count: 0,
+        offer_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        withdrawn_count: 0,
+        closed_count: 0,
+        status_counts: { preparing: 1 },
+      },
+      labels: { preparing: "Preparação" },
+    });
+    vi.spyOn(api.applications, "agenda").mockResolvedValue({
+      days: 30,
+      summary: {
+        total_count: 0,
+        overdue_count: 0,
+        imminent_24h_count: 0,
+        today_count: 0,
+        interviews_count: 0,
+        assessments_count: 0,
+        actions_count: 0,
+        reference_now_utc: new Date().toISOString(),
+      },
+      events: [],
+    });
+    vi.spyOn(api.applications, "stale").mockResolvedValue({
+      stale_days_param: 7,
+      total_count: 0,
+      items: [],
+    });
+    vi.spyOn(api.applications, "get").mockResolvedValue(appItem);
+    vi.spyOn(api.materials, "list").mockResolvedValue([]);
+    vi.spyOn(api.materials, "preAnalyze").mockResolvedValue(
+      buildPhase042PreAnalysis("recruiter_message")
+    );
+
+    const rmContent: RecruiterMessageStructuredContent = {
+      schema_version: 1,
+      material_type: "recruiter_message",
+      language: "pt-BR",
+      channel: "linkedin",
+      subject: null,
+      greeting: {
+        text: "Olá, Ana Paula!",
+        source_fact_keys: [],
+        provenance: "confirmed_fact",
+      },
+      body: {
+        text: "Notei a oportunidade de Backend Python Developer na Orbit Cloud e compartilho minha experiência confirmada no projeto Job Hunter com Python e FastAPI.",
+        source_fact_keys: ["project:proj-1"],
+        provenance: "confirmed_fact",
+      },
+      sign_off: {
+        text: "Obrigado pela atenção.\nUsuário Teste — usuario@example.com",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      character_count: 235,
+      manual_notes: [],
+      has_unverified_manual_edits: false,
+    };
+
+    const rmMaterial: MaterialDetailResponse = {
+      id: "mat-42-rm",
+      material_type: "recruiter_message",
+      title: "Mensagem — Backend Python Developer",
+      target_language: "pt-BR",
+      opportunity_id: "opp-1",
+      opportunity_title: "Backend Python Developer",
+      opportunity_company_name: "Orbit Cloud",
+      latest_version_number: 1,
+      has_approved_version: false,
+      versions: [
+        {
+          id: "ver-42-rm-1",
+          material_id: "mat-42-rm",
+          material_type: "recruiter_message",
+          version_number: 1,
+          parent_version_id: null,
+          origin: "generated",
+          user_instructions: null,
+          structured_content: rmContent,
+          source_facts_snapshot: { schema_version: 1, facts: {} },
+          unconfirmed_warnings: [],
+          missing_requirements: [],
+          rendered_markdown:
+            "Olá, Ana Paula!\n\nNotei a oportunidade de Backend Python Developer.\n",
+          rendered_plain_text:
+            "Olá, Ana Paula!\n\nNotei a oportunidade de Backend Python Developer.\n",
+          has_blocking_pending_fields: false,
+          pending_requirements_count: 0,
+          is_approved: false,
+          approved_at: null,
+          is_linked_to_any_application: false,
+          is_mutable: true,
+          created_at: "2026-11-17T22:30:00Z",
+          updated_at: "2026-11-17T22:30:00Z",
+        },
+      ],
+      links: [],
+      created_at: "2026-11-17T22:30:00Z",
+      updated_at: "2026-11-17T22:30:00Z",
+    };
+
+    const coverContent: CoverLetterStructuredContent = {
+      schema_version: 1,
+      material_type: "cover_letter",
+      language: "pt-BR",
+      header: {
+        full_name: "Usuário Teste",
+        professional_title: "Desenvolvedor Backend | Python & APIs",
+        email: "usuario@example.com",
+        phone: null,
+        location_text: "Cidade Exemplo, Estado Exemplo, Brasil",
+        links: [],
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      recipient_line: {
+        text: "Equipe de Seleção — Orbit Cloud",
+        source_fact_keys: [],
+        provenance: "confirmed_fact",
+      },
+      greeting: {
+        text: "Olá,",
+        source_fact_keys: [],
+        provenance: "confirmed_fact",
+      },
+      opening: {
+        text: "Apresento minha candidatura à vaga de Backend Python Developer na Orbit Cloud.",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      relevance_highlights: [],
+      opportunity_alignment: null,
+      closing: {
+        text: "Atenciosamente, Usuário Teste.",
+        source_fact_keys: ["profile:22222222-2222-2222-2222-222222222222"],
+        provenance: "confirmed_fact",
+      },
+      manual_notes: [],
+      has_unverified_manual_edits: false,
+    };
+    expect(coverContent.material_type).toBe("cover_letter");
+
+    const createSpy = vi
+      .spyOn(api.materials, "create")
+      .mockResolvedValue(rmMaterial);
+    const exportSpy = vi.spyOn(api.materials, "exportVersion").mockResolvedValue({
+      material_id: "mat-42-rm",
+      version_id: "ver-42-rm-1",
+      version_number: 1,
+      format: "text",
+      filename_suggestion: "mensagem-recrutador-v1.txt",
+      content: rmMaterial.versions[0].rendered_plain_text || "",
+      is_approved: false,
+    });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /^Candidaturas$/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Candidaturas$/i })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: /Abrir detalhes/i }).length
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Abrir detalhes/i })[0]
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Materiais/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: /^Materiais/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Novo material direcionado/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Novo material direcionado/i })
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /Mensagem para Recrutador/i })
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("radio", { name: /Mensagem para Recrutador/i })
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^LinkedIn$/i }));
+    fireEvent.change(
+      screen.getByLabelText(/Nome do contato \/ recrutador/i),
+      { target: { value: "Ana Paula" } }
+    );
+
+    const rmGenerateBtn = await screen.findByRole("button", {
+      name: /Gerar Mensagem/i,
+    });
+    fireEvent.click(rmGenerateBtn);
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          material_type: "recruiter_message",
+          application_id: "app-42-rm",
+          writing_options: expect.objectContaining({
+            channel: "linkedin",
+            contact_name: "Ana Paula",
+          }),
+        })
+      );
+      expect(screen.getByText(/Contagem aproximada:/i)).toBeInTheDocument();
+      expect(screen.getByText(/linkedin/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Pré-visualização & Exportação/i })
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Copiar Texto Simples/i })
+    );
+    await waitFor(() => {
+      expect(exportSpy).toHaveBeenCalledWith(
+        "mat-42-rm",
+        "ver-42-rm-1",
+        "text"
+      );
     });
   });
 });

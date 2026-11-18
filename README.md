@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Fase 04.1 — Fundação de Materiais e Currículo Direcionado Determinístico
+- **Fase atual:** Subfase 04.2 — Propostas, Cartas e Mensagens Direcionadas
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -90,9 +90,14 @@ job-hunter/
 │   │   │   └── profile.py
 │   │   ├── services/
 │   │   │   ├── materials/
+│   │   │   │   ├── application_answers_composer.py
+│   │   │   │   ├── cover_letter_composer.py
 │   │   │   │   ├── fact_selector.py
+│   │   │   │   ├── freelance_proposal_composer.py
 │   │   │   │   ├── material_service.py
-│   │   │   │   └── resume_composer.py
+│   │   │   │   ├── recruiter_message_composer.py
+│   │   │   │   ├── resume_composer.py
+│   │   │   │   └── writing_common.py
 │   │   │   ├── opportunities/
 │   │   │   │   ├── connectors/
 │   │   │   │   ├── matching.py
@@ -107,8 +112,13 @@ job-hunter/
 │   ├── tests/
 │   │   ├── conftest.py
 │   │   ├── test_applications_phase03.py
+│   │   ├── test_applications_phase032.py
 │   │   ├── test_foundation_phase01.py
-│   │   └── test_opportunities_phase02.py
+│   │   ├── test_materials_phase041.py
+│   │   ├── test_materials_phase042.py
+│   │   ├── test_opportunities_phase02.py
+│   │   ├── test_opportunity_authorization_phase0411.py
+│   │   └── test_profile_confirmation_phase0411.py
 │   ├── alembic.ini
 │   ├── Dockerfile
 │   └── pyproject.toml
@@ -249,7 +259,14 @@ Nos cards de oportunidades (**Gerar currículo**), na aba **Materiais** dos deta
 - **Geração determinística e fidelidade estrita (`pt-BR` e `en`):** compõe currículo estruturado (`structured_content` JSONB) sem IA externa, preservando separação entre `WorkExperience` e `ProfessionalProject`, `eligible_as_target_role`, status acadêmico (`in_progress`, `completed`, `paused`, `planned`), proficiências exatas e opções explícitas de inclusão de contatos.
 - **Versionamento, aprovação, exportação e vínculo:** permite editar seções do rascunho mais recente com reconciliação server-side de proveniência (`confirmed_fact`, `manual_edit`, `user_authored`), aprovar versões tornando-as imutáveis, derivar novas versões (`/derive`) ou regenerar do perfil (`/regenerate`), exportar em Markdown/Texto simples e vincular versões aprovadas a candidaturas preservando histórico completo em `application_material_links`.
 
-### 4.8. Encerrando o Ambiente
+### 4.8. Propostas, Cartas e Mensagens Direcionadas (Subfase 04.2)
+O estúdio foi ampliado para o **Estúdio de Materiais para Candidatura** (acessível pelos cards de vagas, pela aba **Materiais** nos detalhes da candidatura via **Novo material direcionado** e pelo Perfil), mantendo funcionamento **100% determinístico e sem provedores externos de IA**:
+- **Cinco tipos de material em fluxo único:** `resume` (`Currículo Direcionado`), `cover_letter` (`Carta de Apresentação`), `recruiter_message` (`Mensagem para Recrutador` por `linkedin`, `email` ou `contact_form` com contagem aproximada de caracteres), `freelance_proposal` (`Proposta Freelance`) e `application_answers` (`Respostas para Perguntas de Candidatura`).
+- **Compatibilidade e solicitação explícita:** a pré-análise (`POST /api/v1/materials/pre-analyze`) prioriza os formatos mais adequados ao regime da vaga (`Recomendado` vs `Sob solicitação`, destacando `freelance_proposal` para oportunidades freelance), sem impedir seleção explícita pelo usuário.
+- **Lacunas e bloqueio seguro de aprovação:** em `freelance_proposal`, disponibilidade, prazo estimado e orçamento nunca são inventados e bloqueiam `POST .../approve` (`422`) enquanto não preenchidos e salvos; em `application_answers`, perguntas factuais usam exclusivamente evidências confirmadas (`confirmed_fact`), enquanto perguntas sobre motivação, pretensão salarial, disponibilidade ou tecnologias sem evidência retornam `needs_user_input` (`answer_text = null`) exigindo resposta humana (`user_authored`) antes de liberar aprovação (sem promover respostas ad-hoc para fatos do perfil).
+- **Fora de escopo nesta subfase:** exportação para PDF/DOCX, integração com APIs de LLM externas e envio automático de mensagens ou candidaturas permanecem fora de escopo.
+
+### 4.9. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

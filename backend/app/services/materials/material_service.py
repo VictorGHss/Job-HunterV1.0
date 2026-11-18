@@ -4,6 +4,7 @@ import re
 import uuid
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -20,7 +21,13 @@ from app.models.material import (
 from app.models.opportunity import Opportunity
 from app.models.user import User
 from app.schemas.material import (
+    AnyMaterialStructuredContent,
+    ApplicationAnswerUserInput,
+    ApplicationAnswersStructuredContent,
+    ContactInclusionOptions,
+    CoverLetterStructuredContent,
     ExportFormat,
+    FreelanceProposalStructuredContent,
     MaterialCreateRequest,
     MaterialExportResponse,
     MaterialLinkRequest,
@@ -30,22 +37,53 @@ from app.schemas.material import (
     MaterialRegenerateRequest,
     MaterialResponse,
     MaterialSummaryResponse,
+    MaterialTypeValue,
     MaterialUnlinkRequest,
     MaterialVersionDeriveRequest,
     MaterialVersionResponse,
     MaterialVersionUpdateRequest,
     MissingRequirementItem,
+    PendingUserInputField,
+    RecruiterMessageStructuredContent,
     ResumeStructuredContent,
     TargetLanguage,
     UnconfirmedWarningItem,
+    WritingGenerationOptions,
+)
+from app.services.materials.application_answers_composer import (
+    analyze_questions_preview,
+    compose_application_answers,
+    reconcile_application_answers,
+    render_application_answers_markdown,
+    render_application_answers_plain_text,
+)
+from app.services.materials.cover_letter_composer import (
+    compose_cover_letter,
+    reconcile_cover_letter,
+    render_cover_letter_markdown,
+    render_cover_letter_plain_text,
 )
 from app.services.materials.fact_selector import build_authorized_fact_bundle
+from app.services.materials.freelance_proposal_composer import (
+    build_freelance_pending_fields,
+    compose_freelance_proposal,
+    reconcile_freelance_proposal,
+    render_freelance_proposal_markdown,
+    render_freelance_proposal_plain_text,
+)
+from app.services.materials.recruiter_message_composer import (
+    compose_recruiter_message,
+    reconcile_recruiter_message,
+    render_recruiter_message_markdown,
+    render_recruiter_message_plain_text,
+)
 from app.services.materials.resume_composer import (
     compose_deterministic_resume,
     reconcile_edited_structured_content,
     render_material_markdown,
     render_material_plain_text,
 )
+from app.services.materials.writing_common import determine_compatible_material_types
 from app.services.opportunities.sanitization import sanitize_plain_text
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -160,15 +198,207 @@ def _resolve_target_context(
     return opportunity, application
 
 
+_DEFAULT_TITLE_PREFIX: dict[str, dict[str, str]] = {
+    MaterialType.RESUME.value: {"pt-BR": "Currículo", "en": "Resume"},
+    MaterialType.COVER_LETTER.value: {"pt-BR": "Carta de Apresentação", "en": "Cover Letter"},
+    MaterialType.RECRUITER_MESSAGE.value: {
+        "pt-BR": "Mensagem para Recrutador",
+        "en": "Recruiter Message",
+    },
+    MaterialType.FREELANCE_PROPOSAL.value: {
+        "pt-BR": "Proposta Freelance",
+        "en": "Freelance Proposal",
+    },
+    MaterialType.APPLICATION_ANSWERS.value: {
+        "pt-BR": "Respostas de Candidatura",
+        "en": "Application Answers",
+    },
+}
+
+
+def _parse_structured_for_type(
+    material_type: str,
+    raw_content: dict[str, Any] | AnyMaterialStructuredContent,
+) -> AnyMaterialStructuredContent:
+    payload = (
+        raw_content.model_dump(mode="python")
+        if hasattr(raw_content, "model_dump")
+        else raw_content
+    )
+    try:
+        if material_type == MaterialType.RESUME.value:
+            return ResumeStructuredContent.model_validate(payload)
+        if material_type == MaterialType.COVER_LETTER.value:
+            return CoverLetterStructuredContent.model_validate(payload)
+        if material_type == MaterialType.RECRUITER_MESSAGE.value:
+            return RecruiterMessageStructuredContent.model_validate(payload)
+        if material_type == MaterialType.FREELANCE_PROPOSAL.value:
+            return FreelanceProposalStructuredContent.model_validate(payload)
+        if material_type == MaterialType.APPLICATION_ANSWERS.value:
+            return ApplicationAnswersStructuredContent.model_validate(payload)
+    except ValidationError as exc:
+        raise MaterialPreconditionError(
+            f"Estrutura incompatível com o tipo de material '{material_type}': {exc.errors()[0].get('msg', 'dados inválidos')}."
+        ) from exc
+    raise MaterialPreconditionError(f"Tipo de material não suportado: '{material_type}'.")
+
+
+def _compose_by_type(
+    bundle: Any,
+    *,
+    material_type: str,
+    target_language: TargetLanguage,
+    contact_options: ContactInclusionOptions,
+    writing_options: WritingGenerationOptions,
+    user_instructions: str | None,
+) -> tuple[AnyMaterialStructuredContent, dict[str, Any]]:
+    try:
+        if material_type == MaterialType.RESUME.value:
+            return compose_deterministic_resume(
+                bundle,
+                target_language=target_language,
+                contact_options=contact_options,
+                user_instructions=user_instructions,
+            )
+        if material_type == MaterialType.COVER_LETTER.value:
+            return compose_cover_letter(
+                bundle,
+                target_language=target_language,
+                contact_options=contact_options,
+                writing_options=writing_options,
+                user_instructions=user_instructions,
+            )
+        if material_type == MaterialType.RECRUITER_MESSAGE.value:
+            return compose_recruiter_message(
+                bundle,
+                target_language=target_language,
+                contact_options=contact_options,
+                writing_options=writing_options,
+                user_instructions=user_instructions,
+            )
+        if material_type == MaterialType.FREELANCE_PROPOSAL.value:
+            return compose_freelance_proposal(
+                bundle,
+                target_language=target_language,
+                contact_options=contact_options,
+                writing_options=writing_options,
+                user_instructions=user_instructions,
+            )
+        if material_type == MaterialType.APPLICATION_ANSWERS.value:
+            return compose_application_answers(
+                bundle,
+                target_language=target_language,
+                contact_options=contact_options,
+                writing_options=writing_options,
+                user_instructions=user_instructions,
+            )
+    except ValueError as exc:
+        raise MaterialPreconditionError(str(exc)) from exc
+    raise MaterialPreconditionError(f"Tipo de material não suportado: '{material_type}'.")
+
+
+def _reconcile_by_type(
+    material_type: str,
+    previous: AnyMaterialStructuredContent,
+    edited: AnyMaterialStructuredContent,
+    snapshot: dict[str, Any],
+) -> AnyMaterialStructuredContent:
+    try:
+        if material_type == MaterialType.RESUME.value:
+            assert isinstance(previous, ResumeStructuredContent) and isinstance(
+                edited, ResumeStructuredContent
+            )
+            return reconcile_edited_structured_content(previous, edited, snapshot)
+        if material_type == MaterialType.COVER_LETTER.value:
+            assert isinstance(previous, CoverLetterStructuredContent) and isinstance(
+                edited, CoverLetterStructuredContent
+            )
+            return reconcile_cover_letter(previous, edited, snapshot)
+        if material_type == MaterialType.RECRUITER_MESSAGE.value:
+            assert isinstance(previous, RecruiterMessageStructuredContent) and isinstance(
+                edited, RecruiterMessageStructuredContent
+            )
+            return reconcile_recruiter_message(previous, edited, snapshot)
+        if material_type == MaterialType.FREELANCE_PROPOSAL.value:
+            assert isinstance(previous, FreelanceProposalStructuredContent) and isinstance(
+                edited, FreelanceProposalStructuredContent
+            )
+            return reconcile_freelance_proposal(previous, edited, snapshot)
+        if material_type == MaterialType.APPLICATION_ANSWERS.value:
+            assert isinstance(previous, ApplicationAnswersStructuredContent) and isinstance(
+                edited, ApplicationAnswersStructuredContent
+            )
+            return reconcile_application_answers(previous, edited, snapshot)
+    except ValueError as exc:
+        raise MaterialPreconditionError(str(exc)) from exc
+    raise MaterialPreconditionError(f"Tipo de material não suportado: '{material_type}'.")
+
+
+def _render_by_type(
+    material_type: str,
+    structured: AnyMaterialStructuredContent,
+    language: TargetLanguage,
+) -> tuple[str, str]:
+    if material_type == MaterialType.RESUME.value:
+        assert isinstance(structured, ResumeStructuredContent)
+        return (
+            render_material_markdown(structured, language=language),
+            render_material_plain_text(structured, language=language),
+        )
+    if material_type == MaterialType.COVER_LETTER.value:
+        assert isinstance(structured, CoverLetterStructuredContent)
+        return (
+            render_cover_letter_markdown(structured, language=language),
+            render_cover_letter_plain_text(structured, language=language),
+        )
+    if material_type == MaterialType.RECRUITER_MESSAGE.value:
+        assert isinstance(structured, RecruiterMessageStructuredContent)
+        return (
+            render_recruiter_message_markdown(structured, language=language),
+            render_recruiter_message_plain_text(structured, language=language),
+        )
+    if material_type == MaterialType.FREELANCE_PROPOSAL.value:
+        assert isinstance(structured, FreelanceProposalStructuredContent)
+        return (
+            render_freelance_proposal_markdown(structured, language=language),
+            render_freelance_proposal_plain_text(structured, language=language),
+        )
+    if material_type == MaterialType.APPLICATION_ANSWERS.value:
+        assert isinstance(structured, ApplicationAnswersStructuredContent)
+        return (
+            render_application_answers_markdown(structured, language=language),
+            render_application_answers_plain_text(structured, language=language),
+        )
+    raise MaterialPreconditionError(f"Tipo de material não suportado: '{material_type}'.")
+
+
+def _count_blocking_pending_fields(structured: AnyMaterialStructuredContent) -> int:
+    if isinstance(structured, FreelanceProposalStructuredContent):
+        return sum(
+            1 for field in structured.pending_fields if field.required and field.status == "pending"
+        )
+    if isinstance(structured, ApplicationAnswersStructuredContent):
+        return sum(
+            1
+            for item in structured.items
+            if item.requires_user_input
+            or item.status == "needs_user_input"
+            or not (item.answer_text and item.answer_text.strip())
+        )
+    return 0
+
+
 def _serialize_version(
     version: ApplicationMaterialVersion,
     *,
+    material_type: str,
     max_version_number: int,
     linked_version_ids: set[uuid.UUID],
     target_language: TargetLanguage,
 ) -> MaterialVersionResponse:
-    structured = ResumeStructuredContent.model_validate(version.structured_content)
-    markdown = render_material_markdown(structured, language=target_language)
+    structured = _parse_structured_for_type(material_type, version.structured_content)
+    markdown, plain_text = _render_by_type(material_type, structured, target_language)
+    pending_count = _count_blocking_pending_fields(structured)
     is_linked = version.id in linked_version_ids
     is_mutable = (
         not version.is_approved
@@ -186,6 +416,7 @@ def _serialize_version(
     return MaterialVersionResponse(
         id=version.id,
         material_id=version.material_id,
+        material_type=material_type,
         version_number=version.version_number,
         origin=version.origin,
         parent_version_id=version.parent_version_id,
@@ -195,6 +426,9 @@ def _serialize_version(
         unconfirmed_warnings=warnings,
         missing_requirements=missing,
         rendered_markdown=markdown,
+        rendered_plain_text=plain_text,
+        has_blocking_pending_fields=pending_count > 0,
+        pending_requirements_count=pending_count,
         is_approved=version.is_approved,
         approved_at=version.approved_at,
         is_linked_to_any_application=is_linked,
@@ -213,6 +447,7 @@ def _serialize_material(material: ApplicationMaterial) -> MaterialResponse:
     version_responses = [
         _serialize_version(
             ver,
+            material_type=material.material_type,
             max_version_number=max_ver,
             linked_version_ids=linked_version_ids,
             target_language=lang,
@@ -293,15 +528,31 @@ def pre_analyze_material(
         application=application,
         target_language=payload.target_language,
     )
+    additional_needed: list[PendingUserInputField] = []
+    if payload.material_type == MaterialType.FREELANCE_PROPOSAL.value:
+        additional_needed = build_freelance_pending_fields(
+            payload.target_language,
+            payload.writing_options.freelance_inputs,
+        )
+    elif payload.material_type == MaterialType.APPLICATION_ANSWERS.value:
+        additional_needed = analyze_questions_preview(
+            bundle,
+            target_language=payload.target_language,
+            writing_options=payload.writing_options,
+        )
+
     return MaterialPreAnalysisResponse(
         can_generate=bundle.can_generate,
         blocking_reasons=bundle.blocking_reasons,
+        material_type=payload.material_type,
+        compatible_material_types=determine_compatible_material_types(bundle.opportunity_context),
         target_language=payload.target_language,
         opportunity_context=bundle.opportunity_context,
         contact_preview=bundle.contact_preview,
         used_facts=bundle.used_facts,
         unconfirmed_warnings=bundle.unconfirmed_warnings,
         missing_requirements=bundle.missing_requirements,
+        additional_info_needed=additional_needed,
         confirmed_counts=bundle.confirmed_counts,
     )
 
@@ -312,6 +563,7 @@ def list_materials(
     *,
     opportunity_id: uuid.UUID | None = None,
     application_id: uuid.UUID | None = None,
+    material_type: MaterialTypeValue | None = None,
 ) -> list[MaterialSummaryResponse]:
     stmt = (
         select(ApplicationMaterial)
@@ -324,6 +576,8 @@ def list_materials(
     )
     if opportunity_id is not None:
         stmt = stmt.where(ApplicationMaterial.opportunity_id == opportunity_id)
+    if material_type is not None:
+        stmt = stmt.where(ApplicationMaterial.material_type == material_type)
     if application_id is not None:
         _get_user_application(db, user, application_id)
         stmt = stmt.where(
@@ -361,16 +615,20 @@ def create_material(
     if not bundle.can_generate:
         raise MaterialPreconditionError("; ".join(bundle.blocking_reasons))
 
-    structured, snapshot = compose_deterministic_resume(
+    structured, snapshot = _compose_by_type(
         bundle,
+        material_type=payload.material_type,
         target_language=payload.target_language,
         contact_options=payload.contact_options,
+        writing_options=payload.writing_options,
         user_instructions=payload.user_instructions,
     )
 
     default_title = payload.title
     if not default_title:
-        prefix = "Resume" if payload.target_language == "en" else "Currículo"
+        prefix = _DEFAULT_TITLE_PREFIX.get(payload.material_type, {}).get(
+            payload.target_language, "Material"
+        )
         if bundle.opportunity_context.title and bundle.opportunity_context.company_name:
             default_title = (
                 f"{prefix} — {bundle.opportunity_context.title} ({bundle.opportunity_context.company_name})"
@@ -378,13 +636,13 @@ def create_material(
         elif bundle.opportunity_context.title:
             default_title = f"{prefix} — {bundle.opportunity_context.title}"
         else:
-            default_title = "Targeted Resume" if payload.target_language == "en" else "Currículo Direcionado"
-    default_title = (sanitize_plain_text(default_title, max_length=200) or "Currículo")[:200]
+            default_title = prefix
+    default_title = (sanitize_plain_text(default_title, max_length=200) or "Material")[:200]
 
     material = ApplicationMaterial(
         user_id=user.id,
         opportunity_id=opportunity.id if opportunity else None,
-        material_type=MaterialType.RESUME.value,
+        material_type=payload.material_type,
         title=default_title,
         target_language=payload.target_language,
     )
@@ -485,15 +743,14 @@ def update_material_version(
             "Apenas o rascunho da versão mais recente pode ser editado diretamente. Derive uma nova versão."
         )
 
-    previous = ResumeStructuredContent.model_validate(version.structured_content)
-    try:
-        reconciled = reconcile_edited_structured_content(
-            previous,
-            payload.structured_content,
-            version.source_facts_snapshot,
-        )
-    except ValueError as exc:
-        raise MaterialPreconditionError(str(exc)) from exc
+    previous = _parse_structured_for_type(material.material_type, version.structured_content)
+    edited = _parse_structured_for_type(material.material_type, payload.structured_content)
+    reconciled = _reconcile_by_type(
+        material.material_type,
+        previous,
+        edited,
+        version.source_facts_snapshot,
+    )
 
     version.structured_content = reconciled.model_dump(mode="json")
     version.origin = MaterialVersionOrigin.MANUAL_EDIT.value
@@ -519,16 +776,19 @@ def derive_material_version(
     if parent is None:
         raise MaterialNotFoundError("Versão-base não encontrada.")
 
-    parent_structured = ResumeStructuredContent.model_validate(parent.structured_content)
+    parent_structured = _parse_structured_for_type(
+        initial_mat.material_type, parent.structured_content
+    )
     if payload.structured_content is not None:
-        try:
-            next_structured = reconcile_edited_structured_content(
-                parent_structured,
-                payload.structured_content,
-                parent.source_facts_snapshot,
-            )
-        except ValueError as exc:
-            raise MaterialPreconditionError(str(exc)) from exc
+        edited_structured = _parse_structured_for_type(
+            initial_mat.material_type, payload.structured_content
+        )
+        next_structured = _reconcile_by_type(
+            initial_mat.material_type,
+            parent_structured,
+            edited_structured,
+            parent.source_facts_snapshot,
+        )
     else:
         next_structured = parent_structured
 
@@ -558,6 +818,32 @@ def derive_material_version(
     return _serialize_material(updated)
 
 
+def _preserve_writing_options_on_regenerate(
+    material: ApplicationMaterial,
+    explicit_options: WritingGenerationOptions | None,
+) -> WritingGenerationOptions:
+    if explicit_options is not None:
+        return explicit_options
+    opts = WritingGenerationOptions()
+    latest = max(material.versions, key=lambda v: v.version_number, default=None)
+    if latest is None:
+        return opts
+    latest_parsed = _parse_structured_for_type(material.material_type, latest.structured_content)
+    if isinstance(latest_parsed, RecruiterMessageStructuredContent):
+        opts = opts.model_copy(update={"channel": latest_parsed.channel})
+    elif isinstance(latest_parsed, ApplicationAnswersStructuredContent):
+        questions = [item.question for item in latest_parsed.items]
+        answers = [
+            ApplicationAnswerUserInput(
+                question=item.question,
+                user_answer=item.answer_text if item.status == "user_answered" else None,
+            )
+            for item in latest_parsed.items
+        ]
+        opts = opts.model_copy(update={"questions": questions, "initial_answers": answers})
+    return opts
+
+
 def regenerate_material_version(
     db: Session,
     user: User,
@@ -579,10 +865,15 @@ def regenerate_material_version(
     if not bundle.can_generate:
         raise MaterialPreconditionError("; ".join(bundle.blocking_reasons))
 
-    structured, snapshot = compose_deterministic_resume(
+    effective_writing_opts = _preserve_writing_options_on_regenerate(
+        material, payload.writing_options
+    )
+    structured, snapshot = _compose_by_type(
         bundle,
+        material_type=material.material_type,
         target_language=effective_lang,
         contact_options=payload.contact_options,
+        writing_options=effective_writing_opts,
         user_instructions=payload.user_instructions,
     )
 
@@ -625,6 +916,13 @@ def approve_material_version(
     if version is None:
         raise MaterialNotFoundError("Versão de material não encontrada.")
 
+    structured = _parse_structured_for_type(material.material_type, version.structured_content)
+    blocking_count = _count_blocking_pending_fields(structured)
+    if blocking_count > 0:
+        raise MaterialPreconditionError(
+            f"Há {blocking_count} informação(ões) obrigatória(s) pendente(s) antes de aprovar esta versão."
+        )
+
     now = utc_now()
     if not version.is_approved:
         version.is_approved = True
@@ -648,13 +946,14 @@ def export_material_version(
     if version is None:
         raise MaterialNotFoundError("Versão de material não encontrada.")
 
-    structured = ResumeStructuredContent.model_validate(version.structured_content)
+    structured = _parse_structured_for_type(material.material_type, version.structured_content)
     lang: TargetLanguage = "en" if structured.language == "en" else "pt-BR"
+    markdown_text, plain_text = _render_by_type(material.material_type, structured, lang)
     if fmt == "markdown":
-        content = render_material_markdown(structured, language=lang)
+        content = markdown_text
         ext = "md"
     else:
-        content = render_material_plain_text(structured, language=lang)
+        content = plain_text
         ext = "txt"
 
     raw_slug = _SLUG_RE.sub("-", material.title.lower()).strip("-")[:50] or "curriculo"

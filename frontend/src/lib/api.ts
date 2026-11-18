@@ -22,6 +22,8 @@ import type {
   FullProfileBundle,
   Language,
   LanguagePayload,
+  AnyMaterialStructuredContent,
+  ContactInclusionOptions,
   ManualOpportunityCreatePayload,
   MaterialCreatePayload,
   MaterialDetailResponse,
@@ -31,6 +33,7 @@ import type {
   MaterialPreAnalyzePayload,
   MaterialSummaryItem,
   MaterialTargetLanguage,
+  MaterialTypeValue,
   Opportunity,
   OpportunityListParams,
   OpportunityListResponse,
@@ -43,8 +46,7 @@ import type {
   ProfessionalProjectPayload,
   ProfileConfirmBatchPayload,
   ProfileConfirmBatchResponse,
-  ResumeStructuredContent,
-  ContactInclusionOptions,
+  WritingGenerationOptionsPayload,
   Skill,
   SkillPayload,
   StaleApplicationsResponse,
@@ -563,10 +565,12 @@ export const api = {
     list(params?: {
       opportunity_id?: string;
       application_id?: string;
+      material_type?: MaterialTypeValue;
     }): Promise<MaterialSummaryItem[]> {
       const qs = new URLSearchParams();
       if (params?.opportunity_id) qs.set("opportunity_id", params.opportunity_id);
       if (params?.application_id) qs.set("application_id", params.application_id);
+      if (params?.material_type) qs.set("material_type", params.material_type);
       const query = qs.toString();
       return request<MaterialSummaryItem[]>(`/materials${query ? `?${query}` : ""}`);
     },
@@ -583,7 +587,7 @@ export const api = {
       materialId: string,
       versionId: string,
       payload: {
-        structured_content: ResumeStructuredContent;
+        structured_content: AnyMaterialStructuredContent;
         user_instructions?: string | null;
       }
     ): Promise<MaterialDetailResponse> {
@@ -599,7 +603,7 @@ export const api = {
       materialId: string,
       versionId: string,
       payload?: {
-        structured_content?: ResumeStructuredContent | null;
+        structured_content?: AnyMaterialStructuredContent | null;
         user_instructions?: string | null;
       }
     ): Promise<MaterialDetailResponse> {
@@ -616,6 +620,7 @@ export const api = {
       payload?: {
         target_language?: MaterialTargetLanguage | null;
         contact_options?: ContactInclusionOptions;
+        writing_options?: WritingGenerationOptionsPayload;
         user_instructions?: string | null;
       }
     ): Promise<MaterialDetailResponse> {

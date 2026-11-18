@@ -24,6 +24,10 @@ from app.models.profile import JsonType
 
 class MaterialType(StrEnum):
     RESUME = "resume"
+    COVER_LETTER = "cover_letter"
+    RECRUITER_MESSAGE = "recruiter_message"
+    FREELANCE_PROPOSAL = "freelance_proposal"
+    APPLICATION_ANSWERS = "application_answers"
 
 
 class MaterialVersionOrigin(StrEnum):

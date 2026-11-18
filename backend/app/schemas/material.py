@@ -14,6 +14,14 @@ from app.services.opportunities.sanitization import (
 TargetLanguage = Literal["pt-BR", "en"]
 BlockProvenance = Literal["confirmed_fact", "manual_edit", "user_authored"]
 ExportFormat = Literal["markdown", "text"]
+MaterialTypeValue = Literal[
+    "resume",
+    "cover_letter",
+    "recruiter_message",
+    "freelance_proposal",
+    "application_answers",
+]
+RecruiterChannel = Literal["linkedin", "email", "contact_form"]
 
 
 def _sanitize_short(value: str | None, max_len: int = 255) -> str | None:
@@ -292,6 +300,281 @@ class ResumeStructuredContent(BaseModel):
     has_unverified_manual_edits: bool = False
 
 
+class WritingTextBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1, max_length=4000)
+    source_fact_keys: list[str] = Field(default_factory=list, max_length=50)
+    provenance: BlockProvenance = "confirmed_fact"
+
+    @field_validator("text")
+    @classmethod
+    def _clean_text(cls, value: str) -> str:
+        cleaned = _sanitize_long(value, 4000)
+        if not cleaned:
+            raise ValueError("Texto do bloco não pode ficar vazio.")
+        return cleaned
+
+
+class WritingEvidenceBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str | None = Field(default=None, max_length=64)
+    entity_type: Literal["experience", "project", "education", "skill", "language", "profile"] | None = None
+    title: str = Field(..., min_length=1, max_length=255)
+    summary_text: str = Field(..., min_length=1, max_length=4000)
+    matched_requirements: list[str] = Field(default_factory=list, max_length=30)
+    source_fact_keys: list[str] = Field(default_factory=list, max_length=20)
+    provenance: BlockProvenance = "confirmed_fact"
+
+    @field_validator("title")
+    @classmethod
+    def _clean_title(cls, value: str) -> str:
+        cleaned = _sanitize_short(value, 255)
+        if not cleaned:
+            raise ValueError("Título do bloco de evidência inválido.")
+        return cleaned
+
+    @field_validator("summary_text")
+    @classmethod
+    def _clean_summary(cls, value: str) -> str:
+        cleaned = _sanitize_long(value, 4000)
+        if not cleaned:
+            raise ValueError("Descrição do bloco de evidência inválida.")
+        return cleaned
+
+    @field_validator("matched_requirements")
+    @classmethod
+    def _clean_reqs(cls, values: list[str]) -> list[str]:
+        return [c for v in values if (c := _sanitize_short(v, 100))]
+
+
+class PendingUserInputField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_id: str = Field(..., min_length=1, max_length=64)
+    label: str = Field(..., min_length=1, max_length=150)
+    question: str = Field(..., min_length=1, max_length=500)
+    required: bool = True
+    status: Literal["pending", "provided"] = "pending"
+    user_value: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("field_id", "label")
+    @classmethod
+    def _clean_short(cls, value: str) -> str:
+        cleaned = _sanitize_short(value, 150)
+        if not cleaned:
+            raise ValueError("Identificador/rótulo de campo pendente inválido.")
+        return cleaned
+
+    @field_validator("question")
+    @classmethod
+    def _clean_question(cls, value: str) -> str:
+        cleaned = _sanitize_long(value, 500)
+        if not cleaned:
+            raise ValueError("Pergunta complementar inválida.")
+        return cleaned
+
+    @field_validator("user_value")
+    @classmethod
+    def _clean_value(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 2000)
+
+    @model_validator(mode="after")
+    def _sync_status(self) -> "PendingUserInputField":
+        if self.user_value and self.user_value.strip():
+            self.status = "provided"
+        else:
+            self.user_value = None
+            self.status = "pending"
+        return self
+
+
+class CoverLetterStructuredContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    material_type: Literal["cover_letter"] = "cover_letter"
+    language: TargetLanguage = "pt-BR"
+    header: ResumeHeaderSection
+    recipient_line: WritingTextBlock
+    greeting: WritingTextBlock
+    opening: WritingTextBlock
+    relevance_highlights: list[WritingEvidenceBlock] = Field(default_factory=list, max_length=10)
+    opportunity_alignment: WritingTextBlock | None = None
+    closing: WritingTextBlock
+    manual_notes: list[ResumeManualNoteItem] = Field(default_factory=list, max_length=10)
+    has_unverified_manual_edits: bool = False
+
+
+class RecruiterMessageStructuredContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    material_type: Literal["recruiter_message"] = "recruiter_message"
+    language: TargetLanguage = "pt-BR"
+    channel: RecruiterChannel = "linkedin"
+    subject: WritingTextBlock | None = None
+    greeting: WritingTextBlock
+    body: WritingTextBlock
+    sign_off: WritingTextBlock
+    character_count: int = Field(default=0, ge=0)
+    manual_notes: list[ResumeManualNoteItem] = Field(default_factory=list, max_length=10)
+    has_unverified_manual_edits: bool = False
+
+
+class FreelanceProposalStructuredContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    material_type: Literal["freelance_proposal"] = "freelance_proposal"
+    language: TargetLanguage = "pt-BR"
+    header: ResumeHeaderSection
+    introduction: WritingTextBlock
+    project_understanding: WritingTextBlock
+    relevant_evidence: list[WritingEvidenceBlock] = Field(default_factory=list, max_length=10)
+    suggested_approach: WritingTextBlock
+    alignment_points: WritingTextBlock
+    pending_fields: list[PendingUserInputField] = Field(default_factory=list, max_length=15)
+    closing: WritingTextBlock
+    manual_notes: list[ResumeManualNoteItem] = Field(default_factory=list, max_length=10)
+    has_unverified_manual_edits: bool = False
+
+
+class ApplicationAnswerItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=3, max_length=500)
+    question_kind: Literal[
+        "technical_experience",
+        "project_example",
+        "education",
+        "language",
+        "motivation",
+        "compensation",
+        "availability",
+        "general_personal",
+    ] = "general_personal"
+    answer_text: str | None = Field(default=None, max_length=4000)
+    requires_user_input: bool = False
+    status: Literal["answered_from_facts", "needs_user_input", "user_answered"] = "needs_user_input"
+    follow_up_prompt: str | None = Field(default=None, max_length=500)
+    source_fact_keys: list[str] = Field(default_factory=list, max_length=30)
+    evidence_notes: list[str] = Field(default_factory=list, max_length=20)
+    provenance: BlockProvenance = "confirmed_fact"
+
+    @field_validator("question")
+    @classmethod
+    def _clean_question(cls, value: str) -> str:
+        cleaned = _sanitize_long(value, 500)
+        if not cleaned or len(cleaned) < 3:
+            raise ValueError("Pergunta de candidatura deve ter ao menos 3 caracteres.")
+        return cleaned
+
+    @field_validator("answer_text", "follow_up_prompt")
+    @classmethod
+    def _clean_answer_or_prompt(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 4000)
+
+    @field_validator("evidence_notes")
+    @classmethod
+    def _clean_evidence(cls, values: list[str]) -> list[str]:
+        return [c for v in values if (c := _sanitize_short(v, 255))]
+
+
+class ApplicationAnswersStructuredContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    material_type: Literal["application_answers"] = "application_answers"
+    language: TargetLanguage = "pt-BR"
+    items: list[ApplicationAnswerItem] = Field(..., min_length=1, max_length=20)
+    manual_notes: list[ResumeManualNoteItem] = Field(default_factory=list, max_length=10)
+    has_unverified_manual_edits: bool = False
+
+
+AnyMaterialStructuredContent = (
+    ResumeStructuredContent
+    | CoverLetterStructuredContent
+    | RecruiterMessageStructuredContent
+    | FreelanceProposalStructuredContent
+    | ApplicationAnswersStructuredContent
+)
+
+
+class FreelanceInputsPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    availability: str | None = Field(default=None, max_length=500)
+    estimated_delivery: str | None = Field(default=None, max_length=500)
+    budget_or_price: str | None = Field(default=None, max_length=500)
+    scope_clarifications: str | None = Field(default=None, max_length=1500)
+    additional_requirements: str | None = Field(default=None, max_length=1500)
+
+    @field_validator(
+        "availability",
+        "estimated_delivery",
+        "budget_or_price",
+        "scope_clarifications",
+        "additional_requirements",
+    )
+    @classmethod
+    def _clean_field(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 1500)
+
+
+class ApplicationAnswerUserInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(..., min_length=3, max_length=500)
+    user_answer: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("question")
+    @classmethod
+    def _clean_q(cls, value: str) -> str:
+        cleaned = _sanitize_long(value, 500)
+        if not cleaned or len(cleaned) < 3:
+            raise ValueError("Pergunta inválida.")
+        return cleaned
+
+    @field_validator("user_answer")
+    @classmethod
+    def _clean_a(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 4000)
+
+
+class WritingGenerationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: RecruiterChannel = "linkedin"
+    contact_name: str | None = Field(default=None, max_length=150)
+    contact_context: str | None = Field(default=None, max_length=1000)
+    freelance_inputs: FreelanceInputsPayload = Field(default_factory=FreelanceInputsPayload)
+    questions: list[str] = Field(default_factory=list, max_length=20)
+    initial_answers: list[ApplicationAnswerUserInput] = Field(default_factory=list, max_length=20)
+
+    @field_validator("contact_name")
+    @classmethod
+    def _clean_contact_name(cls, value: str | None) -> str | None:
+        return _sanitize_short(value, 150)
+
+    @field_validator("contact_context")
+    @classmethod
+    def _clean_contact_context(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 1000)
+
+    @field_validator("questions")
+    @classmethod
+    def _clean_questions(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in values:
+            item = _sanitize_long(raw, 500)
+            if item and len(item) >= 3:
+                cleaned.append(item)
+        return cleaned
+
+
 class OpportunityContextInfo(BaseModel):
     opportunity_id: uuid.UUID | None = None
     application_id: uuid.UUID | None = None
@@ -299,6 +582,8 @@ class OpportunityContextInfo(BaseModel):
     company_name: str | None = None
     professional_area: str | None = None
     seniority_level: str | None = None
+    employment_type: str | None = None
+    opportunity_type: str | None = None
     experience_summary: str | None = None
     required_technologies: list[str] = Field(default_factory=list)
     desirable_technologies: list[str] = Field(default_factory=list)
@@ -352,21 +637,35 @@ class MaterialPreAnalyzeRequest(BaseModel):
 
     opportunity_id: uuid.UUID | None = None
     application_id: uuid.UUID | None = None
+    material_type: MaterialTypeValue = MaterialType.RESUME.value
     target_language: TargetLanguage = "pt-BR"
     contact_options: ContactInclusionOptions = Field(
         default_factory=ContactInclusionOptions
+    )
+    writing_options: WritingGenerationOptions = Field(
+        default_factory=WritingGenerationOptions
     )
 
 
 class MaterialPreAnalysisResponse(BaseModel):
     can_generate: bool
     blocking_reasons: list[str] = Field(default_factory=list)
+    material_type: MaterialTypeValue = MaterialType.RESUME.value
+    compatible_material_types: list[MaterialTypeValue] = Field(
+        default_factory=lambda: [
+            "resume",
+            "cover_letter",
+            "recruiter_message",
+            "application_answers",
+        ]
+    )
     target_language: TargetLanguage
     opportunity_context: OpportunityContextInfo
     contact_preview: ContactPreviewInfo
     used_facts: list[SelectedFactReference] = Field(default_factory=list)
     unconfirmed_warnings: list[UnconfirmedWarningItem] = Field(default_factory=list)
     missing_requirements: list[MissingRequirementItem] = Field(default_factory=list)
+    additional_info_needed: list[PendingUserInputField] = Field(default_factory=list)
     confirmed_counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -375,11 +674,14 @@ class MaterialCreateRequest(BaseModel):
 
     opportunity_id: uuid.UUID | None = None
     application_id: uuid.UUID | None = None
-    material_type: Literal["resume"] = MaterialType.RESUME.value
+    material_type: MaterialTypeValue = MaterialType.RESUME.value
     title: str | None = Field(default=None, min_length=2, max_length=200)
     target_language: TargetLanguage = "pt-BR"
     contact_options: ContactInclusionOptions = Field(
         default_factory=ContactInclusionOptions
+    )
+    writing_options: WritingGenerationOptions = Field(
+        default_factory=WritingGenerationOptions
     )
     user_instructions: str | None = Field(default=None, max_length=1500)
 
@@ -397,7 +699,7 @@ class MaterialCreateRequest(BaseModel):
 class MaterialVersionUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    structured_content: ResumeStructuredContent
+    structured_content: dict[str, Any]
     user_instructions: str | None = Field(default=None, max_length=1500)
 
     @field_validator("user_instructions")
@@ -409,7 +711,7 @@ class MaterialVersionUpdateRequest(BaseModel):
 class MaterialVersionDeriveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    structured_content: ResumeStructuredContent | None = None
+    structured_content: dict[str, Any] | None = None
     user_instructions: str | None = Field(default=None, max_length=1500)
 
     @field_validator("user_instructions")
@@ -425,6 +727,7 @@ class MaterialRegenerateRequest(BaseModel):
     contact_options: ContactInclusionOptions = Field(
         default_factory=ContactInclusionOptions
     )
+    writing_options: WritingGenerationOptions | None = None
     user_instructions: str | None = Field(default=None, max_length=1500)
 
     @field_validator("user_instructions")
@@ -462,15 +765,19 @@ class MaterialLinkResponse(BaseModel):
 class MaterialVersionResponse(BaseModel):
     id: uuid.UUID
     material_id: uuid.UUID
+    material_type: MaterialTypeValue | str = MaterialType.RESUME.value
     version_number: int
     origin: MaterialVersionOrigin | str
     parent_version_id: uuid.UUID | None = None
     user_instructions: str | None = None
-    structured_content: ResumeStructuredContent
+    structured_content: AnyMaterialStructuredContent
     source_facts_snapshot: dict[str, Any]
     unconfirmed_warnings: list[UnconfirmedWarningItem] = Field(default_factory=list)
     missing_requirements: list[MissingRequirementItem] = Field(default_factory=list)
     rendered_markdown: str
+    rendered_plain_text: str = ""
+    has_blocking_pending_fields: bool = False
+    pending_requirements_count: int = 0
     is_approved: bool
     approved_at: datetime | None = None
     is_linked_to_any_application: bool = False

@@ -119,6 +119,8 @@ def _extract_requirement_pool(
             application_id=application.id,
             title=role_title,
             company_name=company_name,
+            seniority_level=application.seniority_level,
+            employment_type=application.employment_type,
             all_technologies=inferred_techs[:20],
         )
         return ctx, [(tech, "general_technology") for tech in inferred_techs[:20]]
@@ -178,6 +180,8 @@ def _extract_requirement_pool(
         company_name=sanitize_plain_text(target_opp.company_name, max_length=200),
         professional_area=primary_area,
         seniority_level=seniority_level,
+        employment_type=target_opp.employment_type,
+        opportunity_type=target_opp.opportunity_type,
         experience_summary=sanitize_plain_text(exp_summary, max_length=255),
         required_technologies=required_list[:20],
         desirable_technologies=desirable_list[:20],
