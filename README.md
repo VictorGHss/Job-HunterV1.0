@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Subfase 04.2 — Propostas, Cartas e Mensagens Direcionadas
+- **Fase atual:** Subfase 04.3 — Exportação Profissional em PDF e DOCX
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -90,6 +90,13 @@ job-hunter/
 │   │   │   └── profile.py
 │   │   ├── services/
 │   │   │   ├── materials/
+│   │   │   │   ├── export/
+│   │   │   │   │   ├── fonts/
+│   │   │   │   │   ├── document_templates.py
+│   │   │   │   │   ├── document_validation.py
+│   │   │   │   │   ├── docx_exporter.py
+│   │   │   │   │   ├── export_service.py
+│   │   │   │   │   └── pdf_exporter.py
 │   │   │   │   ├── application_answers_composer.py
 │   │   │   │   ├── cover_letter_composer.py
 │   │   │   │   ├── fact_selector.py
@@ -116,6 +123,7 @@ job-hunter/
 │   │   ├── test_foundation_phase01.py
 │   │   ├── test_materials_phase041.py
 │   │   ├── test_materials_phase042.py
+│   │   ├── test_materials_phase043.py
 │   │   ├── test_opportunities_phase02.py
 │   │   ├── test_opportunity_authorization_phase0411.py
 │   │   └── test_profile_confirmation_phase0411.py
@@ -264,9 +272,16 @@ O estúdio foi ampliado para o **Estúdio de Materiais para Candidatura** (acess
 - **Cinco tipos de material em fluxo único:** `resume` (`Currículo Direcionado`), `cover_letter` (`Carta de Apresentação`), `recruiter_message` (`Mensagem para Recrutador` por `linkedin`, `email` ou `contact_form` com contagem aproximada de caracteres), `freelance_proposal` (`Proposta Freelance`) e `application_answers` (`Respostas para Perguntas de Candidatura`).
 - **Compatibilidade e solicitação explícita:** a pré-análise (`POST /api/v1/materials/pre-analyze`) prioriza os formatos mais adequados ao regime da vaga (`Recomendado` vs `Sob solicitação`, destacando `freelance_proposal` para oportunidades freelance), sem impedir seleção explícita pelo usuário.
 - **Lacunas e bloqueio seguro de aprovação:** em `freelance_proposal`, disponibilidade, prazo estimado e orçamento nunca são inventados e bloqueiam `POST .../approve` (`422`) enquanto não preenchidos e salvos; em `application_answers`, perguntas factuais usam exclusivamente evidências confirmadas (`confirmed_fact`), enquanto perguntas sobre motivação, pretensão salarial, disponibilidade ou tecnologias sem evidência retornam `needs_user_input` (`answer_text = null`) exigindo resposta humana (`user_authored`) antes de liberar aprovação (sem promover respostas ad-hoc para fatos do perfil).
-- **Fora de escopo nesta subfase:** exportação para PDF/DOCX, integração com APIs de LLM externas e envio automático de mensagens ou candidaturas permanecem fora de escopo.
+- **Fora de escopo nas subfases de texto:** integração com APIs de LLM externas e envio automático de mensagens ou candidaturas permanecem fora de escopo.
 
-### 4.9. Encerrando o Ambiente
+### 4.9. Exportação Profissional em PDF e DOCX (Subfase 04.3)
+Todos os cinco tipos de materiais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`) contam com geração binária **100% em memória** (zero armazenamento em disco/banco e zero serviços externos como Chromium/Pandoc), operando tanto no Windows quanto em container Linux (Debian 13 + `fonts-liberation2`):
+- **Bibliotecas e fontes controladas:** PDF gerado com `ReportLab Platypus` (`reportlab>=4.2.5,<5.0.0`, `invariant=1`) e DOCX com `python-docx` (`>=1.1.2,<2.0.0`), utilizando fontes TrueType controladas da família **Liberation Sans** (`SIL Open Font License 1.1`, com verificação SHA-256 em `backend/app/services/materials/export/fonts/`). Em ambiente de testes utiliza `pypdf` (`>=5.1.0,<6.0.0`).
+- **Templates por exportação (`classic_ats` e `modern_minimal`):** layouts de coluna única com extração linear favorável a ATS, suporte bilíngue (`pt-BR` e `en`), Unicode NFC completo, hiperlinks externos clicáveis seguros (`validate_safe_external_url`), tabelas com repetição de cabeçalho e controle de paginação multipágina (`Página X de Y` apenas quando há mais de 1 página).
+- **Rota binária, headers e rascunhos:** `GET /api/v1/materials/{material_id}/versions/{version_id}/download?format=pdf|docx&template=classic_ats|modern_minimal&allow_draft=false|true` exporta estritamente o `version_id` solicitado com `Content-Disposition` sanitizado, `X-Content-Type-Options: nosniff` e `Cache-Control: no-store`. Versões com pendências obrigatórias são sempre bloqueadas (`422`), e versões não aprovadas só podem ser baixadas com `allow_draft=true`, exibindo `RASCUNHO NÃO APROVADO` / `UNAPPROVED DRAFT` em todas as páginas.
+- **Limites e UX:** limites de `120.000` caracteres de entrada e `5 MiB` por arquivo final; no frontend, a aba **Pré-visualização & Exportação** traz seletor de template, preview documental e downloads Blob com `URL.revokeObjectURL`, além de atalhos **PDF**/**DOCX** na aba **Materiais** da candidatura apontando estritamente para `linked_version_id` (versão histórica vinculada em `application_material_links`).
+
+### 4.10. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

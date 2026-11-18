@@ -24,6 +24,13 @@ from app.schemas.material import (
     MaterialVersionDeriveRequest,
     MaterialVersionUpdateRequest,
 )
+from app.services.materials.export import (
+    DocumentExportRenderError,
+    DocumentExportValidationError,
+    DocumentFormat,
+    DocumentTemplateId,
+    export_material_document,
+)
 from app.services.materials.material_service import (
     MaterialImmutableError,
     MaterialNotFoundError,
@@ -50,8 +57,10 @@ def _handle_service_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, MaterialImmutableError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    if isinstance(exc, MaterialPreconditionError):
+    if isinstance(exc, (MaterialPreconditionError, DocumentExportValidationError)):
         return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+    if isinstance(exc, DocumentExportRenderError):
+        return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
     raise exc
 
 
@@ -184,6 +193,46 @@ def export_material_version_endpoint(
     try:
         return export_material_version(db, current_user, material_id, version_id, format)
     except (MaterialNotFoundError, MaterialImmutableError, MaterialPreconditionError) as exc:
+        raise _handle_service_error(exc) from exc
+
+
+@router.get("/{material_id}/versions/{version_id}/download")
+def download_material_version_endpoint(
+    material_id: uuid.UUID,
+    version_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    format: DocumentFormat = Query(...),
+    template: DocumentTemplateId = Query(default="classic_ats"),
+    allow_draft: bool = Query(default=False),
+) -> Response:
+    try:
+        artifact = export_material_document(
+            db,
+            current_user,
+            material_id=material_id,
+            version_id=version_id,
+            export_format=format,
+            template_id=template,
+            allow_draft=allow_draft,
+        )
+        return Response(
+            content=artifact.content,
+            media_type=artifact.media_type,
+            headers={
+                "Content-Disposition": artifact.content_disposition,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
+            },
+        )
+    except (
+        MaterialNotFoundError,
+        MaterialImmutableError,
+        MaterialPreconditionError,
+        DocumentExportValidationError,
+        DocumentExportRenderError,
+    ) as exc:
         raise _handle_service_error(exc) from exc
 
 

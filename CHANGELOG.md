@@ -6,6 +6,38 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.3] - 2026-11-18 — Subfase 04.3: Exportação Profissional em PDF e DOCX
+
+### Adicionado
+
+- **Módulo de Exportação Documental (`backend/app/services/materials/export/`):**
+  - `document_templates.py`: centralização de tokens visuais, margens A4, tipografia, paletas, rótulos bilíngues (`pt-BR` / `en`) e dois templates intercambiáveis sem persistência adicional (`classic_ats` padrão e `modern_minimal`).
+  - `document_validation.py`: normalização Unicode NFC, remoção estrita de caracteres XML 1.0 inválidos, validação de URLs externas com `validate_safe_external_url(..., allow_localhost=False)`, verificação SHA-256 das fontes controladas Liberation Sans (SIL OFL 1.1), detecção explícita via tabela `cmap` de caracteres sem glifo na fonte (`[U+XXXX]` sem apagar texto ao redor), limites centralizados (`120.000` caracteres de entrada e `5 MiB` por arquivo final), validação de magic bytes (`%PDF-` / `PK\x03\x04` + abertura `docx.Document`) e sanitização allowlist de nomes de arquivo bloqueando path traversal, CRLF, NUL e nomes reservados Windows.
+  - `docx_exporter.py`: geração determinística em `io.BytesIO` com `python-docx` (`>=1.1.2,<2.0.0`), sem embutir fontes binárias, relacionamentos `w:hyperlink`, `keep_with_next`, `widow_control`, `tblHeader`/`cantSplit`, metadados com datas da versão e timestamps ZIP normalizados.
+  - `pdf_exporter.py`: geração determinística em memória com `ReportLab Platypus` (`reportlab>=4.2.5,<5.0.0`, `invariant=1`), registro `TTFont` da família Liberation Sans, escaping XML antes de markup controlado, anotações `/Link` válidas, paginação multipágina com `CondPageBreak`/`KeepTogether` seletivo, rodapé `Página X de Y` apenas quando há múltiplas páginas e cabeçalho/marca d'água diagonal `RASCUNHO NÃO APROVADO` / `UNAPPROVED DRAFT` em todas as páginas no modo rascunho.
+  - `export_service.py`: orquestração em memória com validação estrita por `user_id`, carregamento exato do `version_id` solicitado, bloqueio obrigatório quando há pendências (`422`), exigência de aprovação quando `allow_draft=false` (`422`), modo rascunho em `allow_draft=true` apenas para versões não aprovadas sem pendências e zero persistência em disco ou PII em logs.
+- **Fontes e Container (`backend/Dockerfile`, `backend/pyproject.toml`):**
+  - Distribuídos os 4 arquivos TTF da família Liberation Sans (`SIL-OFL-1.1`) em `backend/app/services/materials/export/fonts/` com `LICENSE.txt` e `SHA256SUMS.txt`, complementados pela instalação limpa de `fonts-liberation2` no `backend/Dockerfile`.
+  - Adicionado `pypdf>=5.1.0,<6.0.0` em `[project.optional-dependencies] dev`.
+- **Rota Binária e Vínculo Histórico (`api/routes/materials.py`, `main.py`, `material_service.py`):**
+  - Criado endpoint `GET /api/v1/materials/{material_id}/versions/{version_id}/download` retornando headers `Content-Disposition` (ASCII + RFC 5987 `filename*`), `X-Content-Type-Options: nosniff`, `Cache-Control: no-store, no-cache, must-revalidate, private`, `Pragma: no-cache`, e `Content-Disposition` exposto em `CORSMiddleware` (`expose_headers`).
+  - `MaterialSummaryResponse` (`GET /api/v1/materials?application_id=...`) passa a informar `linked_version_id`, `linked_version_number` e `linked_version_is_approved` registrados em `application_material_links`.
+- **Frontend (`frontend/src/lib/api.ts`, `DocumentPreviewCard.tsx`, `MaterialWorkspaceModal.tsx`, `ApplicationDetailModal.tsx`):**
+  - Implementado `requestBlob(...)` com autenticação HttpOnly, tratamento de erro API, parsing de `Content-Disposition` e download via Blob com `URL.revokeObjectURL`.
+  - Adicionado preview documental React puro nos templates `Classic ATS` e `Modern Minimalist`, botões `Baixar PDF` / `Baixar DOCX` (final ou rascunho), bloqueio visual com pendências e atalhos na aba **Materiais** da candidatura apontando estritamente para `linked_version_id`.
+
+### Corrigido (Achados 04.2 — Etapa 0)
+
+- **L-1 (`material_service.py`):** `_preserve_writing_options_on_regenerate` agora recupera campos comerciais preenchidos de `freelance_proposal` (`availability`, `estimated_delivery`, `budget_or_price`, `scope_clarifications`, `additional_requirements`), canal e `contact_name`/`contact_context` aplicáveis quando `writing_options` é omitido ou parcial, sem sobrescrever com defaults vazios, mantendo `user_authored` e integridade da versão anterior.
+- **L-2 (`test_materials_phase042.py`):** adicionados testes dedicados comprovando preservação de perguntas e respostas manuais em `/regenerate` de `application_answers` com reavaliação de fatos atualizados do perfil.
+
+### Testes
+- `tests/test_materials_phase043.py` (8 testes cobrindo `TC-43-01` a `TC-43-16` e edge cases) + novos testes L-1 e L-2 em `test_materials_phase042.py`.
+- Suíte backend completa: **108/108 passando** em PostgreSQL 16 (`backend-test`) e SQLite local.
+- `frontend/src/test/App.test.tsx`: **15/15 testes passando**, `tsc --noEmit`, `eslint .` e `vite build` sem erros.
+
+---
+
 ## [0.4.2] - 2026-11-17 — Subfase 04.2: Propostas, Cartas e Mensagens Direcionadas
 
 ### Adicionado

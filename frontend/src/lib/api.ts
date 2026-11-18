@@ -24,9 +24,12 @@ import type {
   LanguagePayload,
   AnyMaterialStructuredContent,
   ContactInclusionOptions,
+  DocumentDownloadFormat,
+  DocumentTemplateId,
   ManualOpportunityCreatePayload,
   MaterialCreatePayload,
   MaterialDetailResponse,
+  MaterialDownloadResult,
   MaterialExportFormat,
   MaterialExportResponse,
   MaterialPreAnalysisResponse,
@@ -137,6 +140,101 @@ async function request<T>(
   }
 
   return data as T;
+}
+
+function parseFilenameFromContentDisposition(
+  headerValue: string | null,
+  fallbackFilename: string
+): string {
+  if (!headerValue) return fallbackFilename;
+  const utf8Match = headerValue.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      const decoded = decodeURIComponent(utf8Match[1].trim().replace(/^["']|["']$/g, ""));
+      if (decoded) return decoded;
+    } catch {
+      // ignora erro de decodificação e cai no filename ASCII
+    }
+  }
+  const asciiMatch = headerValue.match(/filename\s*=\s*"?([^";]+)"?/i);
+  if (asciiMatch?.[1]?.trim()) {
+    return asciiMatch[1].trim();
+  }
+  return fallbackFilename;
+}
+
+function triggerBrowserBlobDownload(blob: Blob, filename: string): void {
+  if (
+    typeof window === "undefined" ||
+    typeof document === "undefined" ||
+    typeof URL === "undefined" ||
+    typeof URL.createObjectURL !== "function"
+  ) {
+    return;
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  } finally {
+    window.setTimeout(() => {
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(objectUrl);
+      }
+    }, 1000);
+  }
+}
+
+async function requestBlob(
+  path: string,
+  fallbackFilename: string,
+  options: RequestInit = {}
+): Promise<{ blob: Blob; filename: string; contentType: string }> {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const csrf = getActiveCsrfToken();
+    if (csrf) {
+      headers.set("X-CSRF-Token", csrf);
+    }
+  }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    method,
+    headers,
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    let message = "Não foi possível baixar o arquivo solicitado.";
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      try {
+        const errData = (await response.json()) as { detail?: unknown };
+        if (typeof errData?.detail === "string") {
+          message = errData.detail;
+        }
+      } catch {
+        // usa fallback seguro
+      }
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const blob = await response.blob();
+  const contentType =
+    response.headers.get("content-type") || "application/octet-stream";
+  const filename = parseFilenameFromContentDisposition(
+    response.headers.get("content-disposition"),
+    fallbackFilename
+  );
+  return { blob, filename, contentType };
 }
 
 export const api = {
@@ -646,6 +744,33 @@ export const api = {
       return request<MaterialExportResponse>(
         `/materials/${materialId}/versions/${versionId}/export?format=${format}`
       );
+    },
+    async downloadVersion(
+      materialId: string,
+      versionId: string,
+      options: {
+        format: DocumentDownloadFormat;
+        template?: DocumentTemplateId;
+        allow_draft?: boolean;
+      }
+    ): Promise<MaterialDownloadResult> {
+      const qs = new URLSearchParams();
+      qs.set("format", options.format);
+      qs.set("template", options.template || "classic_ats");
+      if (options.allow_draft) {
+        qs.set("allow_draft", "true");
+      }
+      const fallback = `documento.${options.format}`;
+      const { blob, filename, contentType } = await requestBlob(
+        `/materials/${materialId}/versions/${versionId}/download?${qs.toString()}`,
+        fallback
+      );
+      triggerBrowserBlobDownload(blob, filename);
+      return {
+        filename,
+        contentType,
+        sizeBytes: blob.size,
+      };
     },
     link(
       materialId: string,

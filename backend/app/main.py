@@ -29,6 +29,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token", "Accept"],
+        expose_headers=["Content-Disposition"],
     )
 
     @application.middleware("http")

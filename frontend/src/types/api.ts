@@ -832,6 +832,14 @@ export interface ProfileConfirmBatchResponse {
 export type MaterialTargetLanguage = "pt-BR" | "en";
 export type MaterialBlockProvenance = "confirmed_fact" | "manual_edit" | "user_authored";
 export type MaterialExportFormat = "markdown" | "text";
+export type DocumentDownloadFormat = "pdf" | "docx";
+export type DocumentTemplateId = "classic_ats" | "modern_minimal";
+
+export interface MaterialDownloadResult {
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+}
 export type MaterialVersionOrigin = "generated" | "manual_edit" | "regenerated" | "derived";
 export type MaterialTypeValue =
   | "resume"
@@ -1239,6 +1247,9 @@ export interface MaterialSummaryItem {
   latest_version_number: number;
   latest_version_id: string | null;
   latest_is_approved: boolean;
+  linked_version_id?: string | null;
+  linked_version_number?: number | null;
+  linked_version_is_approved?: boolean;
   has_approved_version: boolean;
   active_links_count: number;
   created_at: string;

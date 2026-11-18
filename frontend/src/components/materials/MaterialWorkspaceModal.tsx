@@ -4,6 +4,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Download,
   FileCheck2,
   FileText,
   GitBranch,
@@ -30,6 +31,7 @@ import {
 } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import { DocumentPreviewCard } from "@/components/materials/DocumentPreviewCard";
 import {
   ApplicationAnswersEditor,
   CoverLetterEditor,
@@ -41,6 +43,8 @@ import type {
   ApplicationAnswersStructuredContent,
   ContactInclusionOptions,
   CoverLetterStructuredContent,
+  DocumentDownloadFormat,
+  DocumentTemplateId,
   FreelanceProposalStructuredContent,
   MaterialBlockProvenance,
   MaterialDetailResponse,
@@ -215,6 +219,13 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [copiedFormat, setCopiedFormat] =
     useState<MaterialExportFormat | null>(null);
+  const [selectedTemplate, setSelectedTemplate] =
+    useState<DocumentTemplateId>("classic_ats");
+  const [previewMode, setPreviewMode] = useState<"document" | "markdown">(
+    "document"
+  );
+  const [downloadingFormat, setDownloadingFormat] =
+    useState<DocumentDownloadFormat | null>(null);
 
   const buildWritingOptionsPayload = useCallback(() => {
     const cleanedQuestions = questionDrafts
@@ -652,6 +663,34 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       );
     } finally {
       setBusyAction(false);
+    }
+  };
+
+  const handleDownloadBinary = async (fmt: DocumentDownloadFormat) => {
+    if (!material || !activeVersion) return;
+    if (activeVersion.has_blocking_pending_fields) return;
+    setDownloadingFormat(fmt);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const result = await api.materials.downloadVersion(
+        material.id,
+        activeVersion.id,
+        {
+          format: fmt,
+          template: selectedTemplate,
+          allow_draft: !activeVersion.is_approved,
+        }
+      );
+      setSuccessMsg(`Download concluído: ${result.filename}`);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : `Falha ao baixar arquivo ${fmt.toUpperCase()}.`
+      );
+    } finally {
+      setDownloadingFormat(null);
     }
   };
 
@@ -2012,54 +2051,208 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
               )}
 
               {/* TAB PREVIEW & EXPORT */}
-              {panelTab === "preview" && (
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <CardTitle className="text-sm">
-                          Pré-visualização Final (v{activeVersion.version_number})
-                        </CardTitle>
-                        <CardDescription className="text-xs">
-                          Renderização pura derivada do conteúdo estruturado
-                          canônico.
-                        </CardDescription>
+              {panelTab === "preview" && (() => {
+                const preferPlainCopy =
+                  material.material_type === "recruiter_message" ||
+                  material.material_type === "application_answers";
+                const hasBlocking = Boolean(
+                  activeVersion.has_blocking_pending_fields
+                );
+                const isDraftMode = !activeVersion.is_approved;
+                const downloadDisabled =
+                  busyAction ||
+                  downloadingFormat !== null ||
+                  hasBlocking;
+
+                return (
+                  <Card>
+                    <CardHeader className="space-y-3 pb-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <CardTitle className="text-sm">
+                            Pré-visualização & Exportação (v{activeVersion.version_number})
+                          </CardTitle>
+                          <CardDescription className="text-xs">
+                            Exportação em PDF e DOCX gerada exclusivamente a partir da versão estruturada v{activeVersion.version_number}.
+                          </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={preferPlainCopy ? "default" : "outline"}
+                            disabled={busyAction}
+                            onClick={() => handleCopyExport("text")}
+                          >
+                            <Copy className="mr-1.5 h-3.5 w-3.5" />
+                            {copiedFormat === "text"
+                              ? "Texto copiado!"
+                              : "Copiar Texto Simples"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={busyAction}
+                            onClick={() => handleCopyExport("markdown")}
+                          >
+                            <Copy className="mr-1.5 h-3.5 w-3.5" />
+                            {copiedFormat === "markdown"
+                              ? "Markdown copiado!"
+                              : "Copiar Markdown"}
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busyAction}
-                          onClick={() => handleCopyExport("markdown")}
-                        >
-                          <Copy className="mr-1.5 h-3.5 w-3.5" />
-                          {copiedFormat === "markdown"
-                            ? "Markdown copiado!"
-                            : "Copiar Markdown"}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busyAction}
-                          onClick={() => handleCopyExport("text")}
-                        >
-                          <Copy className="mr-1.5 h-3.5 w-3.5" />
-                          {copiedFormat === "text"
-                            ? "Texto copiado!"
-                            : "Copiar Texto Simples"}
-                        </Button>
+
+                      {/* Controles de template, visualização e downloads PDF/DOCX */}
+                      <div className="flex flex-col gap-3 rounded-xl border border-border bg-muted/20 p-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-medium text-foreground">
+                            Template:
+                          </span>
+                          <div
+                            role="group"
+                            aria-label="Selecionar template documental"
+                            className="inline-flex rounded-lg border border-border bg-background p-0.5"
+                          >
+                            {(
+                              [
+                                { id: "classic_ats", label: "Classic ATS" },
+                                { id: "modern_minimal", label: "Modern Minimalist" },
+                              ] as Array<{ id: DocumentTemplateId; label: string }>
+                            ).map((tpl) => (
+                              <button
+                                key={tpl.id}
+                                type="button"
+                                aria-pressed={selectedTemplate === tpl.id}
+                                onClick={() => setSelectedTemplate(tpl.id)}
+                                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  selectedTemplate === tpl.id
+                                    ? "bg-primary text-primary-foreground"
+                                    : "text-muted-foreground hover:text-foreground"
+                                }`}
+                              >
+                                {tpl.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          <div
+                            role="group"
+                            aria-label="Alternar visualização"
+                            className="inline-flex rounded-lg border border-border bg-background p-0.5"
+                          >
+                            <button
+                              type="button"
+                              aria-pressed={previewMode === "document"}
+                              onClick={() => setPreviewMode("document")}
+                              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                                previewMode === "document"
+                                  ? "bg-secondary text-secondary-foreground"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Preview Documental
+                            </button>
+                            <button
+                              type="button"
+                              aria-pressed={previewMode === "markdown"}
+                              onClick={() => setPreviewMode("markdown")}
+                              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                                previewMode === "markdown"
+                                  ? "bg-secondary text-secondary-foreground"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Markdown
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={preferPlainCopy ? "outline" : "default"}
+                            disabled={downloadDisabled}
+                            onClick={() => handleDownloadBinary("pdf")}
+                          >
+                            <Download className="mr-1.5 h-3.5 w-3.5" />
+                            {downloadingFormat === "pdf"
+                              ? "Baixando PDF..."
+                              : isDraftMode
+                                ? "Baixar PDF (Rascunho)"
+                                : "Baixar PDF"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={downloadDisabled}
+                            onClick={() => handleDownloadBinary("docx")}
+                          >
+                            <Download className="mr-1.5 h-3.5 w-3.5" />
+                            {downloadingFormat === "docx"
+                              ? "Baixando DOCX..."
+                              : isDraftMode
+                                ? "Baixar DOCX (Rascunho)"
+                                : "Baixar DOCX"}
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-border bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground">
-                      {activeVersion.rendered_markdown}
-                    </pre>
-                  </CardContent>
-                </Card>
-              )}
+
+                      {hasBlocking ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                          <span>
+                            Downloads PDF/DOCX bloqueados: há{" "}
+                            <strong>
+                              {activeVersion.pending_requirements_count || 1}
+                            </strong>{" "}
+                            pendência(s) obrigatória(s). Preencha no editor e salve o rascunho para liberar a exportação.
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setPanelTab("editor")}
+                          >
+                            Ir para o Editor
+                          </Button>
+                        </div>
+                      ) : isDraftMode ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                          <span>
+                            Versão ainda não aprovada: os arquivos baixados incluirão aviso e marcação de <strong>RASCUNHO NÃO APROVADO</strong> em todas as páginas.
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={busyAction}
+                            onClick={handleApproveVersion}
+                          >
+                            <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                            Aprovar para versão final
+                          </Button>
+                        </div>
+                      ) : null}
+                    </CardHeader>
+
+                    <CardContent>
+                      {previewMode === "document" ? (
+                        <DocumentPreviewCard
+                          content={draftContent}
+                          template={selectedTemplate}
+                          isDraft={isDraftMode}
+                        />
+                      ) : (
+                        <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-border bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground">
+                          {activeVersion.rendered_markdown}
+                        </pre>
+                      )}
+                    </CardContent>
+                  </Card>
+                );
+              })()}
 
               {/* TAB HISTÓRICO & LACUNAS */}
               {panelTab === "history" && (

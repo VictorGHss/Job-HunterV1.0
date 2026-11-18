@@ -27,6 +27,7 @@ from app.schemas.material import (
     ContactInclusionOptions,
     CoverLetterStructuredContent,
     ExportFormat,
+    FreelanceInputsPayload,
     FreelanceProposalStructuredContent,
     MaterialCreateRequest,
     MaterialExportResponse,
@@ -488,10 +489,29 @@ def _serialize_material(material: ApplicationMaterial) -> MaterialResponse:
     )
 
 
-def _serialize_summary(material: ApplicationMaterial) -> MaterialSummaryResponse:
+def _serialize_summary(
+    material: ApplicationMaterial,
+    *,
+    application_id: uuid.UUID | None = None,
+) -> MaterialSummaryResponse:
     versions_sorted = sorted(material.versions, key=lambda v: v.version_number, reverse=True)
     latest = versions_sorted[0] if versions_sorted else None
     active_links = sum(1 for lk in material.links if lk.unlinked_at is None)
+
+    linked_ver_id: uuid.UUID | None = None
+    linked_ver_num: int | None = None
+    linked_ver_approved = False
+    if application_id is not None:
+        versions_by_id = {v.id: v for v in versions_sorted}
+        for lk in material.links:
+            if lk.application_id == application_id and lk.unlinked_at is None:
+                linked_ver_id = lk.version_id
+                ver_obj = versions_by_id.get(lk.version_id)
+                if ver_obj is not None:
+                    linked_ver_num = ver_obj.version_number
+                    linked_ver_approved = ver_obj.is_approved
+                break
+
     return MaterialSummaryResponse(
         id=material.id,
         opportunity_id=material.opportunity_id,
@@ -503,6 +523,9 @@ def _serialize_summary(material: ApplicationMaterial) -> MaterialSummaryResponse
         latest_version_number=latest.version_number if latest else 0,
         latest_version_id=latest.id if latest else None,
         latest_is_approved=latest.is_approved if latest else False,
+        linked_version_id=linked_ver_id,
+        linked_version_number=linked_ver_num,
+        linked_version_is_approved=linked_ver_approved,
         has_approved_version=any(v.is_approved for v in versions_sorted),
         active_links_count=active_links,
         created_at=material.created_at,
@@ -591,7 +614,7 @@ def list_materials(
         )
     stmt = stmt.order_by(ApplicationMaterial.updated_at.desc())
     materials = list(db.scalars(stmt).all())
-    return [_serialize_summary(mat) for mat in materials]
+    return [_serialize_summary(mat, application_id=application_id) for mat in materials]
 
 
 def create_material(
@@ -623,6 +646,10 @@ def create_material(
         writing_options=payload.writing_options,
         user_instructions=payload.user_instructions,
     )
+    if payload.writing_options.contact_context:
+        snapshot["writing_context"] = {
+            "contact_context": payload.writing_options.contact_context,
+        }
 
     default_title = payload.title
     if not default_title:
@@ -818,30 +845,152 @@ def derive_material_version(
     return _serialize_material(updated)
 
 
+_GREETING_CONTACT_PATTERNS = (
+    re.compile(r"^Prezado\(a\)\s+(.+?),$", re.IGNORECASE),
+    re.compile(r"^Dear\s+(.+?),$", re.IGNORECASE),
+    re.compile(r"^Olá,\s+(.+?),$", re.IGNORECASE),
+    re.compile(r"^Hi\s+(.+?),$", re.IGNORECASE),
+)
+
+_FREELANCE_FIELD_NAMES = (
+    "availability",
+    "estimated_delivery",
+    "budget_or_price",
+    "scope_clarifications",
+    "additional_requirements",
+)
+
+
+def _extract_contact_name_from_greeting(
+    greeting_text: str | None,
+    provenance: str | None,
+) -> str | None:
+    if not greeting_text or provenance != "user_authored":
+        return None
+    stripped = greeting_text.strip()
+    for pattern in _GREETING_CONTACT_PATTERNS:
+        match = pattern.match(stripped)
+        if match:
+            candidate = sanitize_plain_text(match.group(1), max_length=150)
+            if candidate and candidate.lower() not in {"hiring team", "equipe de seleção"}:
+                return candidate
+    return None
+
+
 def _preserve_writing_options_on_regenerate(
     material: ApplicationMaterial,
     explicit_options: WritingGenerationOptions | None,
 ) -> WritingGenerationOptions:
-    if explicit_options is not None:
-        return explicit_options
-    opts = WritingGenerationOptions()
     latest = max(material.versions, key=lambda v: v.version_number, default=None)
-    if latest is None:
-        return opts
-    latest_parsed = _parse_structured_for_type(material.material_type, latest.structured_content)
-    if isinstance(latest_parsed, RecruiterMessageStructuredContent):
-        opts = opts.model_copy(update={"channel": latest_parsed.channel})
-    elif isinstance(latest_parsed, ApplicationAnswersStructuredContent):
-        questions = [item.question for item in latest_parsed.items]
-        answers = [
-            ApplicationAnswerUserInput(
-                question=item.question,
-                user_answer=item.answer_text if item.status == "user_answered" else None,
+    preserved_channel: str = "linkedin"
+    preserved_contact_name: str | None = None
+    preserved_contact_context: str | None = None
+    preserved_freelance: dict[str, str | None] = {}
+    preserved_questions: list[str] = []
+    preserved_answers: list[ApplicationAnswerUserInput] = []
+
+    if latest is not None:
+        latest_parsed = _parse_structured_for_type(material.material_type, latest.structured_content)
+        raw_ctx = (latest.source_facts_snapshot or {}).get("writing_context")
+        if isinstance(raw_ctx, dict) and raw_ctx.get("contact_context"):
+            preserved_contact_context = sanitize_plain_text(
+                str(raw_ctx["contact_context"]), max_length=1000
             )
-            for item in latest_parsed.items
-        ]
-        opts = opts.model_copy(update={"questions": questions, "initial_answers": answers})
-    return opts
+
+        if isinstance(latest_parsed, RecruiterMessageStructuredContent):
+            preserved_channel = latest_parsed.channel
+            preserved_contact_name = _extract_contact_name_from_greeting(
+                latest_parsed.greeting.text,
+                latest_parsed.greeting.provenance,
+            )
+        elif isinstance(latest_parsed, CoverLetterStructuredContent):
+            preserved_contact_name = _extract_contact_name_from_greeting(
+                latest_parsed.greeting.text,
+                latest_parsed.greeting.provenance,
+            )
+        elif isinstance(latest_parsed, FreelanceProposalStructuredContent):
+            for field in latest_parsed.pending_fields:
+                if (
+                    field.field_id in _FREELANCE_FIELD_NAMES
+                    and field.status == "provided"
+                    and field.user_value
+                    and field.user_value.strip()
+                ):
+                    preserved_freelance[field.field_id] = field.user_value
+        elif isinstance(latest_parsed, ApplicationAnswersStructuredContent):
+            preserved_questions = [item.question for item in latest_parsed.items]
+            preserved_answers = [
+                ApplicationAnswerUserInput(
+                    question=item.question,
+                    user_answer=item.answer_text if item.status == "user_answered" else None,
+                )
+                for item in latest_parsed.items
+            ]
+
+    if explicit_options is None:
+        freelance_payload = (
+            FreelanceInputsPayload.model_validate(preserved_freelance)
+            if preserved_freelance
+            else FreelanceInputsPayload()
+        )
+        return WritingGenerationOptions.model_validate(
+            {
+                "channel": preserved_channel,
+                "contact_name": preserved_contact_name,
+                "contact_context": preserved_contact_context,
+                "freelance_inputs": freelance_payload.model_dump(),
+                "questions": preserved_questions,
+                "initial_answers": [ans.model_dump() for ans in preserved_answers],
+            }
+        )
+
+    # Quando writing_options for fornecido, respeita novos valores explicitos sem
+    # sobrescrever campos previamente preenchidos com defaults vazios.
+    merged_channel = (
+        explicit_options.channel
+        if "channel" in explicit_options.model_fields_set
+        else preserved_channel
+    )
+    merged_contact_name = (
+        explicit_options.contact_name
+        if explicit_options.contact_name
+        else preserved_contact_name
+    )
+    merged_contact_context = (
+        explicit_options.contact_context
+        if explicit_options.contact_context
+        else preserved_contact_context
+    )
+
+    merged_freelance_dict: dict[str, str | None] = dict(preserved_freelance)
+    explicit_fl = explicit_options.freelance_inputs
+    for field_name in _FREELANCE_FIELD_NAMES:
+        val = getattr(explicit_fl, field_name, None)
+        if val:
+            merged_freelance_dict[field_name] = val
+    merged_freelance = FreelanceInputsPayload.model_validate(merged_freelance_dict)
+
+    if explicit_options.questions:
+        merged_questions = explicit_options.questions
+        merged_answers = explicit_options.initial_answers
+    else:
+        merged_questions = preserved_questions
+        merged_answers = (
+            explicit_options.initial_answers
+            if explicit_options.initial_answers
+            else preserved_answers
+        )
+
+    return WritingGenerationOptions.model_validate(
+        {
+            "channel": merged_channel,
+            "contact_name": merged_contact_name,
+            "contact_context": merged_contact_context,
+            "freelance_inputs": merged_freelance.model_dump(),
+            "questions": merged_questions,
+            "initial_answers": [ans.model_dump() for ans in merged_answers],
+        }
+    )
 
 
 def regenerate_material_version(
@@ -876,6 +1025,10 @@ def regenerate_material_version(
         writing_options=effective_writing_opts,
         user_instructions=payload.user_instructions,
     )
+    if effective_writing_opts.contact_context:
+        snapshot["writing_context"] = {
+            "contact_context": effective_writing_opts.contact_context,
+        }
 
     def _build_kwargs(mat: ApplicationMaterial, _next_num: int) -> dict[str, Any]:
         latest = max(mat.versions, key=lambda v: v.version_number, default=None)
