@@ -30,15 +30,28 @@ import {
 } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import {
+  ApplicationAnswersEditor,
+  CoverLetterEditor,
+  FreelanceProposalEditor,
+  RecruiterMessageEditor,
+} from "@/components/materials/MaterialTypeEditors";
 import type {
+  AnyMaterialStructuredContent,
+  ApplicationAnswersStructuredContent,
   ContactInclusionOptions,
+  CoverLetterStructuredContent,
+  FreelanceProposalStructuredContent,
   MaterialBlockProvenance,
   MaterialDetailResponse,
   MaterialExportFormat,
   MaterialPreAnalysisResponse,
   MaterialTargetLanguage,
+  MaterialTypeValue,
   MaterialVersionItem,
   ProfileConfirmBatchPayload,
+  RecruiterChannel,
+  RecruiterMessageStructuredContent,
   ResumeExperienceItem,
   ResumeManualNoteItem,
   ResumeProjectItem,
@@ -91,6 +104,58 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   language: "Idioma",
 };
 
+const MATERIAL_TYPE_OPTIONS: Array<{
+  value: MaterialTypeValue;
+  label: string;
+  shortLabel: string;
+  ctaLabel: string;
+  description: string;
+}> = [
+  {
+    value: "resume",
+    label: "Currículo Direcionado",
+    shortLabel: "Currículo",
+    ctaLabel: "Gerar Currículo Direcionado",
+    description: "Seções estruturadas com fatos confirmados.",
+  },
+  {
+    value: "cover_letter",
+    label: "Carta de Apresentação",
+    shortLabel: "Carta",
+    ctaLabel: "Gerar Carta de Apresentação",
+    description: "Apresentação objetiva conectando trajetória e requisitos.",
+  },
+  {
+    value: "recruiter_message",
+    label: "Mensagem para Recrutador",
+    shortLabel: "Mensagem",
+    ctaLabel: "Gerar Mensagem para Recrutador",
+    description: "Texto curto e direto para LinkedIn, e-mail ou formulário.",
+  },
+  {
+    value: "freelance_proposal",
+    label: "Proposta Freelance",
+    shortLabel: "Proposta",
+    ctaLabel: "Gerar Proposta Freelance",
+    description: "Escopo técnico e evidências sem presumir preço ou prazo.",
+  },
+  {
+    value: "application_answers",
+    label: "Respostas de Candidatura",
+    shortLabel: "Respostas",
+    ctaLabel: "Gerar Respostas de Candidatura",
+    description: "Responde perguntas da vaga com rastreabilidade ou solicita sua entrada.",
+  },
+];
+
+const MATERIAL_TYPE_SHORT_LABELS: Record<string, string> = {
+  resume: "Currículo",
+  cover_letter: "Carta de Apresentação",
+  recruiter_message: "Mensagem",
+  freelance_proposal: "Proposta Freelance",
+  application_answers: "Respostas",
+};
+
 function formatDateTimePtBr(iso: string | null | undefined): string {
   if (!iso) return "—";
   const parsed = new Date(iso);
@@ -112,6 +177,8 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   onMaterialChanged,
   onNavigateProfile,
 }) => {
+  const [selectedMaterialType, setSelectedMaterialType] =
+    useState<MaterialTypeValue>("resume");
   const [targetLanguage, setTargetLanguage] =
     useState<MaterialTargetLanguage>("pt-BR");
   const [contactOptions, setContactOptions] = useState<ContactInclusionOptions>(
@@ -119,6 +186,17 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   );
   const [customTitle, setCustomTitle] = useState("");
   const [userInstructions, setUserInstructions] = useState("");
+
+  // Opções contextuais (Subfase 04.2)
+  const [recruiterChannel, setRecruiterChannel] =
+    useState<RecruiterChannel>("linkedin");
+  const [contactName, setContactName] = useState("");
+  const [contactContext, setContactContext] = useState("");
+  const [freelanceAvailability, setFreelanceAvailability] = useState("");
+  const [freelanceDelivery, setFreelanceDelivery] = useState("");
+  const [freelanceBudget, setFreelanceBudget] = useState("");
+  const [freelanceScopeNotes, setFreelanceScopeNotes] = useState("");
+  const [questionDrafts, setQuestionDrafts] = useState<string[]>([""]);
 
   const [preAnalysis, setPreAnalysis] =
     useState<MaterialPreAnalysisResponse | null>(null);
@@ -129,7 +207,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   const [material, setMaterial] = useState<MaterialDetailResponse | null>(null);
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
   const [draftContent, setDraftContent] =
-    useState<ResumeStructuredContent | null>(null);
+    useState<AnyMaterialStructuredContent | null>(null);
   const [panelTab, setPanelTab] = useState<WorkspacePanelTab>("editor");
 
   const [busyAction, setBusyAction] = useState(false);
@@ -138,14 +216,51 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   const [copiedFormat, setCopiedFormat] =
     useState<MaterialExportFormat | null>(null);
 
+  const buildWritingOptionsPayload = useCallback(() => {
+    const cleanedQuestions = questionDrafts
+      .map((q) => q.trim())
+      .filter((q) => q.length >= 3);
+    return {
+      channel: recruiterChannel,
+      contact_name: contactName.trim() || null,
+      contact_context: contactContext.trim() || null,
+      freelance_inputs: {
+        availability: freelanceAvailability.trim() || null,
+        estimated_delivery: freelanceDelivery.trim() || null,
+        budget_or_price: freelanceBudget.trim() || null,
+        scope_clarifications: freelanceScopeNotes.trim() || null,
+      },
+      questions: cleanedQuestions,
+    };
+  }, [
+    contactContext,
+    contactName,
+    freelanceAvailability,
+    freelanceBudget,
+    freelanceDelivery,
+    freelanceScopeNotes,
+    questionDrafts,
+    recruiterChannel,
+  ]);
+
   const loadPreAnalysis = useCallback(
-    async (lang: MaterialTargetLanguage, opts: ContactInclusionOptions) => {
+    async (
+      lang: MaterialTargetLanguage,
+      opts: ContactInclusionOptions,
+      matType: MaterialTypeValue = selectedMaterialType
+    ) => {
       setPreLoading(true);
       setErrorMsg(null);
       try {
         const res = await api.materials.preAnalyze({
           opportunity_id: opportunityId || null,
           application_id: applicationId || null,
+          ...(matType !== "resume"
+            ? {
+                material_type: matType,
+                writing_options: buildWritingOptionsPayload(),
+              }
+            : {}),
           target_language: lang,
           contact_options: opts,
         });
@@ -160,7 +275,12 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
         setPreLoading(false);
       }
     },
-    [applicationId, opportunityId]
+    [
+      applicationId,
+      buildWritingOptionsPayload,
+      opportunityId,
+      selectedMaterialType,
+    ]
   );
 
   const loadExistingMaterial = useCallback(async (matId: string) => {
@@ -201,15 +321,23 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       setDraftContent(null);
       setCustomTitle("");
       setUserInstructions("");
-      void loadPreAnalysis(targetLanguage, contactOptions);
+      setContactName("");
+      setContactContext("");
+      setFreelanceAvailability("");
+      setFreelanceDelivery("");
+      setFreelanceBudget("");
+      setFreelanceScopeNotes("");
+      setQuestionDrafts([""]);
+      void loadPreAnalysis(targetLanguage, contactOptions, selectedMaterialType);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     open,
     initialMaterialId,
     loadExistingMaterial,
-    loadPreAnalysis,
     targetLanguage,
     contactOptions,
+    selectedMaterialType,
   ]);
 
   const activeVersion: MaterialVersionItem | null = useMemo(() => {
@@ -288,7 +416,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       setSuccessMsg(
         `${result.total_confirmed} item(ns) confirmado(s) no seu Perfil. Pré-análise atualizada.`
       );
-      await loadPreAnalysis(targetLanguage, contactOptions);
+      await loadPreAnalysis(targetLanguage, contactOptions, selectedMaterialType);
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -308,6 +436,12 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       const created = await api.materials.create({
         opportunity_id: opportunityId || null,
         application_id: applicationId || null,
+        ...(selectedMaterialType !== "resume"
+          ? {
+              material_type: selectedMaterialType,
+              writing_options: buildWritingOptionsPayload(),
+            }
+          : {}),
         title: customTitle.trim() ? customTitle.trim() : null,
         target_language: targetLanguage,
         contact_options: contactOptions,
@@ -321,14 +455,16 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       setDraftContent(latest?.structured_content || null);
       setPanelTab("editor");
       setSuccessMsg(
-        "Currículo determinístico gerado exclusivamente com fatos confirmados."
+        selectedMaterialType === "resume"
+          ? "Currículo determinístico gerado exclusivamente com fatos confirmados."
+          : `${MATERIAL_TYPE_SHORT_LABELS[selectedMaterialType] || "Material"} gerado(a) exclusivamente com fatos confirmados.`
       );
       onMaterialChanged?.();
     } catch (err) {
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "Não foi possível gerar o currículo."
+          : "Não foi possível gerar o material."
       );
     } finally {
       setBusyAction(false);
@@ -523,7 +659,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
     idx: number,
     patch: Partial<ResumeExperienceItem>
   ) => {
-    if (!draftContent) return;
+    if (!draftContent || "material_type" in draftContent) return;
     const next = [...draftContent.experiences];
     next[idx] = { ...next[idx], ...patch, provenance: "manual_edit" };
     setDraftContent({ ...draftContent, experiences: next });
@@ -533,14 +669,14 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
     idx: number,
     patch: Partial<ResumeProjectItem>
   ) => {
-    if (!draftContent) return;
+    if (!draftContent || "material_type" in draftContent) return;
     const next = [...draftContent.projects];
     next[idx] = { ...next[idx], ...patch, provenance: "manual_edit" };
     setDraftContent({ ...draftContent, projects: next });
   };
 
   const addManualNote = () => {
-    if (!draftContent) return;
+    if (!draftContent || "material_type" in draftContent) return;
     const newNote: ResumeManualNoteItem = {
       id: `note-${Date.now()}`,
       title: "Observação adicional",
@@ -554,12 +690,26 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
     });
   };
 
+  const resumeDraft =
+    draftContent && !("material_type" in draftContent)
+      ? (draftContent as ResumeStructuredContent)
+      : null;
+
+  const selectedTypeMeta =
+    MATERIAL_TYPE_OPTIONS.find((opt) => opt.value === selectedMaterialType) ||
+    MATERIAL_TYPE_OPTIONS[0];
+  const validQuestionsCount = questionDrafts.filter(
+    (q) => q.trim().length >= 3
+  ).length;
+  const missingRequiredQuestions =
+    selectedMaterialType === "application_answers" && validQuestionsCount === 0;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-2 backdrop-blur-sm sm:p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Estúdio de Currículo Direcionado"
+      aria-label="Estúdio de Materiais e Candidaturas"
     >
       <div className="relative flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
         {/* Cabeçalho */}
@@ -568,10 +718,15 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <FileText className="h-5 w-5 text-primary" />
               <h2 className="text-base font-bold text-foreground sm:text-lg">
-                {material ? material.title : "Currículo Direcionado Determinístico"}
+                {material ? material.title : "Estúdio de Materiais para Candidatura"}
               </h2>
+              <Badge variant="outline" className="text-[11px]">
+                {MATERIAL_TYPE_SHORT_LABELS[
+                  material?.material_type || selectedMaterialType
+                ] || "Material"}
+              </Badge>
               <Badge variant="secondary" className="text-[11px]">
-                Fase 04.1 · Sem IA
+                Fase 04.2 · Sem IA
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -590,7 +745,11 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 onClick={() => {
                   setMaterial(null);
                   setActiveVersionId(null);
-                  void loadPreAnalysis(targetLanguage, contactOptions);
+                  void loadPreAnalysis(
+                    targetLanguage,
+                    contactOptions,
+                    selectedMaterialType
+                  );
                 }}
               >
                 Nova geração
@@ -626,21 +785,71 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
           {/* MODO 1: PRÉ-ANÁLISE E GERAÇÃO */}
           {!material && (
             <div className="space-y-4">
-              {/* Configurações */}
+              {/* Seletor de Tipo de Material (Subfase 04.2) */}
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm">
-                    Configuração do Currículo
+                    Tipo de Material e Configurações
                   </CardTitle>
                   <CardDescription className="text-xs">
-                    Escolha o idioma de geração e quais informações de contato
-                    confirmadas entram no cabeçalho.
+                    Escolha o formato desejado, o idioma de saída e os dados
+                    contextuais. Fatos não confirmados nunca são inventados.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label>Tipo de material</Label>
+                    <div
+                      role="radiogroup"
+                      aria-label="Selecionar tipo de material"
+                      className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"
+                    >
+                      {MATERIAL_TYPE_OPTIONS.map((opt) => {
+                        const isSelected = selectedMaterialType === opt.value;
+                        const compatibleList =
+                          preAnalysis?.compatible_material_types || [
+                            "resume",
+                            "cover_letter",
+                            "recruiter_message",
+                            "application_answers",
+                          ];
+                        const isRecommended = compatibleList.includes(opt.value);
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            onClick={() => setSelectedMaterialType(opt.value)}
+                            className={`flex flex-col items-start gap-1 rounded-xl border p-3 text-left text-xs transition-colors ${
+                              isSelected
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border bg-background text-muted-foreground hover:text-foreground"
+                            }`}
+                          >
+                            <div className="flex w-full flex-wrap items-center justify-between gap-1">
+                              <span className="font-semibold text-foreground">
+                                {opt.label}
+                              </span>
+                              <Badge
+                                variant={isRecommended ? "secondary" : "outline"}
+                                className="text-[10px]"
+                              >
+                                {isRecommended ? "Recomendado" : "Sob solicitação"}
+                              </Badge>
+                            </div>
+                            <span className="text-[11px] leading-snug">
+                              {opt.description}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div className="space-y-1.5">
-                      <Label htmlFor="mat-lang">Idioma do currículo</Label>
+                      <Label htmlFor="mat-lang">Idioma do material</Label>
                       <div className="flex gap-2">
                         {(["pt-BR", "en"] as MaterialTargetLanguage[]).map(
                           (langOption) => (
@@ -746,6 +955,181 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                       placeholder="Ex: Priorizar projetos em FastAPI e formação em andamento"
                     />
                   </div>
+
+                  {/* Opções contextuais por tipo de material (Subfase 04.2) */}
+                  {(selectedMaterialType === "cover_letter" ||
+                    selectedMaterialType === "recruiter_message") && (
+                    <div className="space-y-3 rounded-xl border border-border bg-muted/20 p-3">
+                      <div className="text-xs font-semibold text-foreground">
+                        Detalhes opcionais de contato (não inventados caso fiquem vazios)
+                      </div>
+                      {selectedMaterialType === "recruiter_message" && (
+                        <div className="space-y-1.5">
+                          <Label>Canal da mensagem</Label>
+                          <div className="flex flex-wrap gap-2">
+                            {(
+                              [
+                                { value: "linkedin", label: "LinkedIn" },
+                                { value: "email", label: "E-mail" },
+                                { value: "contact_form", label: "Formulário" },
+                              ] as Array<{ value: RecruiterChannel; label: string }>
+                            ).map((ch) => (
+                              <Button
+                                key={ch.value}
+                                type="button"
+                                size="sm"
+                                variant={
+                                  recruiterChannel === ch.value
+                                    ? "default"
+                                    : "outline"
+                                }
+                                onClick={() => setRecruiterChannel(ch.value)}
+                              >
+                                {ch.label}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className="space-y-1">
+                          <Label htmlFor="mat-contact-name">
+                            Nome do contato / recrutador (opcional)
+                          </Label>
+                          <Input
+                            id="mat-contact-name"
+                            value={contactName}
+                            onChange={(e) => setContactName(e.target.value)}
+                            placeholder="Deixe vazio para saudação neutra"
+                          />
+                        </div>
+                        {selectedMaterialType === "recruiter_message" && (
+                          <div className="space-y-1">
+                            <Label htmlFor="mat-contact-ctx">
+                              Contexto do contato (opcional)
+                            </Label>
+                            <Input
+                              id="mat-contact-ctx"
+                              value={contactContext}
+                              onChange={(e) => setContactContext(e.target.value)}
+                              placeholder="Ex: Candidatei-me via plataforma X ontem"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedMaterialType === "freelance_proposal" && (
+                    <div className="space-y-3 rounded-xl border border-border bg-muted/20 p-3">
+                      <div className="text-xs font-semibold text-foreground">
+                        Condições reais de execução (deixe em branco se quiser preencher depois antes de aprovar)
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className="space-y-1">
+                          <Label htmlFor="mat-fl-avail">Disponibilidade</Label>
+                          <Input
+                            id="mat-fl-avail"
+                            value={freelanceAvailability}
+                            onChange={(e) =>
+                              setFreelanceAvailability(e.target.value)
+                            }
+                            placeholder="Ex: 20h semanais a partir de segunda"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="mat-fl-deliv">Prazo estimado</Label>
+                          <Input
+                            id="mat-fl-deliv"
+                            value={freelanceDelivery}
+                            onChange={(e) =>
+                              setFreelanceDelivery(e.target.value)
+                            }
+                            placeholder="Ex: 15 dias corridos"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="mat-fl-budget">Valor / Orçamento</Label>
+                          <Input
+                            id="mat-fl-budget"
+                            value={freelanceBudget}
+                            onChange={(e) => setFreelanceBudget(e.target.value)}
+                            placeholder="Ex: R$ 2.500 fechado ou R$ 80/h"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="mat-fl-scope">
+                            Esclarecimentos de escopo (opcional)
+                          </Label>
+                          <Input
+                            id="mat-fl-scope"
+                            value={freelanceScopeNotes}
+                            onChange={(e) =>
+                              setFreelanceScopeNotes(e.target.value)
+                            }
+                            placeholder="Ex: Confirmação do endpoint de webhook"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedMaterialType === "application_answers" && (
+                    <div className="space-y-3 rounded-xl border border-border bg-muted/20 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-semibold text-foreground">
+                            Perguntas do formulário da candidatura ({validQuestionsCount} válida(s))
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            Perguntas sem evidência confirmada no Perfil ou de cunho pessoal solicitarão sua resposta antes da aprovação.
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            setQuestionDrafts((prev) => [...prev, ""])
+                          }
+                        >
+                          <Plus className="mr-1.5 h-3.5 w-3.5" />
+                          Adicionar pergunta
+                        </Button>
+                      </div>
+                      <div className="space-y-2">
+                        {questionDrafts.map((qVal, idx) => (
+                          <div key={idx} className="flex items-center gap-2">
+                            <Input
+                              aria-label={`Pergunta ${idx + 1}`}
+                              value={qVal}
+                              onChange={(e) => {
+                                const next = [...questionDrafts];
+                                next[idx] = e.target.value;
+                                setQuestionDrafts(next);
+                              }}
+                              placeholder="Ex: Você já trabalhou com APIs REST? / Qual sua pretensão salarial?"
+                            />
+                            {questionDrafts.length > 1 && (
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                aria-label={`Remover pergunta ${idx + 1}`}
+                                onClick={() =>
+                                  setQuestionDrafts((prev) =>
+                                    prev.filter((_, i) => i !== idx)
+                                  )
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -952,13 +1336,15 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     </Button>
                     <Button
                       type="button"
-                      disabled={!preAnalysis.can_generate || busyAction}
+                      disabled={
+                        !preAnalysis.can_generate ||
+                        busyAction ||
+                        missingRequiredQuestions
+                      }
                       onClick={handleGenerateMaterial}
                     >
                       <Sparkles className="mr-1.5 h-4 w-4" />
-                      {busyAction
-                        ? "Gerando..."
-                        : "Gerar Currículo Direcionado"}
+                      {busyAction ? "Gerando..." : selectedTypeMeta.ctaLabel}
                     </Button>
                   </div>
                 </>
@@ -1022,7 +1408,10 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     <Button
                       type="button"
                       size="sm"
-                      disabled={busyAction}
+                      disabled={
+                        busyAction ||
+                        Boolean(activeVersion.has_blocking_pending_fields)
+                      }
                       onClick={handleApproveVersion}
                     >
                       <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
@@ -1062,6 +1451,23 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 </div>
               </div>
 
+              {/* Aviso de pendências obrigatórias antes de aprovar (Subfase 04.2) */}
+              {activeVersion.has_blocking_pending_fields &&
+                !activeVersion.is_approved && (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      Há{" "}
+                      <strong>
+                        {activeVersion.pending_requirements_count || 1}
+                      </strong>{" "}
+                      informação(ões) obrigatória(s) pendente(s). Preencha-as no
+                      editor e clique em <strong>Salvar rascunho</strong> para
+                      liberar a aprovação.
+                    </span>
+                  </div>
+                )}
+
               {/* Aviso de edição manual ou imutabilidade */}
               {draftContent.has_unverified_manual_edits &&
                 !activeVersion.is_approved && (
@@ -1070,7 +1476,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     <span>
                       Este rascunho contém alterações manuais ainda não confirmadas
                       no Perfil. Ao aprovar, você confirma que o conteúdo deste
-                      currículo é exato.
+                      material é exato.
                     </span>
                   </div>
                 )}
@@ -1114,439 +1520,481 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
               {/* TAB EDITOR */}
               {panelTab === "editor" && (
                 <div className="space-y-4">
-                  {/* Cabeçalho */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <CardTitle className="text-sm">Cabeçalho</CardTitle>
-                        <Badge
-                          variant={
-                            PROVENANCE_META[draftContent.header.provenance].variant
-                          }
-                          className="text-[10px]"
-                        >
-                          {PROVENANCE_META[draftContent.header.provenance].label}
-                        </Badge>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div className="space-y-1">
-                        <Label htmlFor="ed-fullname">Nome completo</Label>
-                        <Input
-                          id="ed-fullname"
-                          disabled={!activeVersion.is_mutable}
-                          value={draftContent.header.full_name || ""}
-                          onChange={(e) =>
-                            setDraftContent({
-                              ...draftContent,
-                              header: {
-                                ...draftContent.header,
-                                full_name: e.target.value || null,
-                                provenance: "manual_edit",
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label htmlFor="ed-title">Título profissional</Label>
-                        <Input
-                          id="ed-title"
-                          disabled={!activeVersion.is_mutable}
-                          value={draftContent.header.professional_title || ""}
-                          onChange={(e) =>
-                            setDraftContent({
-                              ...draftContent,
-                              header: {
-                                ...draftContent.header,
-                                professional_title: e.target.value || null,
-                                provenance: "manual_edit",
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label htmlFor="ed-loc">Localização</Label>
-                        <Input
-                          id="ed-loc"
-                          disabled={!activeVersion.is_mutable}
-                          value={draftContent.header.location_text || ""}
-                          onChange={(e) =>
-                            setDraftContent({
-                              ...draftContent,
-                              header: {
-                                ...draftContent.header,
-                                location_text: e.target.value || null,
-                                provenance: "manual_edit",
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label htmlFor="ed-email">E-mail de contato</Label>
-                        <Input
-                          id="ed-email"
-                          disabled={!activeVersion.is_mutable}
-                          value={draftContent.header.email || ""}
-                          onChange={(e) =>
-                            setDraftContent({
-                              ...draftContent,
-                              header: {
-                                ...draftContent.header,
-                                email: e.target.value || null,
-                                provenance: "manual_edit",
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                    </CardContent>
-                  </Card>
+                  {"material_type" in draftContent &&
+                    draftContent.material_type === "cover_letter" && (
+                      <CoverLetterEditor
+                        content={draftContent as CoverLetterStructuredContent}
+                        isMutable={activeVersion.is_mutable}
+                        onChange={(next) => setDraftContent(next)}
+                      />
+                    )}
 
-                  {/* Resumo */}
-                  {draftContent.summary && (
-                    <Card>
-                      <CardHeader className="pb-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <CardTitle className="text-sm">
-                            Resumo Profissional
-                          </CardTitle>
-                          <Badge
-                            variant={
-                              PROVENANCE_META[draftContent.summary.provenance]
-                                .variant
-                            }
-                            className="text-[10px]"
-                          >
-                            {
-                              PROVENANCE_META[draftContent.summary.provenance]
-                                .label
-                            }
-                          </Badge>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <textarea
-                          rows={3}
-                          disabled={!activeVersion.is_mutable}
-                          value={draftContent.summary.text}
-                          onChange={(e) =>
-                            setDraftContent({
-                              ...draftContent,
-                              summary: draftContent.summary
-                                ? {
-                                    ...draftContent.summary,
-                                    text: e.target.value,
-                                    provenance: "manual_edit",
-                                  }
-                                : null,
-                            })
-                          }
-                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground"
-                        />
-                      </CardContent>
-                    </Card>
-                  )}
+                  {"material_type" in draftContent &&
+                    draftContent.material_type === "recruiter_message" && (
+                      <RecruiterMessageEditor
+                        content={draftContent as RecruiterMessageStructuredContent}
+                        isMutable={activeVersion.is_mutable}
+                        onChange={(next) => setDraftContent(next)}
+                      />
+                    )}
 
-                  {/* Experiências (estritamente separadas de projetos) */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">
-                        Experiência Profissional ({draftContent.experiences.length})
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {draftContent.experiences.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          Nenhuma experiência profissional confirmada incluída.
-                        </p>
-                      ) : (
-                        draftContent.experiences.map((exp, idx) => (
-                          <div
-                            key={`${exp.entity_id || "manual"}-${idx}`}
-                            className="space-y-2 rounded-lg border border-border p-3"
-                          >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <Badge variant="secondary" className="text-[10px]">
-                                  {exp.experience_type}
-                                </Badge>
-                                <Badge
-                                  variant={
-                                    exp.eligible_as_target_role
-                                      ? "default"
-                                      : "outline"
-                                  }
-                                  className="text-[10px]"
-                                >
-                                  {exp.eligible_as_target_role
-                                    ? "Elegível como atuação-alvo"
-                                    : "Experiência complementar"}
-                                </Badge>
-                              </div>
-                              <Badge
-                                variant={
-                                  PROVENANCE_META[exp.provenance].variant
-                                }
-                                className="text-[10px]"
-                              >
-                                {PROVENANCE_META[exp.provenance].label}
-                              </Badge>
-                            </div>
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                              <Input
-                                aria-label={`Cargo da experiência ${idx + 1}`}
-                                disabled={!activeVersion.is_mutable}
-                                value={exp.role}
-                                onChange={(e) =>
-                                  updateExperienceItem(idx, {
-                                    role: e.target.value,
-                                  })
-                                }
-                              />
-                              <Input
-                                aria-label={`Empresa da experiência ${idx + 1}`}
-                                disabled={!activeVersion.is_mutable}
-                                value={exp.company}
-                                onChange={(e) =>
-                                  updateExperienceItem(idx, {
-                                    company: e.target.value,
-                                  })
-                                }
-                              />
-                            </div>
-                            <textarea
-                              rows={2}
-                              aria-label={`Descrição da experiência ${idx + 1}`}
-                              disabled={!activeVersion.is_mutable}
-                              value={exp.description || ""}
-                              onChange={(e) =>
-                                updateExperienceItem(idx, {
-                                  description: e.target.value || null,
-                                })
-                              }
-                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
-                            />
-                          </div>
-                        ))
-                      )}
-                    </CardContent>
-                  </Card>
+                  {"material_type" in draftContent &&
+                    draftContent.material_type === "freelance_proposal" && (
+                      <FreelanceProposalEditor
+                        content={draftContent as FreelanceProposalStructuredContent}
+                        isMutable={activeVersion.is_mutable}
+                        onChange={(next) => setDraftContent(next)}
+                      />
+                    )}
 
-                  {/* Projetos (seção própria, jamais fundida em experiências) */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">
-                        Projetos ({draftContent.projects.length})
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {draftContent.projects.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          Nenhum projeto confirmado incluído.
-                        </p>
-                      ) : (
-                        draftContent.projects.map((proj, idx) => (
-                          <div
-                            key={`${proj.entity_id || "manual-proj"}-${idx}`}
-                            className="space-y-2 rounded-lg border border-border p-3"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs font-semibold">
-                                {proj.name}
-                              </span>
-                              <Badge
-                                variant={
-                                  PROVENANCE_META[proj.provenance].variant
-                                }
-                                className="text-[10px]"
-                              >
-                                {PROVENANCE_META[proj.provenance].label}
-                              </Badge>
-                            </div>
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                              <Input
-                                aria-label={`Nome do projeto ${idx + 1}`}
-                                disabled={!activeVersion.is_mutable}
-                                value={proj.name}
-                                onChange={(e) =>
-                                  updateProjectItem(idx, {
-                                    name: e.target.value,
-                                  })
-                                }
-                              />
-                              <Input
-                                aria-label={`Papel no projeto ${idx + 1}`}
-                                disabled={!activeVersion.is_mutable}
-                                value={proj.role || ""}
-                                placeholder="Papel / atuação"
-                                onChange={(e) =>
-                                  updateProjectItem(idx, {
-                                    role: e.target.value || null,
-                                  })
-                                }
-                              />
-                            </div>
-                            <textarea
-                              rows={2}
-                              aria-label={`Descrição do projeto ${idx + 1}`}
-                              disabled={!activeVersion.is_mutable}
-                              value={proj.description || ""}
-                              onChange={(e) =>
-                                updateProjectItem(idx, {
-                                  description: e.target.value || null,
-                                })
-                              }
-                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
-                            />
-                          </div>
-                        ))
-                      )}
-                    </CardContent>
-                  </Card>
+                  {"material_type" in draftContent &&
+                    draftContent.material_type === "application_answers" && (
+                      <ApplicationAnswersEditor
+                        content={
+                          draftContent as ApplicationAnswersStructuredContent
+                        }
+                        isMutable={activeVersion.is_mutable}
+                        onChange={(next) => setDraftContent(next)}
+                      />
+                    )}
 
-                  {/* Formação, Habilidades e Idiomas (preservação explícita) */}
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                    <Card>
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-xs font-semibold">
-                          Formação Acadêmica ({draftContent.education.length})
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-1.5 text-xs">
-                        {draftContent.education.map((edu, idx) => (
-                          <div
-                            key={`${edu.entity_id || idx}`}
-                            className="rounded border border-border p-2"
-                          >
-                            <div className="font-semibold">{edu.course}</div>
-                            <div className="text-muted-foreground">
-                              {edu.institution} · {edu.status_label}
-                              {edu.current_semester
-                                ? ` (${edu.current_semester})`
-                                : ""}
-                            </div>
-                          </div>
-                        ))}
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-xs font-semibold">
-                          Habilidades ({draftContent.skills.length})
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="flex flex-wrap gap-1.5 text-xs">
-                        {draftContent.skills.map((skill, idx) => (
-                          <Badge key={`${skill.entity_id || idx}`} variant="secondary">
-                            {skill.name} · {skill.proficiency_label}
-                          </Badge>
-                        ))}
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-xs font-semibold">
-                          Idiomas ({draftContent.languages.length})
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-1.5 text-xs">
-                        {draftContent.languages.map((lang, idx) => (
-                          <div key={`${lang.entity_id || idx}`}>
-                            <strong>{lang.language_name}:</strong>{" "}
-                            {lang.proficiency_label}
-                            {lang.cefr_level ? ` (${lang.cefr_level})` : ""}
-                          </div>
-                        ))}
-                      </CardContent>
-                    </Card>
-                  </div>
-
-                  {/* Blocos manuais adicionais */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <CardTitle className="text-sm">
-                          Notas Adicionais do Usuário (
-                          {draftContent.manual_notes.length})
-                        </CardTitle>
-                        {activeVersion.is_mutable && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={addManualNote}
-                          >
-                            <Plus className="mr-1.5 h-3.5 w-3.5" />
-                            Adicionar nota manual
-                          </Button>
-                        )}
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {draftContent.manual_notes.map((note, idx) => (
-                        <div
-                          key={note.id}
-                          className="space-y-2 rounded-lg border border-border p-3"
-                        >
+                  {resumeDraft && (
+                    <>
+                      {/* Cabeçalho */}
+                      <Card>
+                        <CardHeader className="pb-2">
                           <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-sm">Cabeçalho</CardTitle>
+                            <Badge
+                              variant={
+                                PROVENANCE_META[resumeDraft.header.provenance].variant
+                              }
+                              className="text-[10px]"
+                            >
+                              {PROVENANCE_META[resumeDraft.header.provenance].label}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <div className="space-y-1">
+                            <Label htmlFor="ed-fullname">Nome completo</Label>
                             <Input
+                              id="ed-fullname"
                               disabled={!activeVersion.is_mutable}
-                              value={note.title}
-                              onChange={(e) => {
-                                const next = [...draftContent.manual_notes];
-                                next[idx] = { ...next[idx], title: e.target.value };
+                              value={resumeDraft.header.full_name || ""}
+                              onChange={(e) =>
                                 setDraftContent({
-                                  ...draftContent,
-                                  manual_notes: next,
-                                });
-                              }}
+                                  ...resumeDraft,
+                                  header: {
+                                    ...resumeDraft.header,
+                                    full_name: e.target.value || null,
+                                    provenance: "manual_edit",
+                                  },
+                                })
+                              }
                             />
+                          </div>
+                          <div className="space-y-1">
+                            <Label htmlFor="ed-title">Título profissional</Label>
+                            <Input
+                              id="ed-title"
+                              disabled={!activeVersion.is_mutable}
+                              value={resumeDraft.header.professional_title || ""}
+                              onChange={(e) =>
+                                setDraftContent({
+                                  ...resumeDraft,
+                                  header: {
+                                    ...resumeDraft.header,
+                                    professional_title: e.target.value || null,
+                                    provenance: "manual_edit",
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label htmlFor="ed-loc">Localização</Label>
+                            <Input
+                              id="ed-loc"
+                              disabled={!activeVersion.is_mutable}
+                              value={resumeDraft.header.location_text || ""}
+                              onChange={(e) =>
+                                setDraftContent({
+                                  ...resumeDraft,
+                                  header: {
+                                    ...resumeDraft.header,
+                                    location_text: e.target.value || null,
+                                    provenance: "manual_edit",
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label htmlFor="ed-email">E-mail de contato</Label>
+                            <Input
+                              id="ed-email"
+                              disabled={!activeVersion.is_mutable}
+                              value={resumeDraft.header.email || ""}
+                              onChange={(e) =>
+                                setDraftContent({
+                                  ...resumeDraft,
+                                  header: {
+                                    ...resumeDraft.header,
+                                    email: e.target.value || null,
+                                    provenance: "manual_edit",
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      {/* Resumo */}
+                      {resumeDraft.summary && (
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <CardTitle className="text-sm">
+                                Resumo Profissional
+                              </CardTitle>
+                              <Badge
+                                variant={
+                                  PROVENANCE_META[resumeDraft.summary.provenance]
+                                    .variant
+                                }
+                                className="text-[10px]"
+                              >
+                                {
+                                  PROVENANCE_META[resumeDraft.summary.provenance]
+                                    .label
+                                }
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            <textarea
+                              rows={3}
+                              disabled={!activeVersion.is_mutable}
+                              value={resumeDraft.summary.text}
+                              onChange={(e) =>
+                                setDraftContent({
+                                  ...resumeDraft,
+                                  summary: resumeDraft.summary
+                                    ? {
+                                        ...resumeDraft.summary,
+                                        text: e.target.value,
+                                        provenance: "manual_edit",
+                                      }
+                                    : null,
+                                })
+                              }
+                              className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground"
+                            />
+                          </CardContent>
+                        </Card>
+                      )}
+
+                      {/* Experiências (estritamente separadas de projetos) */}
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm">
+                            Experiência Profissional ({resumeDraft.experiences.length})
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          {resumeDraft.experiences.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">
+                              Nenhuma experiência profissional confirmada incluída.
+                            </p>
+                          ) : (
+                            resumeDraft.experiences.map((exp, idx) => (
+                              <div
+                                key={`${exp.entity_id || "manual"}-${idx}`}
+                                className="space-y-2 rounded-lg border border-border p-3"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <Badge variant="secondary" className="text-[10px]">
+                                      {exp.experience_type}
+                                    </Badge>
+                                    <Badge
+                                      variant={
+                                        exp.eligible_as_target_role
+                                          ? "default"
+                                          : "outline"
+                                      }
+                                      className="text-[10px]"
+                                    >
+                                      {exp.eligible_as_target_role
+                                        ? "Elegível como atuação-alvo"
+                                        : "Experiência complementar"}
+                                    </Badge>
+                                  </div>
+                                  <Badge
+                                    variant={
+                                      PROVENANCE_META[exp.provenance].variant
+                                    }
+                                    className="text-[10px]"
+                                  >
+                                    {PROVENANCE_META[exp.provenance].label}
+                                  </Badge>
+                                </div>
+                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                  <Input
+                                    aria-label={`Cargo da experiência ${idx + 1}`}
+                                    disabled={!activeVersion.is_mutable}
+                                    value={exp.role}
+                                    onChange={(e) =>
+                                      updateExperienceItem(idx, {
+                                        role: e.target.value,
+                                      })
+                                    }
+                                  />
+                                  <Input
+                                    aria-label={`Empresa da experiência ${idx + 1}`}
+                                    disabled={!activeVersion.is_mutable}
+                                    value={exp.company}
+                                    onChange={(e) =>
+                                      updateExperienceItem(idx, {
+                                        company: e.target.value,
+                                      })
+                                    }
+                                  />
+                                </div>
+                                <textarea
+                                  rows={2}
+                                  aria-label={`Descrição da experiência ${idx + 1}`}
+                                  disabled={!activeVersion.is_mutable}
+                                  value={exp.description || ""}
+                                  onChange={(e) =>
+                                    updateExperienceItem(idx, {
+                                      description: e.target.value || null,
+                                    })
+                                  }
+                                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
+                                />
+                              </div>
+                            ))
+                          )}
+                        </CardContent>
+                      </Card>
+
+                      {/* Projetos (seção própria, jamais fundida em experiências) */}
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm">
+                            Projetos ({resumeDraft.projects.length})
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          {resumeDraft.projects.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">
+                              Nenhum projeto confirmado incluído.
+                            </p>
+                          ) : (
+                            resumeDraft.projects.map((proj, idx) => (
+                              <div
+                                key={`${proj.entity_id || "manual-proj"}-${idx}`}
+                                className="space-y-2 rounded-lg border border-border p-3"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold">
+                                    {proj.name}
+                                  </span>
+                                  <Badge
+                                    variant={
+                                      PROVENANCE_META[proj.provenance].variant
+                                    }
+                                    className="text-[10px]"
+                                  >
+                                    {PROVENANCE_META[proj.provenance].label}
+                                  </Badge>
+                                </div>
+                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                  <Input
+                                    aria-label={`Nome do projeto ${idx + 1}`}
+                                    disabled={!activeVersion.is_mutable}
+                                    value={proj.name}
+                                    onChange={(e) =>
+                                      updateProjectItem(idx, {
+                                        name: e.target.value,
+                                      })
+                                    }
+                                  />
+                                  <Input
+                                    aria-label={`Papel no projeto ${idx + 1}`}
+                                    disabled={!activeVersion.is_mutable}
+                                    value={proj.role || ""}
+                                    placeholder="Papel / atuação"
+                                    onChange={(e) =>
+                                      updateProjectItem(idx, {
+                                        role: e.target.value || null,
+                                      })
+                                    }
+                                  />
+                                </div>
+                                <textarea
+                                  rows={2}
+                                  aria-label={`Descrição do projeto ${idx + 1}`}
+                                  disabled={!activeVersion.is_mutable}
+                                  value={proj.description || ""}
+                                  onChange={(e) =>
+                                    updateProjectItem(idx, {
+                                      description: e.target.value || null,
+                                    })
+                                  }
+                                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
+                                />
+                              </div>
+                            ))
+                          )}
+                        </CardContent>
+                      </Card>
+
+                      {/* Formação, Habilidades e Idiomas */}
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs font-semibold">
+                              Formação Acadêmica ({resumeDraft.education.length})
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-1.5 text-xs">
+                            {resumeDraft.education.map((edu, idx) => (
+                              <div
+                                key={`${edu.entity_id || idx}`}
+                                className="rounded border border-border p-2"
+                              >
+                                <div className="font-semibold">{edu.course}</div>
+                                <div className="text-muted-foreground">
+                                  {edu.institution} · {edu.status_label}
+                                  {edu.current_semester
+                                    ? ` (${edu.current_semester})`
+                                    : ""}
+                                </div>
+                              </div>
+                            ))}
+                          </CardContent>
+                        </Card>
+
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs font-semibold">
+                              Habilidades ({resumeDraft.skills.length})
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="flex flex-wrap gap-1.5 text-xs">
+                            {resumeDraft.skills.map((skill, idx) => (
+                              <Badge key={`${skill.entity_id || idx}`} variant="secondary">
+                                {skill.name} · {skill.proficiency_label}
+                              </Badge>
+                            ))}
+                          </CardContent>
+                        </Card>
+
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs font-semibold">
+                              Idiomas ({resumeDraft.languages.length})
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-1.5 text-xs">
+                            {resumeDraft.languages.map((lang, idx) => (
+                              <div key={`${lang.entity_id || idx}`}>
+                                <strong>{lang.language_name}:</strong>{" "}
+                                {lang.proficiency_label}
+                                {lang.cefr_level ? ` (${lang.cefr_level})` : ""}
+                              </div>
+                            ))}
+                          </CardContent>
+                        </Card>
+                      </div>
+
+                      {/* Blocos manuais adicionais */}
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-sm">
+                              Notas Adicionais do Usuário (
+                              {resumeDraft.manual_notes.length})
+                            </CardTitle>
                             {activeVersion.is_mutable && (
                               <Button
                                 type="button"
-                                size="icon"
-                                variant="ghost"
-                                onClick={() => {
-                                  const next = draftContent.manual_notes.filter(
-                                    (_, i) => i !== idx
-                                  );
-                                  setDraftContent({
-                                    ...draftContent,
-                                    manual_notes: next,
-                                  });
-                                }}
-                                aria-label="Remover nota"
+                                size="sm"
+                                variant="outline"
+                                onClick={addManualNote}
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
+                                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                                Adicionar nota manual
                               </Button>
                             )}
                           </div>
-                          <textarea
-                            rows={2}
-                            disabled={!activeVersion.is_mutable}
-                            value={note.content}
-                            onChange={(e) => {
-                              const next = [...draftContent.manual_notes];
-                              next[idx] = {
-                                ...next[idx],
-                                content: e.target.value,
-                              };
-                              setDraftContent({
-                                ...draftContent,
-                                manual_notes: next,
-                              });
-                            }}
-                            className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
-                          />
-                        </div>
-                      ))}
-                    </CardContent>
-                  </Card>
+                        </CardHeader>
+                        <CardContent className="space-y-2">
+                          {resumeDraft.manual_notes.map((note, idx) => (
+                            <div
+                              key={note.id}
+                              className="space-y-2 rounded-lg border border-border p-3"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <Input
+                                  disabled={!activeVersion.is_mutable}
+                                  value={note.title}
+                                  onChange={(e) => {
+                                    const next = [...resumeDraft.manual_notes];
+                                    next[idx] = { ...next[idx], title: e.target.value };
+                                    setDraftContent({
+                                      ...resumeDraft,
+                                      manual_notes: next,
+                                    });
+                                  }}
+                                />
+                                {activeVersion.is_mutable && (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    onClick={() => {
+                                      const next = resumeDraft.manual_notes.filter(
+                                        (_, i) => i !== idx
+                                      );
+                                      setDraftContent({
+                                        ...resumeDraft,
+                                        manual_notes: next,
+                                      });
+                                    }}
+                                    aria-label="Remover nota"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </Button>
+                                )}
+                              </div>
+                              <textarea
+                                rows={2}
+                                disabled={!activeVersion.is_mutable}
+                                value={note.content}
+                                onChange={(e) => {
+                                  const next = [...resumeDraft.manual_notes];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    content: e.target.value,
+                                  };
+                                  setDraftContent({
+                                    ...resumeDraft,
+                                    manual_notes: next,
+                                  });
+                                }}
+                                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs"
+                              />
+                            </div>
+                          ))}
+                        </CardContent>
+                      </Card>
+                    </>
+                  )}
 
                   {activeVersion.is_mutable && (
                     <div className="flex justify-end gap-2">
@@ -1616,6 +2064,57 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
               {/* TAB HISTÓRICO & LACUNAS */}
               {panelTab === "history" && (
                 <div className="space-y-4">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <History className="h-4 w-4 text-primary" />
+                        Histórico de Versões ({material.versions.length})
+                      </CardTitle>
+                      <CardDescription className="text-xs">
+                        Tipo:{" "}
+                        {MATERIAL_TYPE_SHORT_LABELS[material.material_type] ||
+                          material.material_type}{" "}
+                        · Contexto:{" "}
+                        {material.opportunity_title || "Perfil geral"}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-xs">
+                      {material.versions.map((ver) => (
+                        <div
+                          key={ver.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-2.5"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-semibold">
+                                v{ver.version_number}
+                              </span>
+                              <Badge variant="outline" className="text-[10px]">
+                                {ORIGIN_LABELS[ver.origin] || ver.origin}
+                              </Badge>
+                              {ver.has_blocking_pending_fields && (
+                                <Badge variant="outline" className="text-[10px]">
+                                  {ver.pending_requirements_count} pendência(s)
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="text-muted-foreground">
+                              Criada em {formatDateTimePtBr(ver.created_at)}
+                              {ver.approved_at
+                                ? ` · Aprovada em ${formatDateTimePtBr(ver.approved_at)}`
+                                : ""}
+                            </div>
+                          </div>
+                          <Badge
+                            variant={ver.is_approved ? "default" : "secondary"}
+                          >
+                            {ver.is_approved ? "Aprovada" : "Rascunho"}
+                          </Badge>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+
                   <Card>
                     <CardHeader className="pb-2">
                       <CardTitle className="flex items-center gap-2 text-sm">

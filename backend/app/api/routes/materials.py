@@ -19,6 +19,7 @@ from app.schemas.material import (
     MaterialRegenerateRequest,
     MaterialResponse,
     MaterialSummaryResponse,
+    MaterialTypeValue,
     MaterialUnlinkRequest,
     MaterialVersionDeriveRequest,
     MaterialVersionUpdateRequest,
@@ -72,6 +73,7 @@ def list_materials_endpoint(
     db: Annotated[Session, Depends(get_db)],
     opportunity_id: uuid.UUID | None = Query(default=None),
     application_id: uuid.UUID | None = Query(default=None),
+    material_type: MaterialTypeValue | None = Query(default=None),
 ) -> list[MaterialSummaryResponse]:
     try:
         return list_materials(
@@ -79,6 +81,7 @@ def list_materials_endpoint(
             current_user,
             opportunity_id=opportunity_id,
             application_id=application_id,
+            material_type=material_type,
         )
     except (MaterialNotFoundError, MaterialImmutableError, MaterialPreconditionError) as exc:
         raise _handle_service_error(exc) from exc

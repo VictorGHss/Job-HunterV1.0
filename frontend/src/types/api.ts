@@ -833,6 +833,13 @@ export type MaterialTargetLanguage = "pt-BR" | "en";
 export type MaterialBlockProvenance = "confirmed_fact" | "manual_edit" | "user_authored";
 export type MaterialExportFormat = "markdown" | "text";
 export type MaterialVersionOrigin = "generated" | "manual_edit" | "regenerated" | "derived";
+export type MaterialTypeValue =
+  | "resume"
+  | "cover_letter"
+  | "recruiter_message"
+  | "freelance_proposal"
+  | "application_answers";
+export type RecruiterChannel = "linkedin" | "email" | "contact_form";
 export type MaterialFactEntityType =
   | "profile"
   | "experience"
@@ -961,6 +968,137 @@ export interface ResumeStructuredContent {
   has_unverified_manual_edits: boolean;
 }
 
+export interface WritingTextBlock {
+  text: string;
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface WritingEvidenceBlock {
+  entity_id: string | null;
+  entity_type: MaterialFactEntityType | null;
+  title: string;
+  summary_text: string;
+  matched_requirements: string[];
+  source_fact_keys: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface PendingUserInputField {
+  field_id: string;
+  label: string;
+  question: string;
+  required: boolean;
+  status: "pending" | "provided";
+  user_value: string | null;
+}
+
+export interface CoverLetterStructuredContent {
+  schema_version: 1;
+  material_type: "cover_letter";
+  language: MaterialTargetLanguage;
+  header: ResumeHeaderSection;
+  recipient_line: WritingTextBlock;
+  greeting: WritingTextBlock;
+  opening: WritingTextBlock;
+  relevance_highlights: WritingEvidenceBlock[];
+  opportunity_alignment: WritingTextBlock | null;
+  closing: WritingTextBlock;
+  manual_notes: ResumeManualNoteItem[];
+  has_unverified_manual_edits: boolean;
+}
+
+export interface RecruiterMessageStructuredContent {
+  schema_version: 1;
+  material_type: "recruiter_message";
+  language: MaterialTargetLanguage;
+  channel: RecruiterChannel;
+  subject: WritingTextBlock | null;
+  greeting: WritingTextBlock;
+  body: WritingTextBlock;
+  sign_off: WritingTextBlock;
+  character_count: number;
+  manual_notes: ResumeManualNoteItem[];
+  has_unverified_manual_edits: boolean;
+}
+
+export interface FreelanceProposalStructuredContent {
+  schema_version: 1;
+  material_type: "freelance_proposal";
+  language: MaterialTargetLanguage;
+  header: ResumeHeaderSection;
+  introduction: WritingTextBlock;
+  project_understanding: WritingTextBlock;
+  relevant_evidence: WritingEvidenceBlock[];
+  suggested_approach: WritingTextBlock;
+  alignment_points: WritingTextBlock;
+  pending_fields: PendingUserInputField[];
+  closing: WritingTextBlock;
+  manual_notes: ResumeManualNoteItem[];
+  has_unverified_manual_edits: boolean;
+}
+
+export type ApplicationQuestionKind =
+  | "technical_experience"
+  | "project_example"
+  | "education"
+  | "language"
+  | "motivation"
+  | "compensation"
+  | "availability"
+  | "general_personal";
+
+export interface ApplicationAnswerItem {
+  question_id: string;
+  question: string;
+  question_kind: ApplicationQuestionKind;
+  answer_text: string | null;
+  requires_user_input: boolean;
+  status: "answered_from_facts" | "needs_user_input" | "user_answered";
+  follow_up_prompt: string | null;
+  source_fact_keys: string[];
+  evidence_notes: string[];
+  provenance: MaterialBlockProvenance;
+}
+
+export interface ApplicationAnswersStructuredContent {
+  schema_version: 1;
+  material_type: "application_answers";
+  language: MaterialTargetLanguage;
+  items: ApplicationAnswerItem[];
+  manual_notes: ResumeManualNoteItem[];
+  has_unverified_manual_edits: boolean;
+}
+
+export type AnyMaterialStructuredContent =
+  | ResumeStructuredContent
+  | CoverLetterStructuredContent
+  | RecruiterMessageStructuredContent
+  | FreelanceProposalStructuredContent
+  | ApplicationAnswersStructuredContent;
+
+export interface FreelanceInputsPayload {
+  availability?: string | null;
+  estimated_delivery?: string | null;
+  budget_or_price?: string | null;
+  scope_clarifications?: string | null;
+  additional_requirements?: string | null;
+}
+
+export interface ApplicationAnswerUserInput {
+  question: string;
+  user_answer?: string | null;
+}
+
+export interface WritingGenerationOptionsPayload {
+  channel?: RecruiterChannel;
+  contact_name?: string | null;
+  contact_context?: string | null;
+  freelance_inputs?: FreelanceInputsPayload;
+  questions?: string[];
+  initial_answers?: ApplicationAnswerUserInput[];
+}
+
 export interface OpportunityContextInfo {
   opportunity_id: string | null;
   application_id: string | null;
@@ -968,6 +1106,8 @@ export interface OpportunityContextInfo {
   company_name: string | null;
   professional_area: string | null;
   seniority_level: string | null;
+  employment_type?: string | null;
+  opportunity_type?: string | null;
   experience_summary: string | null;
   required_technologies: string[];
   desirable_technologies: string[];
@@ -1023,12 +1163,15 @@ export interface ContactPreviewInfo {
 export interface MaterialPreAnalysisResponse {
   can_generate: boolean;
   blocking_reasons: string[];
+  material_type?: MaterialTypeValue;
+  compatible_material_types?: MaterialTypeValue[];
   target_language: MaterialTargetLanguage;
   opportunity_context: OpportunityContextInfo;
   contact_preview: ContactPreviewInfo;
   used_facts: SelectedFactReference[];
   unconfirmed_warnings: UnconfirmedWarningItem[];
   missing_requirements: MissingRequirementItem[];
+  additional_info_needed?: PendingUserInputField[];
   confirmed_counts: Record<string, number>;
 }
 
@@ -1048,15 +1191,19 @@ export interface MaterialLinkItem {
 export interface MaterialVersionItem {
   id: string;
   material_id: string;
+  material_type?: MaterialTypeValue | string;
   version_number: number;
   origin: MaterialVersionOrigin | string;
   parent_version_id: string | null;
   user_instructions: string | null;
-  structured_content: ResumeStructuredContent;
+  structured_content: AnyMaterialStructuredContent;
   source_facts_snapshot: Record<string, unknown>;
   unconfirmed_warnings: UnconfirmedWarningItem[];
   missing_requirements: MissingRequirementItem[];
   rendered_markdown: string;
+  rendered_plain_text?: string;
+  has_blocking_pending_fields?: boolean;
+  pending_requirements_count?: number;
   is_approved: boolean;
   approved_at: string | null;
   is_linked_to_any_application: boolean;
@@ -1111,16 +1258,19 @@ export interface MaterialExportResponse {
 export interface MaterialCreatePayload {
   opportunity_id?: string | null;
   application_id?: string | null;
-  material_type?: "resume";
+  material_type?: MaterialTypeValue;
   title?: string | null;
   target_language?: MaterialTargetLanguage;
   contact_options?: ContactInclusionOptions;
+  writing_options?: WritingGenerationOptionsPayload;
   user_instructions?: string | null;
 }
 
 export interface MaterialPreAnalyzePayload {
   opportunity_id?: string | null;
   application_id?: string | null;
+  material_type?: MaterialTypeValue;
   target_language?: MaterialTargetLanguage;
   contact_options?: ContactInclusionOptions;
+  writing_options?: WritingGenerationOptionsPayload;
 }

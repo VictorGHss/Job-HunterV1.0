@@ -6,6 +6,34 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.2] - 2026-11-17 — Subfase 04.2: Propostas, Cartas e Mensagens Direcionadas
+
+### Adicionado
+
+- **Quatro Novos Tipos de Materiais Determinísticos (`backend/app/models/material.py`):**
+  - Estendido `MaterialType` com `cover_letter` (`Carta de apresentação`), `recruiter_message` (`Mensagem para recrutador`), `freelance_proposal` (`Proposta freelance`) e `application_answers` (`Respostas para perguntas de candidatura`), reutilizando a coluna `material_type` (`VARCHAR(32)`) da migration `0010_application_materials` sem necessidade de nova migração Alembic.
+- **Compositores Determinísticos Bilíngues (`pt-BR` e `en`, Sem IA Externa):**
+  - `writing_common.py`: utilitários determinísticos compartilhados de formatação segura, renderização de texto simples sem placeholders nem links quebrados e proteção contra injeção em dados externos da vaga.
+  - `cover_letter_composer.py`: carta estruturada (`recipient_line`, `greeting`, `opening`, `relevance_highlights`, `opportunity_alignment`, `closing`) apoiada exclusivamente em fatos `confirmed`.
+  - `recruiter_message_composer.py`: mensagens objetivas por canal (`linkedin`, `email`, `contact_form`) com `character_count` real, contato opcional não inventado e geração limpa sem assunto no canal LinkedIn.
+  - `freelance_proposal_composer.py`: proposta técnica com evidências confirmadas e painel estruturado de `pending_fields` (`availability`, `estimated_delivery`, `budget_or_price` obrigatórios + opcionais `scope_clarifications` e `additional_requirements`).
+  - `application_answers_composer.py`: resposta determinística pergunta-a-pergunta fornecida manualmente pelo usuário, diferenciando respostas fundamentadas em fatos confirmados (`answered_from_facts`), lacunas que exigem resposta humana (`needs_user_input` com `answer_text=null` para motivação, pretensão salarial, disponibilidade e requisitos sem evidência) e respostas autoradas manualmente (`user_answered` / `user_authored`, sem promover texto livre para fatos do perfil).
+- **Orquestração, API e Endurecimento Server-Side (`material_service.py`, `api/routes/materials.py`, `schemas/material.py`):**
+  - `GET /api/v1/materials` passa a aceitar filtro opcional `?material_type=...`.
+  - `POST /api/v1/materials/pre-analyze` e `POST /api/v1/materials` aceitam `material_type` e `writing_options` (`channel`, `contact_name`, `contact_context`, `freelance_inputs`, `questions`, `initial_answers`), retornando `compatible_material_types` priorizados para o regime da vaga (`freelance_proposal` em destaque para vagas freelance) e `additional_info_needed`.
+  - Respostas e versões expõem `rendered_plain_text`, `has_blocking_pending_fields` e `pending_requirements_count`.
+  - Validação estrita no servidor: imutabilidade de tipo por material (`422` em payload incompatível), validação contra o `source_facts_snapshot` da versão (`422` para referências inexistentes ou inválidas), reconciliação de proveniência (`confirmed_fact` nunca forjável após edição manual) e bloqueio explícito de aprovação (`POST .../approve` retorna `422`) enquanto houver campos obrigatórios pendentes ou perguntas marcadas como `needs_user_input`.
+- **Estúdio Unificado de Materiais no Frontend (`MaterialWorkspaceModal.tsx`, `MaterialTypeEditors.tsx`, `ApplicationDetailModal.tsx`):**
+  - Evolução para **Estúdio de Materiais para Candidatura** com seleção dos 5 tipos de material (badges `Recomendado` vs `Sob solicitação`), campos contextuais dedicados, editores estruturados específicos (`CoverLetterEditor`, `RecruiterMessageEditor`, `FreelanceProposalEditor`, `ApplicationAnswersEditor`), contagem aproximada de caracteres em mensagens, bloqueio visual e desabilitação do botão **Aprovar versão** com pendências obrigatórias, além do botão **Novo material direcionado** e badges de tipo na aba **Materiais** dos detalhes da candidatura.
+  - Exportação via Markdown e Texto Simples; geração de PDF/DOCX e integração com provedores externos de IA permanecem fora de escopo nesta fase.
+
+### Testes
+- `tests/test_materials_phase042.py`: cobertura completa dos cenários `TC-42-01` a `TC-42-29` (todos os 4 novos tipos em `pt-BR` e `en`, proibição de invenção de preço/prazo/motivação/recrutador, reconciliação e rejeição `422` de referências forjadas, imutabilidade de tipo, bloqueio e desbloqueio de aprovação em `freelance_proposal` e `application_answers`, preservação de perguntas em `/regenerate`, isolamento IDOR e filtro `GET /materials?material_type=...`).
+- Suítes backend completas: **98/98 passando** em PostgreSQL 16 (`backend-test`) e SQLite local.
+- `frontend/src/test/App.test.tsx`: **13/13 testes passando** (incluindo 3 novos fluxos `TC-42-30` em `390x844`, `768x1024` e desktop `1280x800`), além de `tsc --noEmit`, `eslint` e `vite build` sem erros.
+
+---
+
 ## [0.4.1.2] - 2026-11-17 — Subfase 04.1.2: Preservação de Confirmação Intencional de Rascunhos e Detecção Real de Omissão
 
 ### Corrigido / Endurecido

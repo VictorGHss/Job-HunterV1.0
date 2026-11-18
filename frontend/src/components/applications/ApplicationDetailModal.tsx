@@ -1918,12 +1918,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
               <div>
                 <h3 className="flex items-center gap-2 text-sm font-semibold">
                   <FileText className="h-4 w-4 text-primary" />
-                  Currículos e Versões Vinculadas
+                  Materiais e Versões Vinculadas
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Gere currículos determinísticos com fatos confirmados, edite
-                  blocos estruturados, aprove uma versão e vincule a esta
-                  candidatura.
+                  Gere currículos, cartas, mensagens, propostas freelance e
+                  respostas determinísticas com fatos confirmados, aprove uma
+                  versão e vincule a esta candidatura.
                 </p>
               </div>
               <Button
@@ -1935,7 +1935,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                 }}
               >
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
-                Novo currículo direcionado
+                Novo material direcionado
               </Button>
             </div>
 
@@ -1965,6 +1965,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                             <span className="font-semibold text-foreground">
                               {mat.title}
                             </span>
+                            <Badge variant="outline">
+                              {mat.material_type}
+                            </Badge>
                             <Badge variant="secondary">
                               v{mat.latest_version_number}
                             </Badge>
@@ -2040,6 +2043,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                             <span className="font-semibold text-foreground">
                               {mat.title}
                             </span>
+                            <Badge variant="outline">
+                              {mat.material_type}
+                            </Badge>
                             <Badge variant="outline">
                               v{mat.latest_version_number}
                             </Badge>
