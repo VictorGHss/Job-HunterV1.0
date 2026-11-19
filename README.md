@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Subfase 04.4.1 — Fundação e Infraestrutura de IA Assistida
+- **Fase atual:** Subfase 04.4.2 — Contexto Autorizado e Grounding Estruturado
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -289,7 +289,20 @@ Prepara a base de backend para futuro aprimoramento opcional de materiais com IA
 - **Circuit breaker compartilhado em SQL (`ai_circuit_breakers`):** estados `closed`, `open` e `half_open` persistidos no banco (`3` falhas consecutivas abrem por `120s`, probe único exclusivo em `half_open`), mantendo proteção consistente entre múltiplos workers/réplicas sem introduzir Redis.
 - **Providers disponíveis e escopo atual:** implementados o protocolo agnóstico `LLMProvider`, `DisabledLLMProvider` e `MockLLMProvider` (restrito a testes e bloqueado em `ENVIRONMENT=production`). **Ainda não estão implementados nesta subfase:** providers HTTP externos (Gemini/OpenAI/Anthropic/Ollama/OpenRouter), `ContextBuilder`, `StructuredGroundingValidator`, geração/overlay de versões `ai_assisted`, endpoints de aprimoramento e interface de revisão/diff no frontend.
 
-### 4.11. Encerrando o Ambiente
+### 4.11. Contexto Autorizado e Grounding Estruturado (Subfase 04.4.2)
+Constrói a camada de segurança factual e integridade epistemológica que alimenta e valida a geração estruturada por IA:
+- **Reutilização da Seleção Factual Canônica:** reutiliza diretamente `build_authorized_fact_bundle` (em `fact_selector.py`), consultando o estado mais recente do banco de dados relacional e garantindo que apenas fatos com `verification_status == 'confirmed'` entrem no pipeline (sem depender de snapshots legados).
+- **Minimização Estrita de Dados (PII):** o contexto serializado (`AuthorizedAIContext`) omite propositalmente dados de contato privados (telefone, e-mail pessoal, links pessoais de redes sociais/portfólio e localização detalhada), transmitindo exclusivamente evidências profissionais substantivas.
+- **Separação Ontológica Rígida:** mantém distinção estrita entre empregos formais (`experience`) e projetos (`project` — onde `company_or_institution` é explicitamente `None`), impedindo que projetos pessoais/acadêmicos sejam apresentados como vagas CLT/PJ ou vice-versa.
+- **Contratos Estruturados Pydantic v2 (`ai_schemas.py`):** modelos estritamente tipados com `extra="forbid"`, suportando os cinco materiais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`), com validação de slots narrativos (`AISuggestionItem`) e citação obrigatória de chaves de evidência (`cited_fact_keys`).
+- **Validador Conservador All-or-Nothing (`StructuredGroundingValidator`):** se qualquer sugestão de um lote falhar ou alucinar, todo o pacote de sugestões é rejeitado (`is_valid = False`):
+  - *Métricas e Quantitativos:* extrai e valida com limites de palavra números decimais/inteiros, percentuais (`%`, `por cento`, `percent`), moedas (`R$`, `$`, `USD`, `EUR`), durações (`anos`, `meses`, `years`) e numerais por extenso (PT-BR e EN). Números só são aceitos se comprovados nos fatos citados correspondentes ou como parte de versão técnica permitida (`Python 3`, `React 18`, etc.).
+  - *Canais de Contato e Injeções:* proíbe estritamente a adição de URLs, links em markdown, e-mails, telefones, tags HTML ou scripts executáveis.
+  - *Cargos e Competências:* bloqueia promoção indevida de cargos (ex.: candidato júnior promovido a CTO/Tech Lead) e tecnologias não confirmadas nas competências do usuário ou nos requisitos da vaga.
+  - *Transparência Epistemológica:* inclui disclaimer explícito esclarecendo que o validador atua como barreira heurística de integridade estrutural sobre dados confirmados, e não como oráculo empírico absoluto.
+- **Fora de escopo na subfase:** provedores HTTP externos reais (Gemini, OpenAI, Anthropic, Ollama, OpenRouter), chamadas a APIs pagas, rotas/endpoints de aprimoramento, persistência de sugestões em versões e interface gráfica no frontend.
+
+### 4.12. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 

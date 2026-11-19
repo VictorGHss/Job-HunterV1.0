@@ -1,6 +1,6 @@
 # Política e Arquitetura de Segurança (SECURITY.md)
 
-Este documento registra as decisões arquiteturais de segurança implementadas na **Fase 01** e endurecidas na **Fase 01.1** do **Job Hunter**, bem como os controles ativos e limitações conhecidas.
+Este documento registra as decisões arquiteturais de segurança implementadas na **Fase 01** e endurecidas nas fases subsequentes do **Job Hunter**, bem como os controles ativos e limitações conhecidas.
 
 ---
 
@@ -165,3 +165,17 @@ Este documento registra as decisões arquiteturais de segurança implementadas n
 - **Atomicidade Concorrente Sem Locks Abertos Durante I/O (`_db_locks.py`, `quota_service.py`, `execution_guard.py`):** O controle de cotas serializa reservas concorrentes por escopo (`global:daily:<YYYY-MM-DD>` e `user:<uuid>` em ordem lexicográfica canônica livre de deadlocks, usando `SELECT ... FOR UPDATE` no PostgreSQL 16 e escrita transacional com `busy_timeout` no SQLite) dentro de uma transação curta confirmada **antes** da invocação do `LLMProvider`, reabrindo uma segunda transação curta apenas para consolidar o desfecho (`completed`, `failed` ou `released`). Nenhum lock ou transação SQL permanece aberto durante chamadas de provider.
 - **Privacidade Estrita no Ledger e Zero Segredos/PII em Logs (`models/ai_usage.py`, `contracts.py`):** A tabela `ai_usage_ledger` armazena exclusivamente metadados operacionais numéricos e códigos técnicos curtos (`operation_type`, `provider_name`, `model_name`, `status`, contagens de tokens, `latency_ms`, `error_code`), sem colunas de texto livre para prompts, respostas, currículos ou vagas. `validate_safe_technical_identifier` aplica allowlist estrita (`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,63}$`) e bloqueia URLs, e-mails (`@`), espaços, quebras de linha e padrões de credenciais (`sk-`, `AIza`, `Bearer`, `api_key`, etc.), garantindo ausência de PII e segredos no banco e nos logs.
 - **Circuit Breaker Compartilhado em SQL (`circuit_breaker.py`):** Persistido em `ai_circuit_breakers` para manter estado consistente entre múltiplos workers/réplicas sem depender de memória local por processo nem exigir Redis, limitando probes simultâneos em `half_open` a uma única execução concorrente.
+
+---
+
+## 15. Contexto Autorizado e Grounding Estruturado (Subfase 04.4.2)
+
+- **Consulta Factual Direta e Fonte da Verdade em Tempo Real (`context_builder.py`):** O `build_authorized_ai_context` reutiliza `build_authorized_fact_bundle` (em `fact_selector.py`), consultando diretamente o banco de dados na transação ativa e aceitando estritamente registros com `verification_status == 'confirmed'`. Registros em `draft`, `pending_validation` ou modificados sem re-confirmação são categoricamente excluídos do contexto da IA.
+- **Minimização Estrita de PII e Privacidade:** O modelo de contexto (`AuthorizedAIContext` / `AuthorizedFactItem`) nunca serializa telefone, e-mail pessoal, links privados de redes sociais/portfólio nem endereços residenciais completos para a IA.
+- **Prevenção de Injeção de Prompt Estrutural:** Requisições à IA utilizam dicionários tipados Pydantic (`extra="forbid"`), separando instruções imutáveis do sistema dos dados estruturados. Textos de descrições e títulos de vagas são higienizados e tratados exclusivamente como dados de busca/metadados (`OpportunityContextInfo`), sem permissão de execução de código, tool-calling ou reconfiguração de schemas.
+- **Validação Conservadora All-or-Nothing (`StructuredGroundingValidator`):** Qualquer violação de grounding em qualquer sugestão de um lote invalida integralmente a resposta da IA (`is_valid = False`):
+  - *Métricas Quantitativas:* Extração com limites rígidos de palavras de números decimais/inteiros, percentuais (`%`, `por cento`, `percent`), valores monetários (`R$`, `$`, `USD`, `EUR`), durações (`anos`, `meses`, `years`) e numerais por extenso (PT-BR e EN). Toda métrica deve constar expressamente nos fatos citados correspondentes.
+  - *Bloqueio de Contatos e Links Externos:* Rejeita terminantemente a introdução de URLs, links em markdown `[texto](url)`, e-mails ou números de telefone.
+  - *Prevenção de XSS e Injeções:* Rejeita qualquer tag HTML (`<script>`, `<iframe>`, `<div>`, etc.) ou atributos de evento (`onload=`, `onerror=`).
+  - *Integridade de Entidades e Cargos:* Bloqueia autopromoção de cargos (ex.: dev júnior atribuindo-se cargo de CTO ou Tech Lead) e tecnologias que não estejam previamente confirmadas pelo usuário ou nos requisitos da vaga.
+- **Limitações Epistemológicas Documentadas:** Toda validação anexa um disclaimer epistemológico formal, declarando que o grounding atua como uma barreira heurística de integridade estrutural sobre fatos previamente confirmados, sem constituir oráculo ontológico universal.

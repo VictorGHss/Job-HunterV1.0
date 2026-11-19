@@ -1,10 +1,22 @@
-"""Fundação e infraestrutura de IA assistida opcional (Subfase 04.4.1).
+"""Fundação e infraestrutura de IA assistida opcional (Subfases 04.4.1 e 04.4.2).
 
 Mantém separação estrita entre:
 1. Contrato agnóstico de provider (``LLMProvider``, ``DisabledLLMProvider``, ``MockLLMProvider``).
 2. Controle atômico de cotas, reservas e ledger sem conteúdo/PII (``quota_service``).
 3. Circuit breaker persistido em banco SQL compartilhável entre workers (``circuit_breaker``).
+4. Contexto autorizado e minimização de dados (``context_builder``).
+5. Schemas estruturados de sugestão Pydantic v2 (``ai_schemas``).
+6. Validação conservadora e all-or-nothing de grounding (``grounding_validator``).
 """
+from app.services.materials.ai.ai_schemas import (
+    AI_SUPPORTED_MATERIAL_TYPES,
+    AIMaterialEnhanceOutput,
+    AIMaterialTypeLiteral,
+    AISuggestionItem,
+    AuthorizedAIContext,
+    AuthorizedFactItem,
+    SanitizedOpportunityContext,
+)
 from app.services.materials.ai.circuit_breaker import (
     CircuitBreakerSnapshot,
     check_and_acquire_circuit_execution,
@@ -12,6 +24,7 @@ from app.services.materials.ai.circuit_breaker import (
     record_circuit_failure,
     record_circuit_success,
 )
+from app.services.materials.ai.context_builder import build_authorized_ai_context
 from app.services.materials.ai.contracts import (
     AICircuitOpenError,
     AIConfigurationError,
@@ -34,6 +47,10 @@ from app.services.materials.ai.contracts import (
 from app.services.materials.ai.execution_guard import (
     GuardedAIExecutionResult,
     execute_guarded_ai_call,
+)
+from app.services.materials.ai.grounding_validator import (
+    GroundingValidationResult,
+    StructuredGroundingValidator,
 )
 from app.services.materials.ai.providers import (
     DisabledLLMProvider,
@@ -58,11 +75,18 @@ __all__ = [
     "AIConfigurationError",
     "AIDisabledError",
     "AIFoundationError",
+    "AIMaterialEnhanceOutput",
+    "AIMaterialTypeLiteral",
     "AIQuotaExceededError",
     "AIReservationNotFoundError",
     "AIReservationStateError",
+    "AISuggestionItem",
+    "AI_SUPPORTED_MATERIAL_TYPES",
+    "AuthorizedAIContext",
+    "AuthorizedFactItem",
     "CircuitBreakerSnapshot",
     "DisabledLLMProvider",
+    "GroundingValidationResult",
     "GuardedAIExecutionResult",
     "LLMMalformedOutputError",
     "LLMProvider",
@@ -77,6 +101,9 @@ __all__ = [
     "MockScenario",
     "QuotaAvailability",
     "QuotaScopeLiteral",
+    "SanitizedOpportunityContext",
+    "StructuredGroundingValidator",
+    "build_authorized_ai_context",
     "check_and_acquire_circuit_execution",
     "confirm_ai_quota_usage",
     "execute_guarded_ai_call",

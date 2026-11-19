@@ -6,6 +6,42 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.2] - 2026-11-19 — Subfase 04.4.2: Contexto Autorizado e Grounding Estruturado
+
+### Adicionado
+
+- **Contexto Factual Autorizado e Minimização de Dados (`backend/app/services/materials/ai/context_builder.py`):**
+  - Função `build_authorized_ai_context` que reutiliza diretamente a seleção factual canônica `build_authorized_fact_bundle` (em `fact_selector.py`), consultando o estado atual do banco relacional na sessão ativa sem depender de snapshots históricos defasados.
+  - Filtragem estrita por fatos confirmados: apenas entidades com `verification_status == 'confirmed'` entram no contexto da IA; itens em `draft`, `pending_validation` ou modificados sem nova confirmação são omitidos.
+  - Minimização rigorosa de privacidade (PII): omissão de telefones, e-mails pessoais, URLs de redes sociais/portfólio e localização residencial completa no payload da IA.
+  - Separação ontológica explícita: entidades `experience` (`company_or_institution` preenchido) e `project` (`company_or_institution=None`) mantêm distinção absoluta, impedindo apresentação cruzada indevida de projetos como empregos formais.
+  - Isolamento estrito de inquilino (`user_id`): verificação em profundidade garantindo que todas as entidades pertençam ao usuário autenticado.
+  - Higienização contra Prompt Injection: dados de oportunidades externas (`OpportunityContextInfo`) são tratados como metadados sanitizados somente leitura, sem execução de instruções externas ou tool-calling.
+- **Contratos e Schemas Estruturados Pydantic v2 (`backend/app/services/materials/ai/ai_schemas.py`):**
+  - Modelos `AuthorizedAIContext`, `AuthorizedFactItem`, `SanitizedOpportunityContext`, `AISuggestionItem` e `AIMaterialEnhanceOutput` com `extra="forbid"`.
+  - Validação estrita de identificadores técnicos de slot e formato de chaves `<entity_type>:<id>`.
+  - Cobertura completa dos cinco materiais profissionais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`).
+- **Validador Conservador de Grounding All-or-Nothing (`backend/app/services/materials/ai/grounding_validator.py`):**
+  - Implementação de `StructuredGroundingValidator` e `GroundingValidationResult`.
+  - Princípio All-or-Nothing: qualquer falha em qualquer sugestão de um lote invalida o resultado global (`is_valid = False`).
+  - Verificação de referências: exige que cada sugestão cite chaves válidas (`cited_fact_keys`), pertencentes ao contexto autorizado do usuário e compatíveis com a tipologia do slot.
+  - Validação estrita de métricas: extração com word boundaries de números inteiros/decimais, percentuais (`%`, `por cento`, `percent`), valores monetários (`R$`, `$`, `USD`, `EUR`), durações (`anos`, `meses`, `years`) e numerais por extenso (PT-BR e EN), exigindo comprovação factual direta nos fatos citados correspondentes.
+  - Proibição absoluta de novas URLs, links em markdown `[texto](url)`, e-mails e números de telefone.
+  - Proibição de injeção de HTML e scripts (`<script>`, `<iframe>`, tags HTML, handlers de eventos).
+  - Bloqueio de autopromoção indevida de cargos (ex.: dev júnior autodenominando-se CTO ou Tech Lead sem fundamento factual).
+  - Bloqueio de tecnologias e ferramentas não confirmadas nas competências do usuário.
+  - Bloqueio de alegações infundadas de prêmios e patentes.
+  - Disclaimer epistemológico explícito documentando as limitações heurísticas da validação estrutural.
+- **Exportações do Pacote (`backend/app/services/materials/ai/__init__.py`):**
+  - Centralização de todas as novas classes, esquemas, construtor de contexto e validador no pacote `app.services.materials.ai`.
+
+### Testes
+- `tests/test_ai_grounding_phase0442.py`: 43 testes cobrindo os Grupos A (Construção de Contexto), B (Esquemas de IA), C (Verificações de Chave e Referência), D (Métricas, Links, Injeções e Alucinações) e E (Integração com MockLLMProvider e DisabledLLMProvider).
+- Suíte completa de testes do backend: **161/161 testes passando** tanto no SQLite local quanto no PostgreSQL 16 via Docker Compose (`backend-test` / `jobhunter_test`).
+- Suíte do frontend: **15/15 testes passando** no vitest e verificação de tipos `tsc --noEmit` sem erros.
+
+---
+
 ## [0.4.4.1] - 2026-11-18 — Subfase 04.4.1: Fundação e Infraestrutura de IA Assistida
 
 ### Adicionado
