@@ -932,6 +932,7 @@ def test_tc441_07_providers_and_guarded_execution_without_open_db_lock(
 
     # Provider instrumentado que realiza uma escrita independente no banco DURANTE generate_structured:
     # Se execute_guarded_ai_call mantivesse lock de escrita aberto, SQLite travaria e PG veria lock ativo!
+    t_crash = datetime(2026, 11, 18, 16, 0, 0, tzinfo=UTC)
     concurrent_write_succeeded = False
 
     class _LockProbeProvider(LLMProvider):
@@ -980,6 +981,7 @@ def test_tc441_07_providers_and_guarded_execution_without_open_db_lock(
         reserved_tokens=1500,
         injected_provider=_LockProbeProvider(),
         settings_override=cfg,
+        now_fn=lambda: t_crash,
     )
     assert concurrent_write_succeeded is True
     assert exec_res.ledger_entry.status == AIUsageStatus.COMPLETED
@@ -988,7 +990,6 @@ def test_tc441_07_providers_and_guarded_execution_without_open_db_lock(
 
     # Simula falha ao persistir o resultado DEPOIS da resposta do provider:
     # A reserva criada na sessão #1 não bloqueia cotas indefinidamente, pois expira após o TTL!
-    t_crash = datetime(2026, 11, 18, 16, 0, 0, tzinfo=UTC)
     call_counter = 0
 
     def _flaky_session_factory() -> Session:

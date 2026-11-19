@@ -6,6 +6,38 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.2] - 2026-11-19 — Subfase 04.4.2: Contexto Autorizado e Grounding Estruturado
+
+### Adicionado e Endurecido
+
+- **Proteção Compartilhada de PII e Conteúdo Ativo (`backend/app/services/materials/ai/safety.py`):**
+  - Detectores e redator fail-closed para e-mails diretos e ofuscados (`[at]`, `(at)`, ` at `, `[dot]`, ` dot `), telefones brasileiros e internacionais (incluindo DDD `19`, `20` e `+55 11 98765-4321`), URLs com e sem protocolo (`github.com/user`, `example.com`), links Markdown (inclusive multilinha), perfis sociais rotulados, CPF, CEP, padrões de endereço residencial, HTML/SVG, atributos `on*` e esquemas ativos (`javascript:`, `vbscript:`, `data:`, `mailto:`, `tel:`).
+- **Contexto Factual Autorizado, Projeção Escalar e Orçamento Canônico (`backend/app/services/materials/ai/context_builder.py`, `fact_selector.py`, `material_service.py`, `contracts.py`):**
+  - Exceção `AIContextAuthorizationError` e revalidação explícita contra o banco de dados de `application` (`application.user_id == user.id`), `opportunity` (pública `source_id IS NOT NULL` ou privada própria `created_by_user_id == user.id`) e consistência `application.opportunity_id == opportunity.id`, executada sob `db.no_autoflush` via projeções SQL escalares (`project_persisted_application_for_user`, `project_persisted_opportunity_for_user`) sem consultar nem sobrescrever o `Session.identity_map` (NC-01 / NC-03).
+  - Seleção de fatos em `build_authorized_fact_bundle` (`fact_selector.py`) usando projeções SQL escalares coluna a coluna (`.mappings()`) para todas as 6 entidades de perfil (`ProfessionalProfile`, `WorkExperience`, `ProfessionalProject`, `Education`, `Skill`, `Language`), filtrando `user_id == user.id` e `verification_status == 'confirmed'` diretamente no SQL e materializando DTOs imutáveis (`@dataclass(frozen=True, slots=True)`), impedindo contaminação por atributos adulterados ou promoções de status em memória (tanto em `autoflush=False` quanto em `autoflush=True`) e preservando intactas quaisquer alterações legítimas pendentes (`db.dirty`) na `Session` do chamador.
+  - Redação fail-closed de PII em todos os campos de texto livre (`professional_summary`, descrições, `verified_results`, notas e campos da oportunidade), além de manter `period=None` para projetos sem data factual confirmada (sem inferir `updated_at.year`).
+  - Sanitização e truncamento seguro de labels (`<= 200` caracteres) em `WorkExperience` e `Education`, e orçamento determinístico agregado com teto absoluto (`max_facts <= 60`, `1.024 <= max_payload_bytes <= 24.000` bytes UTF-8) medido sobre o payload completo serializado canonicamente (`serialize_canonical_provider_payload`, `to_provider_payload_bytes()`, `to_provider_payload_json()`), garantindo `truncation_metadata.serialized_bytes == len(to_provider_payload_bytes()) <= max_payload_bytes <= 24.000` (NC-02 / NC-04).
+- **Contratos e Schemas Estruturados Pydantic v2 (`backend/app/services/materials/ai/ai_schemas.py`):**
+  - `AuthorizedAIContext`, `AuthorizedFactItem`, `SanitizedOpportunityContext`, `ContextTruncationMetadata`, `AISuggestionItem` e `AIMaterialEnhanceOutput` com `extra="forbid"`.
+  - `user_id` e `truncation_metadata` marcados com `Field(exclude=True)` e métodos dedicados `to_provider_payload()`, `to_provider_payload_json()` e `to_provider_payload_bytes()` (com `serialize_canonical_provider_payload(..., ensure_ascii=False, allow_nan=False, separators=(",", ":"))`) garantindo ausência de `user_id` e correspondência byte a byte em toda serialização externa.
+  - Allowlist explícita de `slot_id` por `material_type` (alinhada aos cinco `structured_content` reais, bloqueando metadados como `is_approved`, `origin`, `header.email` e `pending_fields`), rejeição de `slot_id` duplicado no lote e validação de consistência de entidade.
+- **Validador Conservador de Grounding All-or-Nothing (`backend/app/services/materials/ai/grounding_validator.py`):**
+  - Separação absoluta de origem: requisitos da vaga (`context.opportunity`) nunca autorizam competências do candidato.
+  - Vínculo estrito entre slots parametrizados e `fact_key` exata da entidade alvo, proibindo citações cruzadas, mistura projeto/emprego formal e citações irrelevantes (ex.: apenas idioma para alegação de engenharia de software).
+  - Grounding numérico tipado por categoria e família semântica (`percentage`, `currency`, `duration`, `year`, `tech_version`, `vague_scale`, `entity_count`, `raw_number`), com word boundaries estritos em numerais por extenso (PT-BR e EN) e sem derivar evidência da própria sugestão.
+  - Matcher dedicado de tecnologias (`extract_mentioned_technologies`) com fronteiras de token rígidas (`Java != JavaScript`), catálogo expandido (`MongoDB`, `Spark`, `PyTorch`, `SAP`, `Spring`, `Go`, `Node.js`, `Redis`, `React`, etc.) e desambiguação de palavras naturais em inglês (`go`, `rest`, `spring`, `redis`, `react`, `node`).
+  - Validação de empresas inventadas/trocadas, cargos/senioridades, verbos de liderança/propriedade e afirmações qualitativas exageradas sem evidência nos fatos citados.
+  - Transparência epistemológica formal explicitando os limites heurísticos e a necessidade permanente de revisão humana.
+- **Manutenção Determinística de Teste 04.4.1 (`backend/tests/test_ai_foundation_phase0441.py`):**
+  - Mantida a correção determinística em `test_tc441_07` passando `now_fn=lambda: t_crash` na chamada inicial de `execute_guarded_ai_call` para evitar flakiness de virada de dia UTC contra `t_crash` fixo (confirmada pela auditoria independente como legítima — achado B-02).
+
+### Testes
+- `tests/test_ai_grounding_phase0442.py`: 114 casos de teste cobrindo todas as sondas de regressão (A-01 a A-04, M-01 a M-05, NC-01 em todas as 6 entidades de perfil + `Application`/`Opportunity` com `autoflush=False`/`True`, NC-02 com teto absoluto de 24.000 bytes, NC-03 preservando e comitando alterações legítimas pendentes na `Session`, NC-04 validando `to_provider_payload_bytes()` e `serialized_bytes` exatos, 5 materiais, isolamento, privacidade e integração com `MockLLMProvider`/`DisabledLLMProvider`).
+- Suíte completa do backend: **232/232 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+- Suíte do frontend: **15/15 testes passando** no Vitest e `tsc --noEmit` sem erros.
+
+---
+
 ## [0.4.4.1] - 2026-11-18 — Subfase 04.4.1: Fundação e Infraestrutura de IA Assistida
 
 ### Adicionado

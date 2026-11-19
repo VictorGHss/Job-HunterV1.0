@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Subfase 04.4.1 — Fundação e Infraestrutura de IA Assistida
+- **Fase atual:** Subfase 04.4.2 — Contexto Autorizado e Grounding Estruturado
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -287,9 +287,22 @@ Prepara a base de backend para futuro aprimoramento opcional de materiais com IA
 - **Cotas configuráveis e semântica temporal explícita (UTC):** todas as janelas operam exclusivamente em UTC — `10` requisições por usuário em janela deslizante de `900s` (`[now - 900s, now]`), `30` requisições/dia por usuário, `60.000` tokens/dia por usuário e `100.000` tokens/dia globais em dia civil fixo UTC (`[00:00:00Z, 24:00:00Z)`), além de limites de referência para a futura camada HTTP (`< 25s` total / `24.0s` padrão, `5.0s` connect, `20.0s` read, `256 KiB` máx.).
 - **Reserva atômica em duas transações curtas (`0011_ai_usage_ledger`):** reservas são gravadas em `ai_usage_ledger` sob lock explícito por escopo (`ai_quota_scope_locks`, adquirido em ordem canônica) **antes** da chamada ao provider, encerrando a transação antes de qualquer I/O externo e reabrindo uma segunda transação curta para confirmar (`completed`) ou registrar falha (`failed`). Reservas canceladas antes da chamada (`released`) ou abandonadas após `AI_RESERVATION_TTL_SECONDS` (`60s` -> `expired`) liberam cota; tentativas que iniciaram execução (`completed` e `failed`) permanecem auditáveis e contam no limite de requisições. Quando um provider não reporta consumo (`usage_reported=false`), os campos de tokens permanecem `NULL` (contribuindo `0` tokens reais sem inventar estimativas).
 - **Circuit breaker compartilhado em SQL (`ai_circuit_breakers`):** estados `closed`, `open` e `half_open` persistidos no banco (`3` falhas consecutivas abrem por `120s`, probe único exclusivo em `half_open`), mantendo proteção consistente entre múltiplos workers/réplicas sem introduzir Redis.
-- **Providers disponíveis e escopo atual:** implementados o protocolo agnóstico `LLMProvider`, `DisabledLLMProvider` e `MockLLMProvider` (restrito a testes e bloqueado em `ENVIRONMENT=production`). **Ainda não estão implementados nesta subfase:** providers HTTP externos (Gemini/OpenAI/Anthropic/Ollama/OpenRouter), `ContextBuilder`, `StructuredGroundingValidator`, geração/overlay de versões `ai_assisted`, endpoints de aprimoramento e interface de revisão/diff no frontend.
+- **Providers disponíveis na fundação:** implementados o protocolo agnóstico `LLMProvider`, `DisabledLLMProvider` e `MockLLMProvider` (restrito a testes e bloqueado em `ENVIRONMENT=production`). As camadas de contexto autorizado e validação estruturada de grounding foram entregues na Subfase 04.4.2 abaixo; **permanecem fora de escopo até as etapas seguintes:** providers HTTP externos (Gemini/OpenAI/Anthropic/Ollama/OpenRouter), geração/overlay de versões `ai_assisted`, endpoints de aprimoramento e interface de revisão/diff no frontend.
 
-### 4.11. Encerrando o Ambiente
+### 4.11. Contexto Autorizado e Grounding Estruturado (Subfase 04.4.2)
+Constrói a camada de autorização factual, minimização de privacidade e validação conservadora que alimenta e audita sugestões estruturadas de IA antes de qualquer revisão humana:
+- **Autorização Explícita e Projeção Escalar Isolada do Identity Map (`context_builder.py`, `fact_selector.py`):** antes de montar qualquer contexto, revalida no banco (sob `db.no_autoflush` via projeções SQL escalares `.mappings()`) a posse de `application` (`application.user_id == user.id`), a visibilidade canônica de `opportunity` (pública `source_id IS NOT NULL` ou privada própria `created_by_user_id == user.id`) e a coerência estrita `application.opportunity_id == opportunity.id` quando ambas são fornecidas, falhando com `AIContextAuthorizationError` em qualquer divergência sem consultar nem sobrescrever objetos ORM do `Session.identity_map` (NC-01 / NC-03).
+- **Seleção Factual Canônica via Projeções Escalares e Separação de Origem:** `build_authorized_fact_bundle` projeta diretamente do banco (`select(Model.col1, ...).mappings()`) as 6 entidades de perfil (`ProfessionalProfile`, `WorkExperience`, `ProfessionalProject`, `Education`, `Skill`, `Language`) filtrando `user_id == user.id` e `verification_status == 'confirmed'` em SQL e materializando DTOs imutáveis, impedindo contaminação por atributos adulterados ou promoções de status em memória e preservando edições legítimas pendentes na sessão. Mantém separação explícita entre fatos confirmados do candidato (`candidate_confirmed_facts`) e requisitos externos da vaga (`target_opportunity_context`). **Requisitos da vaga nunca autorizam competências técnicas do candidato.**
+- **Minimização, Redação Fail-Closed de PII, Serialização Canônica e Orçamento Determinístico (`safety.py`, `ai_schemas.py`, `context_builder.py`):** além de omitir colunas de contato do perfil, redige PII em campos de texto livre (e-mails diretos/ofuscados, telefones BR/internacionais, URLs/domínios, CPF, CEP e padrões de endereço residencial, omitindo o campo fail-closed caso reste padrão sensível). `user_id` e `truncation_metadata` permanecem exclusivamente no backend (`exclude=True`) e nunca aparecem em `to_provider_payload()`, `to_provider_payload_json()`, `to_provider_payload_bytes()`, `model_dump()` ou `model_dump_json()`. Projetos sem data factual confirmada mantêm `period=None` (nunca inferindo `updated_at.year`). O contexto aplica limites determinísticos (`max_facts <= 60`, `1.024 <= max_payload_bytes <= 24.000` bytes UTF-8) medidos sobre os bytes canônicos exatos de `to_provider_payload_bytes()` (`serialized_bytes == len(to_provider_payload_bytes()) <= 24.000`, NC-02 / NC-04) e sanitização/limite de 200 caracteres em labels sem falhar em perfis extensos.
+- **Contratos Estruturados Pydantic v2 com Allowlist de Slots (`ai_schemas.py`):** modelos `extra="forbid"` cobrindo os cinco materiais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`), com allowlist explícita de `slot_id` por `material_type` (excluindo metadados como `is_approved`, `origin`, `header.email` e `pending_fields`), proibição de `slot_id` duplicado no mesmo lote, vínculo exato entre slot parametrizado e `fact_key` da entidade alvo, e verificação de relevância da evidência citada.
+- **Validador Conservador All-or-Nothing (`StructuredGroundingValidator`):** qualquer violação em qualquer sugestão invalida todo o lote (`is_valid = False`):
+  - *Métricas Tipadas por Categoria e Significado:* separa percentuais, moedas, durações, anos/datas, versões técnicas e contagens associadas a famílias semânticas (`5 APIs` não autoriza `5 equipes`; `Python 3.13` não autoriza `3.13%`; mês `06` não autoriza `6 anos`; `25%` não autoriza `R$ 25`), com word boundaries estritos em numerais por extenso (PT-BR e EN) e sem nunca derivar autorização da própria resposta da IA.
+  - *Tecnologias, Empresas, Cargos e Liderança:* matcher dedicado de tecnologias com fronteiras de token (`Java != JavaScript`) e proteção contra falsos positivos em inglês (`go`, `rest`, `spring`, `redis`, `react`, `node`), validando exclusivamente contra fatos confirmados citados (sem vazamento cross-entity nem autorização pela vaga); bloqueia empresas inventadas/trocadas, promoção de cargos/senioridade, verbos de liderança não sustentados e afirmações qualitativas exageradas (ex.: redução de custos ou transformação sistêmica sem evidência).
+  - *Segurança de Saída:* rejeita URLs com/sem protocolo, links Markdown (inclusive multilinha), e-mails diretos e ofuscados (`[at]`/`[dot]`/` at `/` dot `), telefones BR/internacionais (incluindo DDD 19/20), HTML, SVG, atributos `on*` e esquemas ativos (`javascript:`, `vbscript:`, `data:`).
+  - *Limitações Epistemológicas e Revisão Humana Obrigatória:* o validador é estrutural, heurístico e conservador — não realiza compreensão semântica absoluta; paráfrases sutis ou distorções de contexto sem marcadores detectáveis continuam exigindo revisão e aprovação humana obrigatória.
+- **Fora de escopo na subfase:** provedores HTTP externos reais (Gemini, OpenAI, Anthropic, Ollama, OpenRouter), chamadas a APIs pagas, rotas/endpoints de aprimoramento, persistência/overlay de versões `ai_assisted` e interface gráfica no frontend.
+
+### 4.12. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 
@@ -302,11 +315,11 @@ docker compose --env-file .env -f infra/compose.yaml down
 ## 5. Desenvolvimento e Execução de Testes Localmente
 
 ### Backend (Pytest + Alembic)
-Execução rápida local (SQLite — suíte completa ou apenas Subfase 04.4.1):
+Execução rápida local (SQLite — suíte completa ou apenas Subfases 04.4.1 / 04.4.2):
 ```powershell
 cd backend
 .\.venv\Scripts\pytest.exe
-.\.venv\Scripts\pytest.exe tests\test_ai_foundation_phase0441.py -v
+.\.venv\Scripts\pytest.exe tests\test_ai_foundation_phase0441.py tests\test_ai_grounding_phase0442.py -v
 ```
 
 Validação completa contra **PostgreSQL 16 real** via Docker Compose (usando banco isolado `jobhunter_test`):

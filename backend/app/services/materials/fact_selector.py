@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
+import uuid
 
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.application import Application
@@ -42,7 +46,6 @@ from app.services.opportunities.sanitization import (
     sanitize_external_html_text,
     sanitize_plain_text,
 )
-from app.services.profile_service import get_full_profile_bundle
 
 _PROFICIENCY_RANK: dict[str, int] = {
     SkillProficiency.EXPERT.value: 5,
@@ -61,15 +64,659 @@ _PORTUGUESE_LANGUAGE_NAMES = frozenset({"português", "portugues", "portuguese",
 _ENGLISH_LANGUAGE_NAMES = frozenset({"inglês", "ingles", "english", "en", "en-us", "en-gb"})
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectedProfileRecord:
+    """Projeção escalar imutável de ProfessionalProfile independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    full_name: str | None
+    professional_email: str | None
+    phone: str | None
+    city: str | None
+    state: str | None
+    country: str | None
+    professional_title: str | None
+    professional_summary: str | None
+    linkedin_url: str | None
+    github_url: str | None
+    portfolio_url: str | None
+    preferences: dict[str, Any]
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedExperienceRecord:
+    """Projeção escalar imutável de WorkExperience independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    company: str
+    role: str
+    description: str | None
+    start_date: date | None
+    end_date: date | None
+    is_current: bool
+    experience_type: str
+    technologies: list[str]
+    related_skills: list[str]
+    eligible_as_target_role: bool
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedProjectRecord:
+    """Projeção escalar imutável de ProfessionalProject independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    name: str
+    description: str | None
+    role: str | None
+    technologies: list[str]
+    links: dict[str, str]
+    verified_results: str | None
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedEducationRecord:
+    """Projeção escalar imutável de Education independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    institution: str
+    course: str
+    field_of_study: str | None
+    current_semester: str | None
+    start_date: date | None
+    expected_graduation_date: date | None
+    education_status: str
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedSkillRecord:
+    """Projeção escalar imutável de Skill independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    name: str
+    category: str
+    proficiency_level: str
+    notes: str | None
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedLanguageRecord:
+    """Projeção escalar imutável de Language independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    language_name: str
+    proficiency_level: str
+    cefr_level: str | None
+    verification_status: str
+    confirmed_at: datetime | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedOpportunityRecord:
+    """Projeção escalar imutável de Opportunity independente do Identity Map."""
+
+    id: uuid.UUID
+    source_id: uuid.UUID | None
+    created_by_user_id: uuid.UUID | None
+    title: str
+    company_name: str | None
+    description: str | None
+    requirements: list[str]
+    technologies: list[str]
+    opportunity_type: str
+    seniority_level: str
+    experience_requirement_mode: str
+    experience_min_years: int | None
+    experience_preferred_years: int | None
+    experience_summary: str | None
+    employment_type: str
+    work_mode: str
+    professional_area: str
+    secondary_areas: list[str]
+    language: str | None
+    raw_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedApplicationRecord:
+    """Projeção escalar imutável de Application independente do Identity Map."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    opportunity_id: uuid.UUID | None
+    role_title: str | None
+    company_name: str | None
+    seniority_level: str | None
+    employment_type: str | None
+    opportunity: ProjectedOpportunityRecord | None = None
+
+
+def project_persisted_opportunity_for_user(
+    db: Session,
+    user_id: uuid.UUID,
+    opportunity_id: uuid.UUID,
+) -> ProjectedOpportunityRecord | None:
+    """Projeta colunas de Opportunity diretamente do banco SQL (sem usar nem alterar o Identity Map)."""
+    stmt = select(
+        Opportunity.id,
+        Opportunity.source_id,
+        Opportunity.created_by_user_id,
+        Opportunity.title,
+        Opportunity.company_name,
+        Opportunity.description,
+        Opportunity.requirements,
+        Opportunity.technologies,
+        Opportunity.opportunity_type,
+        Opportunity.seniority_level,
+        Opportunity.experience_requirement_mode,
+        Opportunity.experience_min_years,
+        Opportunity.experience_preferred_years,
+        Opportunity.experience_summary,
+        Opportunity.employment_type,
+        Opportunity.work_mode,
+        Opportunity.professional_area,
+        Opportunity.secondary_areas,
+        Opportunity.language,
+        Opportunity.raw_metadata,
+    ).where(
+        Opportunity.id == opportunity_id,
+        or_(
+            Opportunity.source_id.is_not(None),
+            Opportunity.created_by_user_id == user_id,
+        ),
+    )
+    with db.no_autoflush:
+        row = db.execute(stmt).mappings().one_or_none()
+    if row is None:
+        return None
+    return ProjectedOpportunityRecord(
+        id=row["id"],
+        source_id=row["source_id"],
+        created_by_user_id=row["created_by_user_id"],
+        title=row["title"],
+        company_name=row["company_name"],
+        description=row["description"],
+        requirements=list(row["requirements"] or []),
+        technologies=list(row["technologies"] or []),
+        opportunity_type=row["opportunity_type"],
+        seniority_level=row["seniority_level"],
+        experience_requirement_mode=row["experience_requirement_mode"],
+        experience_min_years=row["experience_min_years"],
+        experience_preferred_years=row["experience_preferred_years"],
+        experience_summary=row["experience_summary"],
+        employment_type=row["employment_type"],
+        work_mode=row["work_mode"],
+        professional_area=row["professional_area"],
+        secondary_areas=list(row["secondary_areas"] or []),
+        language=row["language"],
+        raw_metadata=copy.deepcopy(row["raw_metadata"]) if isinstance(row["raw_metadata"], dict) else {},
+    )
+
+
+def project_persisted_application_for_user(
+    db: Session,
+    user_id: uuid.UUID,
+    application_id: uuid.UUID,
+) -> ProjectedApplicationRecord | None:
+    """Projeta colunas de Application diretamente do banco SQL (sem usar nem alterar o Identity Map)."""
+    stmt = select(
+        Application.id,
+        Application.user_id,
+        Application.opportunity_id,
+        Application.role_title,
+        Application.company_name,
+        Application.seniority_level,
+        Application.employment_type,
+    ).where(
+        Application.id == application_id,
+        Application.user_id == user_id,
+    )
+    with db.no_autoflush:
+        row = db.execute(stmt).mappings().one_or_none()
+    if row is None:
+        return None
+    opp_id = row["opportunity_id"]
+    linked_opp = (
+        project_persisted_opportunity_for_user(db, user_id, opp_id)
+        if opp_id is not None
+        else None
+    )
+    return ProjectedApplicationRecord(
+        id=row["id"],
+        user_id=row["user_id"],
+        opportunity_id=opp_id,
+        role_title=row["role_title"],
+        company_name=row["company_name"],
+        seniority_level=row["seniority_level"],
+        employment_type=row["employment_type"],
+        opportunity=linked_opp,
+    )
+
+
+def _project_persisted_profile_entities(
+    db: Session,
+    user_id: uuid.UUID,
+) -> tuple[
+    ProjectedProfileRecord | None,
+    list[ProjectedExperienceRecord],
+    list[ProjectedProjectRecord],
+    list[ProjectedEducationRecord],
+    list[ProjectedSkillRecord],
+    list[ProjectedLanguageRecord],
+    ProjectedProfileRecord | None,
+    list[ProjectedExperienceRecord],
+    list[ProjectedProjectRecord],
+    list[ProjectedEducationRecord],
+    list[ProjectedSkillRecord],
+    list[ProjectedLanguageRecord],
+]:
+    """Lê as 6 entidades de perfil diretamente via projeção escalar de colunas no SQL.
+
+    Garantias:
+    - Filtra `user_id == user_id` e `verification_status == 'confirmed'` diretamente no SQL
+      para todas as entidades confirmadas.
+    - Nunca hidrata nem consulta instâncias ORM do `Session.identity_map`.
+    - Nunca executa `populate_existing=True` nem descarta alterações dirty pendentes na Session.
+    - Nunca chama `get_or_create_profile` (zero escrita colateral durante leitura).
+    """
+    confirmed_val = VerificationStatus.CONFIRMED.value
+
+    prof_cols = (
+        ProfessionalProfile.id,
+        ProfessionalProfile.user_id,
+        ProfessionalProfile.full_name,
+        ProfessionalProfile.professional_email,
+        ProfessionalProfile.phone,
+        ProfessionalProfile.city,
+        ProfessionalProfile.state,
+        ProfessionalProfile.country,
+        ProfessionalProfile.professional_title,
+        ProfessionalProfile.professional_summary,
+        ProfessionalProfile.linkedin_url,
+        ProfessionalProfile.github_url,
+        ProfessionalProfile.portfolio_url,
+        ProfessionalProfile.preferences,
+        ProfessionalProfile.verification_status,
+        ProfessionalProfile.confirmed_at,
+        ProfessionalProfile.created_at,
+        ProfessionalProfile.updated_at,
+    )
+    exp_cols = (
+        WorkExperience.id,
+        WorkExperience.user_id,
+        WorkExperience.company,
+        WorkExperience.role,
+        WorkExperience.description,
+        WorkExperience.start_date,
+        WorkExperience.end_date,
+        WorkExperience.is_current,
+        WorkExperience.experience_type,
+        WorkExperience.technologies,
+        WorkExperience.related_skills,
+        WorkExperience.eligible_as_target_role,
+        WorkExperience.verification_status,
+        WorkExperience.confirmed_at,
+        WorkExperience.created_at,
+        WorkExperience.updated_at,
+    )
+    proj_cols = (
+        ProfessionalProject.id,
+        ProfessionalProject.user_id,
+        ProfessionalProject.name,
+        ProfessionalProject.description,
+        ProfessionalProject.role,
+        ProfessionalProject.technologies,
+        ProfessionalProject.links,
+        ProfessionalProject.verified_results,
+        ProfessionalProject.verification_status,
+        ProfessionalProject.confirmed_at,
+        ProfessionalProject.created_at,
+        ProfessionalProject.updated_at,
+    )
+    edu_cols = (
+        Education.id,
+        Education.user_id,
+        Education.institution,
+        Education.course,
+        Education.field_of_study,
+        Education.current_semester,
+        Education.start_date,
+        Education.expected_graduation_date,
+        Education.education_status,
+        Education.verification_status,
+        Education.confirmed_at,
+        Education.created_at,
+        Education.updated_at,
+    )
+    skill_cols = (
+        Skill.id,
+        Skill.user_id,
+        Skill.name,
+        Skill.category,
+        Skill.proficiency_level,
+        Skill.notes,
+        Skill.verification_status,
+        Skill.confirmed_at,
+        Skill.created_at,
+        Skill.updated_at,
+    )
+    lang_cols = (
+        Language.id,
+        Language.user_id,
+        Language.language_name,
+        Language.proficiency_level,
+        Language.cefr_level,
+        Language.verification_status,
+        Language.confirmed_at,
+        Language.created_at,
+        Language.updated_at,
+    )
+
+    def _to_prof(r: Any) -> ProjectedProfileRecord:
+        return ProjectedProfileRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            full_name=r["full_name"],
+            professional_email=r["professional_email"],
+            phone=r["phone"],
+            city=r["city"],
+            state=r["state"],
+            country=r["country"],
+            professional_title=r["professional_title"],
+            professional_summary=r["professional_summary"],
+            linkedin_url=r["linkedin_url"],
+            github_url=r["github_url"],
+            portfolio_url=r["portfolio_url"],
+            preferences=copy.deepcopy(r["preferences"]) if isinstance(r["preferences"], dict) else {},
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    def _to_exp(r: Any) -> ProjectedExperienceRecord:
+        return ProjectedExperienceRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            company=r["company"],
+            role=r["role"],
+            description=r["description"],
+            start_date=r["start_date"],
+            end_date=r["end_date"],
+            is_current=bool(r["is_current"]),
+            experience_type=r["experience_type"],
+            technologies=list(r["technologies"] or []),
+            related_skills=list(r["related_skills"] or []),
+            eligible_as_target_role=bool(r["eligible_as_target_role"]),
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    def _to_proj(r: Any) -> ProjectedProjectRecord:
+        return ProjectedProjectRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            name=r["name"],
+            description=r["description"],
+            role=r["role"],
+            technologies=list(r["technologies"] or []),
+            links=dict(r["links"] or {}),
+            verified_results=r["verified_results"],
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    def _to_edu(r: Any) -> ProjectedEducationRecord:
+        return ProjectedEducationRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            institution=r["institution"],
+            course=r["course"],
+            field_of_study=r["field_of_study"],
+            current_semester=r["current_semester"],
+            start_date=r["start_date"],
+            expected_graduation_date=r["expected_graduation_date"],
+            education_status=r["education_status"],
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    def _to_skill(r: Any) -> ProjectedSkillRecord:
+        return ProjectedSkillRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            name=r["name"],
+            category=r["category"],
+            proficiency_level=r["proficiency_level"],
+            notes=r["notes"],
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    def _to_lang(r: Any) -> ProjectedLanguageRecord:
+        return ProjectedLanguageRecord(
+            id=r["id"],
+            user_id=r["user_id"],
+            language_name=r["language_name"],
+            proficiency_level=r["proficiency_level"],
+            cefr_level=r["cefr_level"],
+            verification_status=r["verification_status"],
+            confirmed_at=r["confirmed_at"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+
+    exp_order = (
+        WorkExperience.is_current.desc(),
+        WorkExperience.start_date.desc().nullslast(),
+        WorkExperience.created_at.desc(),
+    )
+
+    with db.no_autoflush:
+        # 1. Consultas SQL filtrando estritamente verification_status == 'confirmed' no banco
+        c_prof_row = (
+            db.execute(
+                select(*prof_cols).where(
+                    ProfessionalProfile.user_id == user_id,
+                    ProfessionalProfile.verification_status == confirmed_val,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        c_exp_rows = (
+            db.execute(
+                select(*exp_cols)
+                .where(
+                    WorkExperience.user_id == user_id,
+                    WorkExperience.verification_status == confirmed_val,
+                )
+                .order_by(*exp_order)
+            )
+            .mappings()
+            .all()
+        )
+        c_proj_rows = (
+            db.execute(
+                select(*proj_cols)
+                .where(
+                    ProfessionalProject.user_id == user_id,
+                    ProfessionalProject.verification_status == confirmed_val,
+                )
+                .order_by(ProfessionalProject.created_at.desc())
+            )
+            .mappings()
+            .all()
+        )
+        c_edu_rows = (
+            db.execute(
+                select(*edu_cols)
+                .where(
+                    Education.user_id == user_id,
+                    Education.verification_status == confirmed_val,
+                )
+                .order_by(Education.created_at.desc())
+            )
+            .mappings()
+            .all()
+        )
+        c_skill_rows = (
+            db.execute(
+                select(*skill_cols)
+                .where(
+                    Skill.user_id == user_id,
+                    Skill.verification_status == confirmed_val,
+                )
+                .order_by(Skill.category.asc(), Skill.name.asc())
+            )
+            .mappings()
+            .all()
+        )
+        c_lang_rows = (
+            db.execute(
+                select(*lang_cols)
+                .where(
+                    Language.user_id == user_id,
+                    Language.verification_status == confirmed_val,
+                )
+                .order_by(Language.created_at.asc())
+            )
+            .mappings()
+            .all()
+        )
+
+        # 2. Consultas SQL separadas para avisos de itens não confirmados (unconfirmed_warnings)
+        u_prof_row = (
+            db.execute(
+                select(*prof_cols).where(
+                    ProfessionalProfile.user_id == user_id,
+                    ProfessionalProfile.verification_status != confirmed_val,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        u_exp_rows = (
+            db.execute(
+                select(*exp_cols)
+                .where(
+                    WorkExperience.user_id == user_id,
+                    WorkExperience.verification_status != confirmed_val,
+                )
+                .order_by(*exp_order)
+            )
+            .mappings()
+            .all()
+        )
+        u_proj_rows = (
+            db.execute(
+                select(*proj_cols)
+                .where(
+                    ProfessionalProject.user_id == user_id,
+                    ProfessionalProject.verification_status != confirmed_val,
+                )
+                .order_by(ProfessionalProject.created_at.desc())
+            )
+            .mappings()
+            .all()
+        )
+        u_edu_rows = (
+            db.execute(
+                select(*edu_cols)
+                .where(
+                    Education.user_id == user_id,
+                    Education.verification_status != confirmed_val,
+                )
+                .order_by(Education.created_at.desc())
+            )
+            .mappings()
+            .all()
+        )
+        u_skill_rows = (
+            db.execute(
+                select(*skill_cols)
+                .where(
+                    Skill.user_id == user_id,
+                    Skill.verification_status != confirmed_val,
+                )
+                .order_by(Skill.category.asc(), Skill.name.asc())
+            )
+            .mappings()
+            .all()
+        )
+        u_lang_rows = (
+            db.execute(
+                select(*lang_cols)
+                .where(
+                    Language.user_id == user_id,
+                    Language.verification_status != confirmed_val,
+                )
+                .order_by(Language.created_at.asc())
+            )
+            .mappings()
+            .all()
+        )
+
+    return (
+        _to_prof(c_prof_row) if c_prof_row is not None else None,
+        [_to_exp(r) for r in c_exp_rows],
+        [_to_proj(r) for r in c_proj_rows],
+        [_to_edu(r) for r in c_edu_rows],
+        [_to_skill(r) for r in c_skill_rows],
+        [_to_lang(r) for r in c_lang_rows],
+        _to_prof(u_prof_row) if u_prof_row is not None else None,
+        [_to_exp(r) for r in u_exp_rows],
+        [_to_proj(r) for r in u_proj_rows],
+        [_to_edu(r) for r in u_edu_rows],
+        [_to_skill(r) for r in u_skill_rows],
+        [_to_lang(r) for r in u_lang_rows],
+    )
+
+
 @dataclass
 class AuthorizedFactBundle:
     opportunity_context: OpportunityContextInfo
-    profile: ProfessionalProfile | None
-    experiences: list[WorkExperience]
-    projects: list[ProfessionalProject]
-    educations: list[Education]
-    skills: list[Skill]
-    languages: list[Language]
+    profile: ProjectedProfileRecord | ProfessionalProfile | None
+    experiences: list[ProjectedExperienceRecord] | list[WorkExperience]
+    projects: list[ProjectedProjectRecord] | list[ProfessionalProject]
+    educations: list[ProjectedEducationRecord] | list[Education]
+    skills: list[ProjectedSkillRecord] | list[Skill]
+    languages: list[ProjectedLanguageRecord] | list[Language]
     used_facts: list[SelectedFactReference]
     unconfirmed_warnings: list[UnconfirmedWarningItem]
     missing_requirements: list[MissingRequirementItem]
@@ -98,8 +745,8 @@ def _matches_requirement(haystack: str, requirement: str) -> bool:
 
 
 def _extract_requirement_pool(
-    opportunity: Opportunity | None,
-    application: Application | None,
+    opportunity: ProjectedOpportunityRecord | Opportunity | None,
+    application: ProjectedApplicationRecord | Application | None,
 ) -> tuple[OpportunityContextInfo, list[tuple[str, str]]]:
     """Extrai requisitos normalizados tratando texto externo apenas como dado de busca."""
     target_opp = opportunity or (application.opportunity if application else None)
@@ -214,7 +861,9 @@ def _format_period_label(
     return ""
 
 
-def _build_contact_preview(confirmed_profile: ProfessionalProfile | None) -> ContactPreviewInfo:
+def _build_contact_preview(
+    confirmed_profile: ProjectedProfileRecord | ProfessionalProfile | None,
+) -> ContactPreviewInfo:
     if confirmed_profile is None:
         return ContactPreviewInfo(
             profile_confirmed=False,
@@ -287,7 +936,7 @@ def _profile_target_areas(profile: Any) -> list[str]:
     return collected
 
 
-def _exp_haystack(exp: WorkExperience) -> str:
+def _exp_haystack(exp: ProjectedExperienceRecord | WorkExperience) -> str:
     parts = [
         exp.role,
         exp.company,
@@ -298,7 +947,7 @@ def _exp_haystack(exp: WorkExperience) -> str:
     return _norm_text(" ".join(p for p in parts if p))
 
 
-def _project_haystack(proj: ProfessionalProject) -> str:
+def _project_haystack(proj: ProjectedProjectRecord | ProfessionalProject) -> str:
     parts = [
         proj.name,
         proj.role,
@@ -309,12 +958,12 @@ def _project_haystack(proj: ProfessionalProject) -> str:
     return _norm_text(" ".join(p for p in parts if p))
 
 
-def _edu_haystack(edu: Education) -> str:
+def _edu_haystack(edu: ProjectedEducationRecord | Education) -> str:
     parts = [edu.course, edu.field_of_study, edu.institution]
     return _norm_text(" ".join(p for p in parts if p))
 
 
-def _skill_haystack(skill: Skill) -> str:
+def _skill_haystack(skill: ProjectedSkillRecord | Skill) -> str:
     parts = [skill.name, skill.category, skill.notes]
     return _norm_text(" ".join(p for p in parts if p))
 
@@ -323,45 +972,43 @@ def build_authorized_fact_bundle(
     db: Session,
     user: User,
     *,
-    opportunity: Opportunity | None = None,
-    application: Application | None = None,
+    opportunity: ProjectedOpportunityRecord | Opportunity | None = None,
+    application: ProjectedApplicationRecord | Application | None = None,
     target_language: TargetLanguage = "pt-BR",
 ) -> AuthorizedFactBundle:
-    """Seleciona exclusivamente fatos confirmados para currículo e analisa lacunas."""
-    bundle = get_full_profile_bundle(db, user)
-    opp_ctx, req_pool = _extract_requirement_pool(opportunity, application)
+    """Seleciona exclusivamente fatos confirmados persistidos no banco (via projeção escalar) e analisa lacunas."""
+    (
+        confirmed_profile,
+        confirmed_experiences,
+        confirmed_projects,
+        confirmed_educations,
+        confirmed_skills,
+        confirmed_languages,
+        unconfirmed_profile,
+        unconfirmed_experiences,
+        unconfirmed_projects,
+        unconfirmed_educations,
+        unconfirmed_skills,
+        unconfirmed_languages,
+    ) = _project_persisted_profile_entities(db, user.id)
 
-    confirmed_profile = (
-        bundle.profile
-        if bundle.profile and bundle.profile.verification_status == VerificationStatus.CONFIRMED.value
-        else None
-    )
+    resolved_opp: ProjectedOpportunityRecord | Opportunity | None = opportunity
+    if opportunity is not None and not isinstance(opportunity, ProjectedOpportunityRecord):
+        opp_id = getattr(opportunity, "id", None)
+        if opp_id is not None:
+            persisted_opp = project_persisted_opportunity_for_user(db, user.id, opp_id)
+            if persisted_opp is not None:
+                resolved_opp = persisted_opp
 
-    confirmed_experiences = [
-        item
-        for item in bundle.experiences
-        if item.verification_status == VerificationStatus.CONFIRMED.value
-    ]
-    confirmed_projects = [
-        item
-        for item in bundle.projects
-        if item.verification_status == VerificationStatus.CONFIRMED.value
-    ]
-    confirmed_educations = [
-        item
-        for item in bundle.educations
-        if item.verification_status == VerificationStatus.CONFIRMED.value
-    ]
-    confirmed_skills = [
-        item
-        for item in bundle.skills
-        if item.verification_status == VerificationStatus.CONFIRMED.value
-    ]
-    confirmed_languages = [
-        item
-        for item in bundle.languages
-        if item.verification_status == VerificationStatus.CONFIRMED.value
-    ]
+    resolved_app: ProjectedApplicationRecord | Application | None = application
+    if application is not None and not isinstance(application, ProjectedApplicationRecord):
+        app_id = getattr(application, "id", None)
+        if app_id is not None:
+            persisted_app = project_persisted_application_for_user(db, user.id, app_id)
+            if persisted_app is not None:
+                resolved_app = persisted_app
+
+    opp_ctx, req_pool = _extract_requirement_pool(resolved_opp, resolved_app)
 
     # Ranqueamento determinístico separado (experiências nunca se misturam com projetos)
     matched_req_map: dict[str, list[str]] = {}
@@ -403,7 +1050,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    exp_scored: list[tuple[tuple[int, int, str], WorkExperience, int, list[str]]] = []
+    exp_scored: list[tuple[tuple[int, int, str], ProjectedExperienceRecord, int, list[str]]] = []
     for exp in confirmed_experiences:
         haystack = _exp_haystack(exp)
         score, matched = _score_matches(haystack, req_pool)
@@ -440,7 +1087,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    proj_scored: list[tuple[tuple[int, str], ProfessionalProject, int, list[str]]] = []
+    proj_scored: list[tuple[tuple[int, str], ProjectedProjectRecord, int, list[str]]] = []
     for proj in confirmed_projects:
         haystack = _project_haystack(proj)
         score, matched = _score_matches(haystack, req_pool)
@@ -470,7 +1117,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    edu_scored: list[tuple[tuple[int, int, str], Education, int, list[str]]] = []
+    edu_scored: list[tuple[tuple[int, int, str], ProjectedEducationRecord, int, list[str]]] = []
     for edu in confirmed_educations:
         haystack = _edu_haystack(edu)
         score, matched = _score_matches(haystack, req_pool)
@@ -506,7 +1153,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    skill_scored: list[tuple[tuple[int, int, str], Skill, int, list[str]]] = []
+    skill_scored: list[tuple[tuple[int, int, str], ProjectedSkillRecord, int, list[str]]] = []
     for skill in confirmed_skills:
         haystack = _skill_haystack(skill)
         score, matched = _score_matches(haystack, req_pool)
@@ -532,7 +1179,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    lang_scored: list[tuple[tuple[int, int, str], Language]] = []
+    lang_scored: list[tuple[tuple[int, int, str], ProjectedLanguageRecord]] = []
     for lang in confirmed_languages:
         lang_norm = lang.language_name.strip().lower()
         target_bonus = 0
@@ -573,15 +1220,15 @@ def build_authorized_fact_bundle(
     unconfirmed_warnings: list[UnconfirmedWarningItem] = []
     unconfirmed_covered_reqs: set[str] = set()
 
-    if bundle.profile and bundle.profile.verification_status != VerificationStatus.CONFIRMED.value:
-        status_val = bundle.profile.verification_status
+    if unconfirmed_profile is not None:
+        status_val = unconfirmed_profile.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         prof_haystack = _norm_text(
             " ".join(
                 p
                 for p in [
-                    bundle.profile.professional_title,
-                    bundle.profile.professional_summary,
+                    unconfirmed_profile.professional_title,
+                    unconfirmed_profile.professional_summary,
                 ]
                 if p
             )
@@ -592,17 +1239,17 @@ def build_authorized_fact_bundle(
         unconfirmed_warnings.append(
             UnconfirmedWarningItem(
                 entity_type="profile",
-                entity_id=bundle.profile.id,
+                entity_id=unconfirmed_profile.id,
                 verification_status=status_val,  # type: ignore[arg-type]
                 label="Identidade profissional e contatos",
                 summary=sanitize_plain_text(
-                    bundle.profile.professional_title or bundle.profile.full_name,
+                    unconfirmed_profile.professional_title or unconfirmed_profile.full_name,
                     max_length=160,
                 )
                 or "Dados básicos do perfil",
                 details={
-                    "professional_title": sanitize_plain_text(bundle.profile.professional_title, max_length=120),
-                    "has_summary": bool(bundle.profile.professional_summary),
+                    "professional_title": sanitize_plain_text(unconfirmed_profile.professional_title, max_length=120),
+                    "has_summary": bool(unconfirmed_profile.professional_summary),
                 },
                 reason=(
                     "Perfil principal aguarda validação para liberar cabeçalho/contatos e título profissional."
@@ -614,9 +1261,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    for exp in bundle.experiences:
-        if exp.verification_status == VerificationStatus.CONFIRMED.value:
-            continue
+    for exp in unconfirmed_experiences:
         status_val = exp.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         _, matched = _score_matches(_exp_haystack(exp), req_pool)
@@ -647,9 +1292,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    for proj in bundle.projects:
-        if proj.verification_status == VerificationStatus.CONFIRMED.value:
-            continue
+    for proj in unconfirmed_projects:
         status_val = proj.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         _, matched = _score_matches(_project_haystack(proj), req_pool)
@@ -681,9 +1324,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    for edu in bundle.educations:
-        if edu.verification_status == VerificationStatus.CONFIRMED.value:
-            continue
+    for edu in unconfirmed_educations:
         status_val = edu.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         _, matched = _score_matches(_edu_haystack(edu), req_pool)
@@ -708,9 +1349,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    for skill in bundle.skills:
-        if skill.verification_status == VerificationStatus.CONFIRMED.value:
-            continue
+    for skill in unconfirmed_skills:
         status_val = skill.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         _, matched = _score_matches(_skill_haystack(skill), req_pool)
@@ -739,9 +1378,7 @@ def build_authorized_fact_bundle(
             )
         )
 
-    for lang in bundle.languages:
-        if lang.verification_status == VerificationStatus.CONFIRMED.value:
-            continue
+    for lang in unconfirmed_languages:
         status_val = lang.verification_status
         can_batch = status_val == VerificationStatus.PENDING_VALIDATION.value
         unconfirmed_warnings.append(
@@ -815,9 +1452,7 @@ def build_authorized_fact_bundle(
                         "(eligible_as_target_role=False); projetos e habilidades sustentam a candidatura sem mascarar experiência prévia."
                     ),
                     covered_by_unconfirmed=any(
-                        exp.eligible_as_target_role
-                        for exp in bundle.experiences
-                        if exp.verification_status != VerificationStatus.CONFIRMED.value
+                        exp.eligible_as_target_role for exp in unconfirmed_experiences
                     ),
                 )
             )
