@@ -12,11 +12,11 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 - **Proteção Compartilhada de PII e Conteúdo Ativo (`backend/app/services/materials/ai/safety.py`):**
   - Detectores e redator fail-closed para e-mails diretos e ofuscados (`[at]`, `(at)`, ` at `, `[dot]`, ` dot `), telefones brasileiros e internacionais (incluindo DDD `19`, `20` e `+55 11 98765-4321`), URLs com e sem protocolo (`github.com/user`, `example.com`), links Markdown (inclusive multilinha), perfis sociais rotulados, CPF, CEP, padrões de endereço residencial, HTML/SVG, atributos `on*` e esquemas ativos (`javascript:`, `vbscript:`, `data:`, `mailto:`, `tel:`).
-- **Contexto Factual Autorizado, Autorização e Orçamento (`backend/app/services/materials/ai/context_builder.py`, `contracts.py`):**
-  - Exceção `AIContextAuthorizationError` e revalidação explícita contra o banco de dados de `application` (`application.user_id == user.id`), `opportunity` (pública `source_id IS NOT NULL` ou privada própria `created_by_user_id == user.id`) e consistência `application.opportunity_id == opportunity.id`.
+- **Contexto Factual Autorizado, Autorização e Orçamento (`backend/app/services/materials/ai/context_builder.py`, `material_service.py`, `contracts.py`):**
+  - Exceção `AIContextAuthorizationError` e revalidação explícita contra o banco de dados de `application` (`application.user_id == user.id`), `opportunity` (pública `source_id IS NOT NULL` ou privada própria `created_by_user_id == user.id`) e consistência `application.opportunity_id == opportunity.id`, executada sob `db.no_autoflush` com `execution_options(populate_existing=True)` para impedir contaminação por instâncias ORM adulteradas no Identity Map (tanto em `autoflush=False` quanto em `autoflush=True`) sem persistir alterações pendentes.
   - Reutilização direta de `build_authorized_fact_bundle` (`fact_selector.py`) sobre o estado atual do banco, aceitando exclusivamente fatos com `verification_status == 'confirmed'`.
   - Redação fail-closed de PII em todos os campos de texto livre (`professional_summary`, descrições, `verified_results`, notas e campos da oportunidade), além de manter `period=None` para projetos sem data factual confirmada (sem inferir `updated_at.year`).
-  - Sanitização e truncamento seguro de labels (`<= 200` caracteres) em `WorkExperience` e `Education`, e orçamento determinístico agregado (`max_facts=60`, `max_payload_bytes=24_000`) com `ContextTruncationMetadata` restrito ao backend.
+  - Sanitização e truncamento seguro de labels (`<= 200` caracteres) em `WorkExperience` e `Education`, e orçamento determinístico agregado com teto absoluto (`max_facts <= 60`, `1.024 <= max_payload_bytes <= 24.000` bytes UTF-8) com `ContextTruncationMetadata` restrito ao backend.
 - **Contratos e Schemas Estruturados Pydantic v2 (`backend/app/services/materials/ai/ai_schemas.py`):**
   - `AuthorizedAIContext`, `AuthorizedFactItem`, `SanitizedOpportunityContext`, `ContextTruncationMetadata`, `AISuggestionItem` e `AIMaterialEnhanceOutput` com `extra="forbid"`.
   - `user_id` e `truncation_metadata` marcados com `Field(exclude=True)` e método dedicado `to_provider_payload()` garantindo ausência de `user_id` em toda serialização externa.
@@ -32,8 +32,8 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
   - Mantida a correção determinística em `test_tc441_07` passando `now_fn=lambda: t_crash` na chamada inicial de `execute_guarded_ai_call` para evitar flakiness de virada de dia UTC contra `t_crash` fixo (confirmada pela auditoria independente como legítima — achado B-02).
 
 ### Testes
-- `tests/test_ai_grounding_phase0442.py`: 96 casos de teste cobrindo todas as sondas de regressão (A-01 a A-04, M-01 a M-05, 5 materiais, isolamento, privacidade e integração com `MockLLMProvider`/`DisabledLLMProvider`).
-- Suíte completa do backend: **214/214 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+- `tests/test_ai_grounding_phase0442.py`: 105 casos de teste cobrindo todas as sondas de regressão (A-01 a A-04, M-01 a M-05, NC-01 com Identity Map e `autoflush=False`/`True`, NC-02 com teto absoluto de 24.000 bytes, 5 materiais, isolamento, privacidade e integração com `MockLLMProvider`/`DisabledLLMProvider`).
+- Suíte completa do backend: **223/223 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
 - Suíte do frontend: **15/15 testes passando** no Vitest e `tsc --noEmit` sem erros.
 
 ---

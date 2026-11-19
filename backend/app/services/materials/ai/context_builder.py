@@ -62,47 +62,62 @@ def _authorize_target_entities(
     """
     verified_app: Application | None = None
     verified_opp: Opportunity | None = None
+    in_memory_app_opp_id = application.opportunity_id if application is not None else None
 
-    if application is not None:
-        if application.user_id != user.id:
-            raise AIContextAuthorizationError(
-                "Candidatura não autorizada para o usuário autenticado."
-            )
-        try:
-            verified_app = _get_user_application(db, user, application.id)
-        except MaterialNotFoundError as exc:
-            raise AIContextAuthorizationError(
-                "Candidatura não encontrada ou não autorizada para o usuário autenticado."
-            ) from exc
+    with db.no_autoflush:
+        if application is not None:
+            if application.user_id != user.id:
+                raise AIContextAuthorizationError(
+                    "Candidatura não autorizada para o usuário autenticado."
+                )
+            try:
+                verified_app = _get_user_application(db, user, application.id)
+            except MaterialNotFoundError as exc:
+                raise AIContextAuthorizationError(
+                    "Candidatura não encontrada ou não autorizada para o usuário autenticado."
+                ) from exc
 
-    if opportunity is not None:
-        is_public = opportunity.source_id is not None
-        is_own_private = (
-            opportunity.source_id is None and opportunity.created_by_user_id == user.id
-        )
-        if not (is_public or is_own_private):
-            raise AIContextAuthorizationError(
-                "Oportunidade não autorizada para o usuário autenticado."
-            )
-        try:
-            verified_opp = _get_opportunity(db, user, opportunity.id)
-        except MaterialNotFoundError as exc:
-            raise AIContextAuthorizationError(
-                "Oportunidade não encontrada ou não autorizada para o usuário autenticado."
-            ) from exc
+            # Defesa adicional (D3): se a instância em memória havia sido adulterada para apontar
+            # para uma oportunidade não autorizada para o usuário, bloqueia explicitamente.
+            if (
+                in_memory_app_opp_id is not None
+                and in_memory_app_opp_id != verified_app.opportunity_id
+            ):
+                try:
+                    _get_opportunity(db, user, in_memory_app_opp_id)
+                except MaterialNotFoundError as exc:
+                    raise AIContextAuthorizationError(
+                        "A oportunidade referenciada pela candidatura não está autorizada para este usuário."
+                    ) from exc
 
-    if verified_app is not None and verified_opp is not None:
-        if verified_app.opportunity_id != verified_opp.id:
-            raise AIContextAuthorizationError(
-                "Inconsistência de contexto: a candidatura informada não corresponde à oportunidade fornecida."
+        if opportunity is not None:
+            is_public = opportunity.source_id is not None
+            is_own_private = (
+                opportunity.source_id is None and opportunity.created_by_user_id == user.id
             )
-    elif verified_app is not None and verified_app.opportunity_id is not None:
-        try:
-            verified_opp = _get_opportunity(db, user, verified_app.opportunity_id)
-        except MaterialNotFoundError as exc:
-            raise AIContextAuthorizationError(
-                "A oportunidade vinculada à candidatura não está autorizada para este usuário."
-            ) from exc
+            if not (is_public or is_own_private):
+                raise AIContextAuthorizationError(
+                    "Oportunidade não autorizada para o usuário autenticado."
+                )
+            try:
+                verified_opp = _get_opportunity(db, user, opportunity.id)
+            except MaterialNotFoundError as exc:
+                raise AIContextAuthorizationError(
+                    "Oportunidade não encontrada ou não autorizada para o usuário autenticado."
+                ) from exc
+
+        if verified_app is not None and verified_opp is not None:
+            if verified_app.opportunity_id != verified_opp.id:
+                raise AIContextAuthorizationError(
+                    "Inconsistência de contexto: a candidatura informada não corresponde à oportunidade fornecida."
+                )
+        elif verified_app is not None and verified_app.opportunity_id is not None:
+            try:
+                verified_opp = _get_opportunity(db, user, verified_app.opportunity_id)
+            except MaterialNotFoundError as exc:
+                raise AIContextAuthorizationError(
+                    "A oportunidade vinculada à candidatura não está autorizada para este usuário."
+                ) from exc
 
     return verified_opp, verified_app
 
@@ -164,7 +179,7 @@ def build_authorized_ai_context(
         )
 
     effective_max_facts = max(1, min(max_facts, DEFAULT_MAX_FACTS))
-    effective_max_bytes = max(1024, max_payload_bytes)
+    effective_max_bytes = max(1024, min(max_payload_bytes, DEFAULT_MAX_PAYLOAD_BYTES))
 
     verified_opp, verified_app = _authorize_target_entities(
         db,
@@ -173,13 +188,14 @@ def build_authorized_ai_context(
         application=application,
     )
 
-    bundle = build_authorized_fact_bundle(
-        db,
-        user,
-        opportunity=verified_opp,
-        application=verified_app,
-        target_language=target_language,
-    )
+    with db.no_autoflush:
+        bundle = build_authorized_fact_bundle(
+            db,
+            user,
+            opportunity=verified_opp,
+            application=verified_app,
+            target_language=target_language,
+        )
 
     user_id_str = str(user.id)
     pii_stats = {"pii_redacted": 0, "pii_omitted": 0}

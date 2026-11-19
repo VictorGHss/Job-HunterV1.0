@@ -163,8 +163,8 @@ class ContextTruncationMetadata(BaseModel):
     pii_redacted_fields_count: int = Field(default=0, ge=0)
     pii_omitted_fields_count: int = Field(default=0, ge=0)
     serialized_bytes: int = Field(default=0, ge=0)
-    max_facts_limit: int = Field(default=60, ge=1)
-    max_payload_bytes: int = Field(default=24_000, ge=1)
+    max_facts_limit: int = Field(default=60, ge=1, le=60)
+    max_payload_bytes: int = Field(default=24_000, ge=1, le=24_000)
 
 
 class AuthorizedFactItem(BaseModel):

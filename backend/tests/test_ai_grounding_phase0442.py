@@ -1301,3 +1301,279 @@ def test_f2_disabled_provider_remains_blocked() -> None:
     )
     with pytest.raises(AIDisabledError, match="desabilitado nesta instância"):
         disabled_provider.generate_structured(req)
+
+
+# ============================================================================
+# GRUPO G: NC-01 (IDENTITY MAP / AUTOFLUSH) E NC-02 (TETO ABSOLUTO DE 24 KB)
+# ============================================================================
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g1_nc01_identity_map_tampered_application_and_opportunity_revalidated_without_persisting(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-01 (Cenários A, B e C): Application e Opportunity adulteradas em memória refletem dados persistidos
+    tanto com autoflush=False quanto com autoflush=True, sem persistir alterações pendentes."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.application import Application
+    from app.models.opportunity import Opportunity
+    from app.models.user import User
+
+    # Seed em sessão separada e commitada
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user_a = create_user_account(
+            seed_db,
+            email=f"nc01_ab_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC01 AB",
+        )
+        _create_confirmed_rich_profile(seed_db, user_a.id)
+        opp_pub = _create_opportunity(
+            seed_db,
+            title="Vaga Pública Persistida Real",
+            company_name="Persistida Corp",
+            description="Descrição persistida original em Python e FastAPI.",
+            requirements=["Python", "FastAPI"],
+            technologies=["Python", "FastAPI", "PostgreSQL"],
+        )
+        opp_priv_a = _create_opportunity(
+            seed_db,
+            title="Vaga Privada A Diferente",
+            company_name="Privada A Ltda",
+            owner_user_id=user_a.id,
+        )
+        app_a = _create_application(seed_db, user_a.id, opp_pub)
+        user_a_id = user_a.id
+        opp_pub_id = opp_pub.id
+        opp_priv_a_id = opp_priv_a.id
+        app_a_id = app_a.id
+
+    # Execução em Session configurada com autoflush_enabled (False ou True)
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+    with WorkSession() as work_db:
+        user_loaded = work_db.get(User, user_a_id)
+        app_loaded = work_db.get(Application, app_a_id)
+        opp_loaded = work_db.get(Opportunity, opp_pub_id)
+        assert user_loaded is not None and app_loaded is not None and opp_loaded is not None
+
+        # Cenário A: adultera application.opportunity_id em memória para outra oportunidade do usuário
+        app_loaded.opportunity_id = opp_priv_a_id
+        ctx_a = build_authorized_ai_context(
+            work_db,
+            user_loaded,
+            material_type="cover_letter",
+            application=app_loaded,
+        )
+        assert ctx_a.opportunity is not None
+        assert ctx_a.opportunity.title == "Vaga Pública Persistida Real"
+        assert ctx_a.opportunity.company_name == "Persistida Corp"
+        # Instância revalidada no Identity Map com o valor persistido
+        assert app_loaded.opportunity_id == opp_pub_id
+
+        # Cenário B: adultera title, description, requirements e technologies da Opportunity em memória
+        opp_loaded.title = "TÍTULO ADULTERADO EM MEMÓRIA"
+        opp_loaded.description = "Descrição falsa injetada em memória."
+        opp_loaded.requirements = ["Rust", "Elixir"]
+        opp_loaded.technologies = ["Rust", "Elixir"]
+        ctx_b = build_authorized_ai_context(
+            work_db,
+            user_loaded,
+            material_type="resume",
+            opportunity=opp_loaded,
+        )
+        assert ctx_b.opportunity is not None
+        assert ctx_b.opportunity.title == "Vaga Pública Persistida Real"
+        assert "Rust" not in ctx_b.opportunity.all_technologies
+        assert "Elixir" not in ctx_b.opportunity.all_technologies
+        assert "Python" in ctx_b.opportunity.all_technologies
+        serialized_b = json.dumps(ctx_b.to_provider_payload(), ensure_ascii=False)
+        assert "TÍTULO ADULTERADO EM MEMÓRIA" not in serialized_b
+        assert "Rust" not in serialized_b
+        assert "Elixir" not in serialized_b
+
+        work_db.rollback()
+
+    # Cenário C: confirma em nova Session independente que nada foi persistido acidentalmente
+    with SeedSession() as verify_db:
+        persisted_app = verify_db.get(Application, app_a_id)
+        persisted_opp = verify_db.get(Opportunity, opp_pub_id)
+        assert persisted_app is not None and persisted_opp is not None
+        assert persisted_app.opportunity_id == opp_pub_id
+        assert persisted_opp.title == "Vaga Pública Persistida Real"
+        assert "Rust" not in (persisted_opp.technologies or [])
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g2_nc01_identity_map_privacy_d1_d2_d3_blocked_under_both_autoflush_modes(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-01 (Cenários D1, D2 e D3 + E): Adulteração em memória de privacidade/posse é sempre bloqueada
+    com autoflush=False e autoflush=True, sem persistência acidental."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.application import Application
+    from app.models.opportunity import Opportunity
+    from app.models.user import User
+
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user_a = create_user_account(
+            seed_db,
+            email=f"nc01_d_a_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC01 A",
+        )
+        user_b = create_user_account(
+            seed_db,
+            email=f"nc01_d_b_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC01 B",
+        )
+        _create_confirmed_rich_profile(seed_db, user_a.id)
+        _create_confirmed_rich_profile(seed_db, user_b.id)
+        opp_pub = _create_opportunity(seed_db, title="Pública D", company_name="Public D Corp")
+        opp_priv_b = _create_opportunity(
+            seed_db,
+            title="Privada Secreta B",
+            company_name="Secreta B Corp",
+            owner_user_id=user_b.id,
+        )
+        app_a = _create_application(seed_db, user_a.id, opp_pub)
+        app_b = _create_application(seed_db, user_b.id, opp_priv_b)
+        ids = (user_a.id, user_b.id, opp_pub.id, opp_pub.source_id, opp_priv_b.id, app_a.id, app_b.id)
+
+    user_a_id, user_b_id, opp_pub_id, pub_source_id, opp_priv_b_id, app_a_id, app_b_id = ids
+
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+
+    # D1: Opportunity privada de B adulterada em memória para parecer pública e própria de A
+    with WorkSession() as work_db:
+        user_a_loaded = work_db.get(User, user_a_id)
+        opp_priv_b_loaded = work_db.get(Opportunity, opp_priv_b_id)
+        assert user_a_loaded is not None and opp_priv_b_loaded is not None
+        opp_priv_b_loaded.source_id = pub_source_id
+        opp_priv_b_loaded.created_by_user_id = user_a_id
+        with pytest.raises(AIContextAuthorizationError):
+            build_authorized_ai_context(
+                work_db, user_a_loaded, material_type="resume", opportunity=opp_priv_b_loaded
+            )
+        work_db.rollback()
+
+    # D2: Application de B adulterada em memória para user_a
+    with WorkSession() as work_db:
+        user_a_loaded = work_db.get(User, user_a_id)
+        app_b_loaded = work_db.get(Application, app_b_id)
+        assert user_a_loaded is not None and app_b_loaded is not None
+        app_b_loaded.user_id = user_a_id
+        with pytest.raises(AIContextAuthorizationError):
+            build_authorized_ai_context(
+                work_db, user_a_loaded, material_type="resume", application=app_b_loaded
+            )
+        work_db.rollback()
+
+    # D3: Application própria de A adulterada em memória para apontar para oportunidade privada de B
+    with WorkSession() as work_db:
+        user_a_loaded = work_db.get(User, user_a_id)
+        app_a_loaded = work_db.get(Application, app_a_id)
+        assert user_a_loaded is not None and app_a_loaded is not None
+        app_a_loaded.opportunity_id = opp_priv_b_id
+        with pytest.raises(AIContextAuthorizationError):
+            build_authorized_ai_context(
+                work_db, user_a_loaded, material_type="resume", application=app_a_loaded
+            )
+        work_db.rollback()
+
+    # Confirma em nova Session independente que o estado persistido no banco não foi alterado
+    with SeedSession() as verify_db:
+        p_opp_b = verify_db.get(Opportunity, opp_priv_b_id)
+        p_app_a = verify_db.get(Application, app_a_id)
+        p_app_b = verify_db.get(Application, app_b_id)
+        assert p_opp_b is not None and p_app_a is not None and p_app_b is not None
+        assert p_opp_b.source_id is None
+        assert p_opp_b.created_by_user_id == user_b_id
+        assert p_app_a.opportunity_id == opp_pub_id
+        assert p_app_b.user_id == user_b_id
+
+
+@pytest.mark.parametrize(
+    ("requested_bytes", "expected_effective_bytes"),
+    [
+        (500, 1_024),
+        (1_024, 1_024),
+        (24_000, 24_000),
+        (100_000, 24_000),
+        (10_000_000, 24_000),
+    ],
+)
+def test_g3_nc02_absolute_payload_byte_ceiling_enforced_at_24000(
+    db_session: Session,
+    requested_bytes: int,
+    expected_effective_bytes: int,
+) -> None:
+    """NC-02: effective_max_bytes respeita piso de 1.024 e teto absoluto de 24.000 bytes sobre o payload real."""
+    user = create_user_account(
+        db_session,
+        email=f"nc02_{requested_bytes}@example.com",
+        password="ValidPassword123!",
+        display_name="Usuário NC02",
+    )
+    _create_confirmed_rich_profile(db_session, user.id)
+    opp = _create_opportunity(db_session, title="Vaga Orçamento", company_name="Budget Corp")
+
+    # Adiciona 50 skills grandes (~550 bytes cada) para ultrapassar amplamente 24.000 bytes
+    for i in range(50):
+        db_session.add(
+            Skill(
+                user_id=user.id,
+                name=f"SkillOrcamento{i:02d}",
+                category="Backend",
+                proficiency_level=SkillProficiency.ADVANCED.value,
+                notes=("Descrição técnica detalhada de sistemas distribuídos e APIs REST. " * 7)[:480],
+                verification_status=VerificationStatus.CONFIRMED.value,
+            )
+        )
+    db_session.commit()
+
+    ctx1 = build_authorized_ai_context(
+        db_session,
+        user,
+        material_type="resume",
+        opportunity=opp,
+        max_payload_bytes=requested_bytes,
+    )
+    ctx2 = build_authorized_ai_context(
+        db_session,
+        user,
+        material_type="resume",
+        opportunity=opp,
+        max_payload_bytes=requested_bytes,
+    )
+
+    meta = ctx1.truncation_metadata
+    assert meta.max_payload_bytes == expected_effective_bytes
+    assert meta.max_payload_bytes <= 24_000
+    assert len(ctx1.authorized_facts) <= 60
+    assert meta.truncated_by_byte_budget is True
+    assert meta.dropped_facts_count > 0
+
+    # Validação sobre a representação serializada exata enviada ao provider
+    provider_bytes = len(
+        json.dumps(ctx1.to_provider_payload(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    assert provider_bytes <= expected_effective_bytes
+    assert provider_bytes <= 24_000
+
+    # Seleção determinística entre chamadas consecutivas
+    assert [f.fact_key for f in ctx1.authorized_facts] == [f.fact_key for f in ctx2.authorized_facts]
