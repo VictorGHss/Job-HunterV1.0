@@ -8,37 +8,33 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ## [0.4.4.2] - 2026-11-19 — Subfase 04.4.2: Contexto Autorizado e Grounding Estruturado
 
-### Adicionado
+### Adicionado e Endurecido
 
-- **Contexto Factual Autorizado e Minimização de Dados (`backend/app/services/materials/ai/context_builder.py`):**
-  - Função `build_authorized_ai_context` que reutiliza diretamente a seleção factual canônica `build_authorized_fact_bundle` (em `fact_selector.py`), consultando o estado atual do banco relacional na sessão ativa sem depender de snapshots históricos defasados.
-  - Filtragem estrita por fatos confirmados: apenas entidades com `verification_status == 'confirmed'` entram no contexto da IA; itens em `draft`, `pending_validation` ou modificados sem nova confirmação são omitidos.
-  - Minimização rigorosa de privacidade (PII): omissão de telefones, e-mails pessoais, URLs de redes sociais/portfólio e localização residencial completa no payload da IA.
-  - Separação ontológica explícita: entidades `experience` (`company_or_institution` preenchido) e `project` (`company_or_institution=None`) mantêm distinção absoluta, impedindo apresentação cruzada indevida de projetos como empregos formais.
-  - Isolamento estrito de inquilino (`user_id`): verificação em profundidade garantindo que todas as entidades pertençam ao usuário autenticado.
-  - Higienização contra Prompt Injection: dados de oportunidades externas (`OpportunityContextInfo`) são tratados como metadados sanitizados somente leitura, sem execução de instruções externas ou tool-calling.
+- **Proteção Compartilhada de PII e Conteúdo Ativo (`backend/app/services/materials/ai/safety.py`):**
+  - Detectores e redator fail-closed para e-mails diretos e ofuscados (`[at]`, `(at)`, ` at `, `[dot]`, ` dot `), telefones brasileiros e internacionais (incluindo DDD `19`, `20` e `+55 11 98765-4321`), URLs com e sem protocolo (`github.com/user`, `example.com`), links Markdown (inclusive multilinha), perfis sociais rotulados, CPF, CEP, padrões de endereço residencial, HTML/SVG, atributos `on*` e esquemas ativos (`javascript:`, `vbscript:`, `data:`, `mailto:`, `tel:`).
+- **Contexto Factual Autorizado, Autorização e Orçamento (`backend/app/services/materials/ai/context_builder.py`, `contracts.py`):**
+  - Exceção `AIContextAuthorizationError` e revalidação explícita contra o banco de dados de `application` (`application.user_id == user.id`), `opportunity` (pública `source_id IS NOT NULL` ou privada própria `created_by_user_id == user.id`) e consistência `application.opportunity_id == opportunity.id`.
+  - Reutilização direta de `build_authorized_fact_bundle` (`fact_selector.py`) sobre o estado atual do banco, aceitando exclusivamente fatos com `verification_status == 'confirmed'`.
+  - Redação fail-closed de PII em todos os campos de texto livre (`professional_summary`, descrições, `verified_results`, notas e campos da oportunidade), além de manter `period=None` para projetos sem data factual confirmada (sem inferir `updated_at.year`).
+  - Sanitização e truncamento seguro de labels (`<= 200` caracteres) em `WorkExperience` e `Education`, e orçamento determinístico agregado (`max_facts=60`, `max_payload_bytes=24_000`) com `ContextTruncationMetadata` restrito ao backend.
 - **Contratos e Schemas Estruturados Pydantic v2 (`backend/app/services/materials/ai/ai_schemas.py`):**
-  - Modelos `AuthorizedAIContext`, `AuthorizedFactItem`, `SanitizedOpportunityContext`, `AISuggestionItem` e `AIMaterialEnhanceOutput` com `extra="forbid"`.
-  - Validação estrita de identificadores técnicos de slot e formato de chaves `<entity_type>:<id>`.
-  - Cobertura completa dos cinco materiais profissionais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`).
+  - `AuthorizedAIContext`, `AuthorizedFactItem`, `SanitizedOpportunityContext`, `ContextTruncationMetadata`, `AISuggestionItem` e `AIMaterialEnhanceOutput` com `extra="forbid"`.
+  - `user_id` e `truncation_metadata` marcados com `Field(exclude=True)` e método dedicado `to_provider_payload()` garantindo ausência de `user_id` em toda serialização externa.
+  - Allowlist explícita de `slot_id` por `material_type` (alinhada aos cinco `structured_content` reais, bloqueando metadados como `is_approved`, `origin`, `header.email` e `pending_fields`), rejeição de `slot_id` duplicado no lote e validação de consistência de entidade.
 - **Validador Conservador de Grounding All-or-Nothing (`backend/app/services/materials/ai/grounding_validator.py`):**
-  - Implementação de `StructuredGroundingValidator` e `GroundingValidationResult`.
-  - Princípio All-or-Nothing: qualquer falha em qualquer sugestão de um lote invalida o resultado global (`is_valid = False`).
-  - Verificação de referências: exige que cada sugestão cite chaves válidas (`cited_fact_keys`), pertencentes ao contexto autorizado do usuário e compatíveis com a tipologia do slot.
-  - Validação estrita de métricas: extração com word boundaries de números inteiros/decimais, percentuais (`%`, `por cento`, `percent`), valores monetários (`R$`, `$`, `USD`, `EUR`), durações (`anos`, `meses`, `years`) e numerais por extenso (PT-BR e EN), exigindo comprovação factual direta nos fatos citados correspondentes.
-  - Proibição absoluta de novas URLs, links em markdown `[texto](url)`, e-mails e números de telefone.
-  - Proibição de injeção de HTML e scripts (`<script>`, `<iframe>`, tags HTML, handlers de eventos).
-  - Bloqueio de autopromoção indevida de cargos (ex.: dev júnior autodenominando-se CTO ou Tech Lead sem fundamento factual).
-  - Bloqueio de tecnologias e ferramentas não confirmadas nas competências do usuário.
-  - Bloqueio de alegações infundadas de prêmios e patentes.
-  - Disclaimer epistemológico explícito documentando as limitações heurísticas da validação estrutural.
-- **Exportações do Pacote (`backend/app/services/materials/ai/__init__.py`):**
-  - Centralização de todas as novas classes, esquemas, construtor de contexto e validador no pacote `app.services.materials.ai`.
+  - Separação absoluta de origem: requisitos da vaga (`context.opportunity`) nunca autorizam competências do candidato.
+  - Vínculo estrito entre slots parametrizados e `fact_key` exata da entidade alvo, proibindo citações cruzadas, mistura projeto/emprego formal e citações irrelevantes (ex.: apenas idioma para alegação de engenharia de software).
+  - Grounding numérico tipado por categoria e família semântica (`percentage`, `currency`, `duration`, `year`, `tech_version`, `vague_scale`, `entity_count`, `raw_number`), com word boundaries estritos em numerais por extenso (PT-BR e EN) e sem derivar evidência da própria sugestão.
+  - Matcher dedicado de tecnologias (`extract_mentioned_technologies`) com fronteiras de token rígidas (`Java != JavaScript`), catálogo expandido (`MongoDB`, `Spark`, `PyTorch`, `SAP`, `Spring`, `Go`, `Node.js`, `Redis`, `React`, etc.) e desambiguação de palavras naturais em inglês (`go`, `rest`, `spring`, `redis`, `react`, `node`).
+  - Validação de empresas inventadas/trocadas, cargos/senioridades, verbos de liderança/propriedade e afirmações qualitativas exageradas sem evidência nos fatos citados.
+  - Transparência epistemológica formal explicitando os limites heurísticos e a necessidade permanente de revisão humana.
+- **Manutenção Determinística de Teste 04.4.1 (`backend/tests/test_ai_foundation_phase0441.py`):**
+  - Mantida a correção determinística em `test_tc441_07` passando `now_fn=lambda: t_crash` na chamada inicial de `execute_guarded_ai_call` para evitar flakiness de virada de dia UTC contra `t_crash` fixo (confirmada pela auditoria independente como legítima — achado B-02).
 
 ### Testes
-- `tests/test_ai_grounding_phase0442.py`: 43 testes cobrindo os Grupos A (Construção de Contexto), B (Esquemas de IA), C (Verificações de Chave e Referência), D (Métricas, Links, Injeções e Alucinações) e E (Integração com MockLLMProvider e DisabledLLMProvider).
-- Suíte completa de testes do backend: **161/161 testes passando** tanto no SQLite local quanto no PostgreSQL 16 via Docker Compose (`backend-test` / `jobhunter_test`).
-- Suíte do frontend: **15/15 testes passando** no vitest e verificação de tipos `tsc --noEmit` sem erros.
+- `tests/test_ai_grounding_phase0442.py`: 96 casos de teste cobrindo todas as sondas de regressão (A-01 a A-04, M-01 a M-05, 5 materiais, isolamento, privacidade e integração com `MockLLMProvider`/`DisabledLLMProvider`).
+- Suíte completa do backend: **214/214 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+- Suíte do frontend: **15/15 testes passando** no Vitest e `tsc --noEmit` sem erros.
 
 ---
 

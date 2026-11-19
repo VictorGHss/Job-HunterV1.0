@@ -4,8 +4,8 @@ Mantém separação estrita entre:
 1. Contrato agnóstico de provider (``LLMProvider``, ``DisabledLLMProvider``, ``MockLLMProvider``).
 2. Controle atômico de cotas, reservas e ledger sem conteúdo/PII (``quota_service``).
 3. Circuit breaker persistido em banco SQL compartilhável entre workers (``circuit_breaker``).
-4. Contexto autorizado e minimização de dados (``context_builder``).
-5. Schemas estruturados de sugestão Pydantic v2 (``ai_schemas``).
+4. Contexto autorizado, autorização de Application/Opportunity e minimização/redação de PII (``context_builder``, ``safety``).
+5. Schemas estruturados de sugestão Pydantic v2 com allowlist estrita de slots (``ai_schemas``).
 6. Validação conservadora e all-or-nothing de grounding (``grounding_validator``).
 """
 from app.services.materials.ai.ai_schemas import (
@@ -15,7 +15,12 @@ from app.services.materials.ai.ai_schemas import (
     AISuggestionItem,
     AuthorizedAIContext,
     AuthorizedFactItem,
+    ContextTruncationMetadata,
+    PARAMETERIZED_SLOT_PATTERNS_BY_MATERIAL,
+    ParsedSlotTarget,
+    STATIC_ALLOWED_SLOTS_BY_MATERIAL,
     SanitizedOpportunityContext,
+    parse_and_validate_slot_for_material,
 )
 from app.services.materials.ai.circuit_breaker import (
     CircuitBreakerSnapshot,
@@ -24,10 +29,15 @@ from app.services.materials.ai.circuit_breaker import (
     record_circuit_failure,
     record_circuit_success,
 )
-from app.services.materials.ai.context_builder import build_authorized_ai_context
+from app.services.materials.ai.context_builder import (
+    DEFAULT_MAX_FACTS,
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    build_authorized_ai_context,
+)
 from app.services.materials.ai.contracts import (
     AICircuitOpenError,
     AIConfigurationError,
+    AIContextAuthorizationError,
     AIDisabledError,
     AIFoundationError,
     AIQuotaExceededError,
@@ -50,7 +60,10 @@ from app.services.materials.ai.execution_guard import (
 )
 from app.services.materials.ai.grounding_validator import (
     GroundingValidationResult,
+    QuantitativeClaim,
     StructuredGroundingValidator,
+    extract_mentioned_technologies,
+    extract_quantitative_claims,
 )
 from app.services.materials.ai.providers import (
     DisabledLLMProvider,
@@ -69,10 +82,20 @@ from app.services.materials.ai.quota_service import (
     release_ai_quota_reservation,
     reserve_ai_quota,
 )
+from app.services.materials.ai.safety import (
+    REDACTED_TOKEN,
+    find_active_or_html_content,
+    find_emails,
+    find_markdown_links,
+    find_phones,
+    find_urls_or_domains,
+    redact_free_text_pii,
+)
 
 __all__ = [
     "AICircuitOpenError",
     "AIConfigurationError",
+    "AIContextAuthorizationError",
     "AIDisabledError",
     "AIFoundationError",
     "AIMaterialEnhanceOutput",
@@ -85,6 +108,9 @@ __all__ = [
     "AuthorizedAIContext",
     "AuthorizedFactItem",
     "CircuitBreakerSnapshot",
+    "ContextTruncationMetadata",
+    "DEFAULT_MAX_FACTS",
+    "DEFAULT_MAX_PAYLOAD_BYTES",
     "DisabledLLMProvider",
     "GroundingValidationResult",
     "GuardedAIExecutionResult",
@@ -99,8 +125,13 @@ __all__ = [
     "LedgerEntrySnapshot",
     "MockLLMProvider",
     "MockScenario",
+    "PARAMETERIZED_SLOT_PATTERNS_BY_MATERIAL",
+    "ParsedSlotTarget",
+    "QuantitativeClaim",
     "QuotaAvailability",
     "QuotaScopeLiteral",
+    "REDACTED_TOKEN",
+    "STATIC_ALLOWED_SLOTS_BY_MATERIAL",
     "SanitizedOpportunityContext",
     "StructuredGroundingValidator",
     "build_authorized_ai_context",
@@ -108,12 +139,21 @@ __all__ = [
     "confirm_ai_quota_usage",
     "execute_guarded_ai_call",
     "expire_abandoned_reservations",
+    "extract_mentioned_technologies",
+    "extract_quantitative_claims",
     "fail_ai_quota_usage",
+    "find_active_or_html_content",
+    "find_emails",
+    "find_markdown_links",
+    "find_phones",
+    "find_urls_or_domains",
     "get_circuit_state",
     "get_ledger_entry_for_user",
     "get_quota_availability",
+    "parse_and_validate_slot_for_material",
     "record_circuit_failure",
     "record_circuit_success",
+    "redact_free_text_pii",
     "release_ai_quota_reservation",
     "reserve_ai_quota",
     "resolve_llm_provider",

@@ -106,9 +106,9 @@ A fundação de IA permanece **desabilitada por padrão** (`AI_ASSISTED_ENABLED=
   - O estado do circuit breaker (`ai_circuit_breakers`) e os locks de reserva (`ai_quota_scope_locks`) são persistidos no PostgreSQL (`db`), garantindo comportamento idêntico com 1 ou múltiplos workers/réplicas do `backend` sem necessidade de Redis.
   - **Limitações operacionais explícitas:** como o circuit breaker reside no banco SQL, indisponibilidade do próprio PostgreSQL impede a abertura/consulta do circuito (falhando de forma fechada antes de qualquer chamada externa); além disso, se o processo encerrar abruptamente durante o único probe permitido em `half_open`, um novo probe aguarda a expiração de `AI_RESERVATION_TTL_SECONDS` (`60s`).
 - **Contexto Autorizado e Validação Estruturada de Grounding (Subfase 04.4.2):**
-  - O contexto serializado para IA (`AuthorizedAIContext`) é gerado sob demanda via `build_authorized_ai_context`, extraindo exclusivamente fatos com `verification_status == 'confirmed'` do banco atual e aplicando estrita minimização de dados (omissão de telefones, e-mails pessoais, links pessoais e endereços).
-  - A validação de saída via `StructuredGroundingValidator` aplica a política All-or-Nothing em memória sobre as sugestões geradas antes de qualquer consumo, garantindo que métricas, percentuais, moedas, anos, durações e tecnologias estejam diretamente comprovados nos fatos citados.
-  - Zero dependências de provedores de IA externos em produção: sem API keys ou tráfego de rede para terceiros.
+  - `build_authorized_ai_context` revalida autorização de `Application` e `Opportunity` no banco atual, extrai exclusivamente fatos `verification_status == 'confirmed'`, redige PII em campos de texto livre (com fallback fail-closed), exclui `user_id` e `truncation_metadata` da serialização externa (`to_provider_payload()`, `model_dump()`, `model_dump_json()`) e limita o contexto a um orçamento determinístico padrão de até `60` fatos e `24.000` bytes UTF-8.
+  - `StructuredGroundingValidator` opera em memória com política conservadora All-or-Nothing, exigindo allowlist de slots sem duplicidades, separação entre requisitos da vaga e fatos do candidato, grounding numérico categorizado e bloqueio de links/domínios, e-mails, telefones e conteúdo ativo. Revisão humana permanece obrigatória.
+  - Zero dependências de provedores de IA externos, sem alterações na migration `0011_ai_usage_ledger` e sem tráfego de rede para terceiros.
 
 ---
 

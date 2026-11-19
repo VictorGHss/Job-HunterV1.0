@@ -41,6 +41,10 @@ class AIConfigurationError(AIFoundationError):
     """Configuração inválida ou insegura de provider/ambiente."""
 
 
+class AIContextAuthorizationError(AIFoundationError):
+    """Violação de autorização ou consistência ao montar contexto autorizado de IA."""
+
+
 class AIQuotaExceededError(AIFoundationError):
     """Limite de requisições ou tokens excedido para o usuário ou instância."""
 
