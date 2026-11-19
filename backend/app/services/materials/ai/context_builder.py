@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -16,17 +16,17 @@ from app.services.materials.ai.ai_schemas import (
     AuthorizedFactItem,
     ContextTruncationMetadata,
     SanitizedOpportunityContext,
+    serialize_canonical_provider_payload,
 )
 from app.services.materials.ai.contracts import AIContextAuthorizationError
 from app.services.materials.ai.safety import redact_free_text_pii
 from app.services.materials.fact_selector import (
+    ProjectedApplicationRecord,
+    ProjectedOpportunityRecord,
     _format_period_label,
     build_authorized_fact_bundle,
-)
-from app.services.materials.material_service import (
-    MaterialNotFoundError,
-    _get_opportunity,
-    _get_user_application,
+    project_persisted_application_for_user,
+    project_persisted_opportunity_for_user,
 )
 from app.services.opportunities.sanitization import sanitize_plain_text
 
@@ -51,17 +51,17 @@ def _authorize_target_entities(
     *,
     opportunity: Opportunity | None,
     application: Application | None,
-) -> tuple[Opportunity | None, Application | None]:
-    """Revalida autorização de Application e Opportunity contra o banco atual.
+) -> tuple[ProjectedOpportunityRecord | None, ProjectedApplicationRecord | None]:
+    """Revalida autorização de Application e Opportunity contra o banco atual via projeção escalar.
 
-    Reutiliza a política canônica de `material_service.py`:
+    Não hidrata nem sobrescreve instâncias ORM presentes em `Session.identity_map` (NC-01 / NC-03):
     - `application` deve existir no banco e pertencer a `user.id`.
     - `opportunity` deve ser pública (`source_id IS NOT NULL`) ou privada do próprio `user.id`.
-    - Se ambos forem fornecidos, `application.opportunity_id` deve ser estritamente igual a `opportunity.id`.
-    - Se `application` referenciar uma oportunidade, essa oportunidade também é validada.
+    - Se ambos forem fornecidos, `application.opportunity_id` persistido deve ser igual a `opportunity.id`.
+    - Se `application` referenciar uma oportunidade, essa oportunidade também é validada no banco.
     """
-    verified_app: Application | None = None
-    verified_opp: Opportunity | None = None
+    verified_app: ProjectedApplicationRecord | None = None
+    verified_opp: ProjectedOpportunityRecord | None = None
     in_memory_app_opp_id = application.opportunity_id if application is not None else None
 
     with db.no_autoflush:
@@ -70,12 +70,13 @@ def _authorize_target_entities(
                 raise AIContextAuthorizationError(
                     "Candidatura não autorizada para o usuário autenticado."
                 )
-            try:
-                verified_app = _get_user_application(db, user, application.id)
-            except MaterialNotFoundError as exc:
+            verified_app = project_persisted_application_for_user(
+                db, user.id, application.id
+            )
+            if verified_app is None:
                 raise AIContextAuthorizationError(
                     "Candidatura não encontrada ou não autorizada para o usuário autenticado."
-                ) from exc
+                )
 
             # Defesa adicional (D3): se a instância em memória havia sido adulterada para apontar
             # para uma oportunidade não autorizada para o usuário, bloqueia explicitamente.
@@ -83,12 +84,15 @@ def _authorize_target_entities(
                 in_memory_app_opp_id is not None
                 and in_memory_app_opp_id != verified_app.opportunity_id
             ):
-                try:
-                    _get_opportunity(db, user, in_memory_app_opp_id)
-                except MaterialNotFoundError as exc:
+                if (
+                    project_persisted_opportunity_for_user(
+                        db, user.id, in_memory_app_opp_id
+                    )
+                    is None
+                ):
                     raise AIContextAuthorizationError(
                         "A oportunidade referenciada pela candidatura não está autorizada para este usuário."
-                    ) from exc
+                    )
 
         if opportunity is not None:
             is_public = opportunity.source_id is not None
@@ -99,12 +103,13 @@ def _authorize_target_entities(
                 raise AIContextAuthorizationError(
                     "Oportunidade não autorizada para o usuário autenticado."
                 )
-            try:
-                verified_opp = _get_opportunity(db, user, opportunity.id)
-            except MaterialNotFoundError as exc:
+            verified_opp = project_persisted_opportunity_for_user(
+                db, user.id, opportunity.id
+            )
+            if verified_opp is None:
                 raise AIContextAuthorizationError(
                     "Oportunidade não encontrada ou não autorizada para o usuário autenticado."
-                ) from exc
+                )
 
         if verified_app is not None and verified_opp is not None:
             if verified_app.opportunity_id != verified_opp.id:
@@ -112,12 +117,13 @@ def _authorize_target_entities(
                     "Inconsistência de contexto: a candidatura informada não corresponde à oportunidade fornecida."
                 )
         elif verified_app is not None and verified_app.opportunity_id is not None:
-            try:
-                verified_opp = _get_opportunity(db, user, verified_app.opportunity_id)
-            except MaterialNotFoundError as exc:
+            verified_opp = project_persisted_opportunity_for_user(
+                db, user.id, verified_app.opportunity_id
+            )
+            if verified_opp is None:
                 raise AIContextAuthorizationError(
                     "A oportunidade vinculada à candidatura não está autorizada para este usuário."
-                ) from exc
+                )
 
     return verified_opp, verified_app
 
@@ -143,10 +149,6 @@ def _clean_and_redact(
     if len(redacted) > max_length:
         return redacted[: max_length - 3].rstrip() + "..."
     return redacted
-
-
-def _estimate_json_bytes(obj: object) -> int:
-    return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def build_authorized_ai_context(
@@ -454,27 +456,35 @@ def build_authorized_ai_context(
         truncated_by_fact_limit = True
         dropped_by_type[item.entity_type] = dropped_by_type.get(item.entity_type, 0) + 1
 
-    # Aplicação do orçamento agregado em bytes UTF-8 sobre o payload final do provider
-    base_envelope = {
-        "material_type": material_type,
-        "target_language": target_language,
-        "candidate_confirmed_facts": [],
-        "target_opportunity_context": (
-            sanitized_opp.model_dump(mode="json") if sanitized_opp is not None else None
-        ),
-    }
-    current_bytes = _estimate_json_bytes(base_envelope)
+    # Aplicação do orçamento agregado em bytes UTF-8 sobre o payload canônico real do provider (NC-04)
+    opp_dump = sanitized_opp.model_dump(mode="json") if sanitized_opp is not None else None
     final_facts: list[AuthorizedFactItem] = []
+    final_facts_dumped: list[dict[str, Any]] = []
     truncated_by_byte_budget = False
 
     for fact in ordered_selected:
-        fact_bytes = _estimate_json_bytes(fact.model_dump(mode="json")) + 1
-        if current_bytes + fact_bytes > effective_max_bytes:
+        fact_dumped = fact.model_dump(mode="json")
+        candidate_payload = {
+            "material_type": material_type,
+            "target_language": target_language,
+            "candidate_confirmed_facts": [*final_facts_dumped, fact_dumped],
+            "target_opportunity_context": opp_dump,
+        }
+        candidate_bytes = len(serialize_canonical_provider_payload(candidate_payload))
+        if candidate_bytes > effective_max_bytes:
             truncated_by_byte_budget = True
             dropped_by_type[fact.entity_type] = dropped_by_type.get(fact.entity_type, 0) + 1
             continue
         final_facts.append(fact)
-        current_bytes += fact_bytes
+        final_facts_dumped.append(fact_dumped)
+
+    final_payload = {
+        "material_type": material_type,
+        "target_language": target_language,
+        "candidate_confirmed_facts": final_facts_dumped,
+        "target_opportunity_context": opp_dump,
+    }
+    exact_serialized_bytes = len(serialize_canonical_provider_payload(final_payload))
 
     dropped_total = total_available - len(final_facts)
     trunc_meta = ContextTruncationMetadata(
@@ -486,7 +496,7 @@ def build_authorized_ai_context(
         truncated_by_byte_budget=truncated_by_byte_budget,
         pii_redacted_fields_count=pii_stats["pii_redacted"],
         pii_omitted_fields_count=pii_stats["pii_omitted"],
-        serialized_bytes=current_bytes,
+        serialized_bytes=exact_serialized_bytes,
         max_facts_limit=effective_max_facts,
         max_payload_bytes=effective_max_bytes,
     )

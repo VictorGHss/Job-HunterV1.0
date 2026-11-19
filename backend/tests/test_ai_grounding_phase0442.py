@@ -1,7 +1,7 @@
 """Suíte de testes da Subfase 04.4.2 — Contexto autorizado e Grounding estruturado (hardened)."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 
 import pytest
@@ -1374,8 +1374,9 @@ def test_g1_nc01_identity_map_tampered_application_and_opportunity_revalidated_w
         assert ctx_a.opportunity is not None
         assert ctx_a.opportunity.title == "Vaga Pública Persistida Real"
         assert ctx_a.opportunity.company_name == "Persistida Corp"
-        # Instância revalidada no Identity Map com o valor persistido
-        assert app_loaded.opportunity_id == opp_pub_id
+        # NC-03: a instância ORM na sessão do chamador NÃO tem sua edição pendente descartada
+        assert app_loaded.opportunity_id == opp_priv_a_id
+        assert app_loaded in work_db.dirty
 
         # Cenário B: adultera title, description, requirements e technologies da Opportunity em memória
         opp_loaded.title = "TÍTULO ADULTERADO EM MEMÓRIA"
@@ -1393,10 +1394,13 @@ def test_g1_nc01_identity_map_tampered_application_and_opportunity_revalidated_w
         assert "Rust" not in ctx_b.opportunity.all_technologies
         assert "Elixir" not in ctx_b.opportunity.all_technologies
         assert "Python" in ctx_b.opportunity.all_technologies
-        serialized_b = json.dumps(ctx_b.to_provider_payload(), ensure_ascii=False)
+        serialized_b = ctx_b.to_provider_payload_json()
         assert "TÍTULO ADULTERADO EM MEMÓRIA" not in serialized_b
         assert "Rust" not in serialized_b
         assert "Elixir" not in serialized_b
+        # NC-03: estado dirty em memória preservado até decisão explícita da transação
+        assert opp_loaded.title == "TÍTULO ADULTERADO EM MEMÓRIA"
+        assert opp_loaded in work_db.dirty
 
         work_db.rollback()
 
@@ -1532,15 +1536,18 @@ def test_g3_nc02_absolute_payload_byte_ceiling_enforced_at_24000(
     _create_confirmed_rich_profile(db_session, user.id)
     opp = _create_opportunity(db_session, title="Vaga Orçamento", company_name="Budget Corp")
 
-    # Adiciona 50 skills grandes (~550 bytes cada) para ultrapassar amplamente 24.000 bytes
+    # Adiciona 50 skills grandes (~550 bytes cada) com acentuação e caracteres não-ASCII
     for i in range(50):
         db_session.add(
             Skill(
                 user_id=user.id,
-                name=f"SkillOrcamento{i:02d}",
-                category="Backend",
+                name=f"SkillOrçamentoNãoAscii{i:02d}",
+                category="Arquitetura & Integração",
                 proficiency_level=SkillProficiency.ADVANCED.value,
-                notes=("Descrição técnica detalhada de sistemas distribuídos e APIs REST. " * 7)[:480],
+                notes=(
+                    "Descrição técnica detalhada de sistemas distribuídos, observabilidade e "
+                    "autenticação segura com acentuação (ção, ã, é, í, ó, ú, ü) e APIs REST. " * 5
+                )[:480],
                 verification_status=VerificationStatus.CONFIRMED.value,
             )
         )
@@ -1568,12 +1575,766 @@ def test_g3_nc02_absolute_payload_byte_ceiling_enforced_at_24000(
     assert meta.truncated_by_byte_budget is True
     assert meta.dropped_facts_count > 0
 
-    # Validação sobre a representação serializada exata enviada ao provider
-    provider_bytes = len(
-        json.dumps(ctx1.to_provider_payload(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    )
-    assert provider_bytes <= expected_effective_bytes
-    assert provider_bytes <= 24_000
+    # NC-04: Validação sobre os bytes canônicos exatos emitidos por to_provider_payload_bytes()
+    payload_bytes = ctx1.to_provider_payload_bytes()
+    assert isinstance(payload_bytes, bytes)
+    assert len(payload_bytes) <= expected_effective_bytes
+    assert len(payload_bytes) <= 24_000
+    assert meta.serialized_bytes == len(payload_bytes)
+    assert ctx1.to_provider_payload_json().encode("utf-8") == payload_bytes
+    decoded_payload = json.loads(payload_bytes.decode("utf-8"))
+    assert decoded_payload == ctx1.to_provider_payload()
+    assert "user_id" not in decoded_payload
+    assert "truncation_metadata" not in decoded_payload
 
     # Seleção determinística entre chamadas consecutivas
     assert [f.fact_key for f in ctx1.authorized_facts] == [f.fact_key for f in ctx2.authorized_facts]
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g4_nc01_all_six_profile_entities_in_memory_tampering_ignored(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-01 (Seção 4.1): Adulteração em memória das 6 entidades de perfil no Identity Map
+    nunca contamina AuthorizedFactBundle nem AuthorizedAIContext (autoflush=False e True)."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.user import User
+    from app.services.materials.fact_selector import build_authorized_fact_bundle
+
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user = create_user_account(
+            seed_db,
+            email=f"nc01_all6_tamper_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC01 All6",
+        )
+        entities = _create_confirmed_rich_profile(seed_db, user.id)
+        user_id = user.id
+        prof_id = entities["profile_id"]
+        exp_id = entities["exp_confirmed_id"]
+        proj_id = entities["proj_confirmed_id"]
+        edu_id = entities["edu_confirmed_id"]
+        skill_id = entities["skill_confirmed_id"]
+        lang_id = entities["lang_confirmed_id"]
+
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+    with WorkSession() as work_db:
+        user_loaded = work_db.get(User, user_id)
+        prof_loaded = work_db.get(ProfessionalProfile, prof_id)
+        exp_loaded = work_db.get(WorkExperience, exp_id)
+        proj_loaded = work_db.get(ProfessionalProject, proj_id)
+        edu_loaded = work_db.get(Education, edu_id)
+        skill_loaded = work_db.get(Skill, skill_id)
+        lang_loaded = work_db.get(Language, lang_id)
+        assert all(
+            x is not None
+            for x in (
+                user_loaded,
+                prof_loaded,
+                exp_loaded,
+                proj_loaded,
+                edu_loaded,
+                skill_loaded,
+                lang_loaded,
+            )
+        )
+
+        # Adultera atributos factuais das 6 entidades carregadas no Identity Map sem commit
+        prof_loaded.full_name = "Nome Adulterado Dirty"
+        prof_loaded.professional_title = "Principal Rust Architect Dirty"
+        prof_loaded.professional_summary = "Resumo adulterado com 99 anos em Rust e Cassandra."
+
+        exp_loaded.company = "BigTech Fake Dirty Corp"
+        exp_loaded.role = "Staff Elixir Engineer Dirty"
+        exp_loaded.description = "Liderou 500 engenheiros usando Rust e Elixir em memória."
+        exp_loaded.technologies = ["Rust", "Elixir", "Cassandra"]
+        exp_loaded.related_skills = ["Kubernetes"]
+        exp_loaded.start_date = date(2015, 1, 1)
+        exp_loaded.end_date = date(2025, 12, 31)
+        exp_loaded.is_current = True
+        exp_loaded.eligible_as_target_role = False
+
+        proj_loaded.name = "Projeto Fantasma Dirty"
+        proj_loaded.role = "CTO Dirty"
+        proj_loaded.description = "Projeto adulterado com GraphQL e Terraform."
+        proj_loaded.technologies = ["GraphQL", "Terraform"]
+        proj_loaded.verified_results = "Reduziu custos em 99% e processou 80000 req/s."
+
+        edu_loaded.institution = "MIT Adulterado Dirty"
+        edu_loaded.course = "PhD Quantum Computing Dirty"
+        edu_loaded.field_of_study = "Física Quântica Dirty"
+        edu_loaded.education_status = EducationStatus.IN_PROGRESS.value
+        edu_loaded.start_date = date(2010, 1, 1)
+        edu_loaded.expected_graduation_date = date(2030, 12, 1)
+
+        skill_loaded.name = "CobolDirty"
+        skill_loaded.category = "MainframeDirty"
+        skill_loaded.proficiency_level = SkillProficiency.BASIC.value
+        skill_loaded.notes = "Nota adulterada em memória com FortranDirty."
+
+        lang_loaded.language_name = "MandarimDirty"
+        lang_loaded.proficiency_level = LanguageProficiency.NATIVE.value
+        lang_loaded.cefr_level = "C2"
+
+        # 1. Valida AuthorizedFactBundle diretamente
+        bundle = build_authorized_fact_bundle(work_db, user_loaded)
+        assert bundle.profile is not None
+        assert bundle.profile.full_name == "Victor Silva"
+        assert bundle.profile.professional_title == "Desenvolvedor Backend Python"
+        assert "Principal Rust Architect Dirty" not in (bundle.profile.professional_title or "")
+
+        assert len(bundle.experiences) == 1
+        assert bundle.experiences[0].company == "Empresa Suporte Ltda"
+        assert bundle.experiences[0].role == "Analista de Suporte Técnico"
+        assert bundle.experiences[0].eligible_as_target_role is False
+        assert "Rust" not in (bundle.experiences[0].technologies or [])
+
+        assert len(bundle.projects) == 1
+        assert bundle.projects[0].name == "Job Hunter Engine"
+        assert "99%" not in (bundle.projects[0].verified_results or "")
+
+        assert len(bundle.educations) == 1
+        assert bundle.educations[0].institution == "Universidade Estadual"
+        assert bundle.educations[0].course == "Ciência da Computação"
+
+        skill_names_bundle = {s.name for s in bundle.skills}
+        assert "FastAPI" in skill_names_bundle
+        assert "CobolDirty" not in skill_names_bundle
+
+        assert len(bundle.languages) == 1
+        assert bundle.languages[0].language_name == "Português"
+
+        # 2. Valida AuthorizedAIContext e payload canônico serializado
+        ctx = build_authorized_ai_context(work_db, user_loaded, material_type="resume")
+        payload_json = ctx.to_provider_payload_json()
+        payload_bytes = ctx.to_provider_payload_bytes()
+        assert ctx.truncation_metadata.serialized_bytes == len(payload_bytes)
+
+        for forbidden_dirty in (
+            "Nome Adulterado Dirty",
+            "Principal Rust Architect Dirty",
+            "BigTech Fake Dirty Corp",
+            "Staff Elixir Engineer Dirty",
+            "Cassandra",
+            "Projeto Fantasma Dirty",
+            "CTO Dirty",
+            "80000",
+            "MIT Adulterado Dirty",
+            "PhD Quantum Computing Dirty",
+            "CobolDirty",
+            "MainframeDirty",
+            "FortranDirty",
+            "MandarimDirty",
+        ):
+            assert forbidden_dirty not in payload_json
+
+        for expected_persisted in (
+            "Desenvolvedor Backend Python",
+            "Empresa Suporte Ltda",
+            "Analista de Suporte Técnico",
+            "Job Hunter Engine",
+            "Suíte determinística com testes automatizados",
+            "Universidade Estadual",
+            "Ciência da Computação",
+            "FastAPI",
+            "Português",
+        ):
+            assert expected_persisted in payload_json
+
+        work_db.rollback()
+
+    # Confirma em nova Session que nenhuma alteração suja foi persistida no banco
+    with SeedSession() as verify_db:
+        assert verify_db.get(ProfessionalProfile, prof_id).full_name == "Victor Silva"
+        assert verify_db.get(WorkExperience, exp_id).company == "Empresa Suporte Ltda"
+        assert verify_db.get(ProfessionalProject, proj_id).name == "Job Hunter Engine"
+        assert verify_db.get(Education, edu_id).institution == "Universidade Estadual"
+        assert verify_db.get(Skill, skill_id).name == "FastAPI"
+        assert verify_db.get(Language, lang_id).language_name == "Português"
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g5_nc01_in_memory_status_promotion_blocked_across_all_six_entities(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-01 (Seção 4.2): Promoção em memória de verification_status='confirmed' em entidades
+    draft ou pending_validation nunca autoriza fatos nas 6 entidades (autoflush=False e True)."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.user import User
+    from app.services.materials.fact_selector import build_authorized_fact_bundle
+
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user = create_user_account(
+            seed_db,
+            email=f"nc01_promote_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC01 Promote",
+        )
+        prof_draft = ProfessionalProfile(
+            user_id=user.id,
+            full_name="Perfil Rascunho",
+            professional_title="Arquiteto Kubernetes Rascunho",
+            professional_summary="Resumo ainda em rascunho não confirmado.",
+            verification_status=VerificationStatus.DRAFT.value,
+        )
+        exp_pending = WorkExperience(
+            user_id=user.id,
+            company="Empresa Pendente S.A.",
+            role="Engenheiro Go Pendente",
+            experience_type="clt",
+            start_date=date(2023, 1, 1),
+            is_current=True,
+            description="Experiência aguardando validação.",
+            technologies=["Go", "Kafka"],
+            eligible_as_target_role=True,
+            verification_status=VerificationStatus.PENDING_VALIDATION.value,
+        )
+        proj_draft = ProfessionalProject(
+            user_id=user.id,
+            name="Projeto Secreto Rascunho",
+            role="Autor Rascunho",
+            description="Projeto em rascunho com Rust.",
+            technologies=["Rust"],
+            verified_results="Ganho de 77% em rascunho.",
+            verification_status=VerificationStatus.DRAFT.value,
+        )
+        edu_pending = Education(
+            user_id=user.id,
+            institution="UNICAMP Pendente",
+            course="Mestrado em IA Pendente",
+            field_of_study="Inteligência Artificial",
+            education_status=EducationStatus.IN_PROGRESS.value,
+            verification_status=VerificationStatus.PENDING_VALIDATION.value,
+        )
+        skill_draft = Skill(
+            user_id=user.id,
+            name="TerraformDraftSkill",
+            category="Cloud",
+            proficiency_level=SkillProficiency.ADVANCED.value,
+            verification_status=VerificationStatus.DRAFT.value,
+        )
+        lang_pending = Language(
+            user_id=user.id,
+            language_name="AlemãoPendente",
+            proficiency_level=LanguageProficiency.ADVANCED.value,
+            cefr_level="C1",
+            verification_status=VerificationStatus.PENDING_VALIDATION.value,
+        )
+        # Apenas 1 skill confirmada real no banco
+        skill_confirmed = Skill(
+            user_id=user.id,
+            name="PythonConfirmadoReal",
+            category="Backend",
+            proficiency_level=SkillProficiency.ADVANCED.value,
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        seed_db.add_all(
+            [
+                prof_draft,
+                exp_pending,
+                proj_draft,
+                edu_pending,
+                skill_draft,
+                lang_pending,
+                skill_confirmed,
+            ]
+        )
+        seed_db.commit()
+        ids = (
+            user.id,
+            prof_draft.id,
+            exp_pending.id,
+            proj_draft.id,
+            edu_pending.id,
+            skill_draft.id,
+            lang_pending.id,
+            skill_confirmed.id,
+        )
+
+    (
+        user_id,
+        prof_id,
+        exp_id,
+        proj_id,
+        edu_id,
+        skill_draft_id,
+        lang_id,
+        skill_confirmed_id,
+    ) = ids
+
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+    with WorkSession() as work_db:
+        user_loaded = work_db.get(User, user_id)
+        p_loaded = work_db.get(ProfessionalProfile, prof_id)
+        e_loaded = work_db.get(WorkExperience, exp_id)
+        pr_loaded = work_db.get(ProfessionalProject, proj_id)
+        ed_loaded = work_db.get(Education, edu_id)
+        sk_loaded = work_db.get(Skill, skill_draft_id)
+        lg_loaded = work_db.get(Language, lang_id)
+        assert all(
+            x is not None
+            for x in (user_loaded, p_loaded, e_loaded, pr_loaded, ed_loaded, sk_loaded, lg_loaded)
+        )
+
+        # Promove todas as 6 entidades não confirmadas para CONFIRMED apenas em memória
+        now_ts = datetime.now(timezone.utc)
+        for entity in (p_loaded, e_loaded, pr_loaded, ed_loaded, sk_loaded, lg_loaded):
+            entity.verification_status = VerificationStatus.CONFIRMED.value
+            entity.confirmed_at = now_ts
+
+        bundle = build_authorized_fact_bundle(work_db, user_loaded)
+        assert bundle.profile is None
+        assert bundle.experiences == []
+        assert bundle.projects == []
+        assert bundle.educations == []
+        assert bundle.languages == []
+        assert [s.id for s in bundle.skills] == [skill_confirmed_id]
+        # Os 6 itens continuam listados como não confirmados em unconfirmed_warnings
+        warning_types = {w.entity_type for w in bundle.unconfirmed_warnings}
+        assert warning_types == {
+            "profile",
+            "experience",
+            "project",
+            "education",
+            "skill",
+            "language",
+        }
+
+        ctx = build_authorized_ai_context(work_db, user_loaded, material_type="resume")
+        assert [f.fact_key for f in ctx.authorized_facts] == [f"skill:{skill_confirmed_id}"]
+        payload_json = ctx.to_provider_payload_json()
+        for unconfirmed_marker in (
+            "Arquiteto Kubernetes Rascunho",
+            "Empresa Pendente S.A.",
+            "Engenheiro Go Pendente",
+            "Projeto Secreto Rascunho",
+            "UNICAMP Pendente",
+            "TerraformDraftSkill",
+            "AlemãoPendente",
+        ):
+            assert unconfirmed_marker not in payload_json
+
+        work_db.rollback()
+
+    # Confirma em nova Session que os status no banco permanecem inalterados
+    with SeedSession() as verify_db:
+        assert (
+            verify_db.get(ProfessionalProfile, prof_id).verification_status
+            == VerificationStatus.DRAFT.value
+        )
+        assert (
+            verify_db.get(WorkExperience, exp_id).verification_status
+            == VerificationStatus.PENDING_VALIDATION.value
+        )
+        assert (
+            verify_db.get(ProfessionalProject, proj_id).verification_status
+            == VerificationStatus.DRAFT.value
+        )
+        assert (
+            verify_db.get(Education, edu_id).verification_status
+            == VerificationStatus.PENDING_VALIDATION.value
+        )
+        assert (
+            verify_db.get(Skill, skill_draft_id).verification_status
+            == VerificationStatus.DRAFT.value
+        )
+        assert (
+            verify_db.get(Language, lang_id).verification_status
+            == VerificationStatus.PENDING_VALIDATION.value
+        )
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g6_nc03_legitimate_pending_edits_preserved_and_committed_across_all_entities(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-03 (Seções 4.3 e 5): Alterações legítimas pendentes em objetos ORM na Session
+    não entram no contexto antes do commit, não são descartadas pelo builder e são persistidas
+    corretamente quando db.commit() é chamado depois."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.application import Application
+    from app.models.opportunity import Opportunity
+    from app.models.user import User
+    from app.services.materials.fact_selector import build_authorized_fact_bundle
+
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user = create_user_account(
+            seed_db,
+            email=f"nc03_preserve_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Usuário NC03 Preserve",
+        )
+        entities = _create_confirmed_rich_profile(seed_db, user.id)
+        opp_priv = _create_opportunity(
+            seed_db,
+            title="Vaga Privada Original",
+            company_name="Empresa Original",
+            owner_user_id=user.id,
+        )
+        app_own = _create_application(seed_db, user.id, opp_priv)
+        ids = (
+            user.id,
+            entities["profile_id"],
+            entities["exp_confirmed_id"],
+            entities["proj_confirmed_id"],
+            entities["edu_confirmed_id"],
+            entities["skill_confirmed_id"],
+            entities["lang_confirmed_id"],
+            opp_priv.id,
+            app_own.id,
+        )
+
+    (
+        user_id,
+        prof_id,
+        exp_id,
+        proj_id,
+        edu_id,
+        skill_id,
+        lang_id,
+        opp_id,
+        app_id,
+    ) = ids
+
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+    with WorkSession() as work_db:
+        user_loaded = work_db.get(User, user_id)
+        prof_loaded = work_db.get(ProfessionalProfile, prof_id)
+        exp_loaded = work_db.get(WorkExperience, exp_id)
+        proj_loaded = work_db.get(ProfessionalProject, proj_id)
+        edu_loaded = work_db.get(Education, edu_id)
+        skill_loaded = work_db.get(Skill, skill_id)
+        lang_loaded = work_db.get(Language, lang_id)
+        opp_loaded = work_db.get(Opportunity, opp_id)
+        app_loaded = work_db.get(Application, app_id)
+        assert all(
+            x is not None
+            for x in (
+                user_loaded,
+                prof_loaded,
+                exp_loaded,
+                proj_loaded,
+                edu_loaded,
+                skill_loaded,
+                lang_loaded,
+                opp_loaded,
+                app_loaded,
+            )
+        )
+
+        # Realiza edições legítimas em memória nas 6 entidades de perfil + Opportunity + Application
+        prof_loaded.professional_title = "Engenheiro Backend Python Sênior Comitado"
+        exp_loaded.role = "Engenheiro de Software Pleno Comitado"
+        proj_loaded.name = "Plataforma de Busca V2 Comitada"
+        edu_loaded.course = "Engenharia de Computação Comitada"
+        skill_loaded.notes = "Nota legítima atualizada e comitada."
+        lang_loaded.cefr_level = "C1"
+        opp_loaded.title = "Vaga Privada Atualizada Comitada"
+        app_loaded.role_title = "Candidatura Atualizada Comitada"
+
+        # Constrói bundle e contexto ANTES do commit: deve usar apenas os dados já persistidos
+        bundle_before = build_authorized_fact_bundle(
+            work_db, user_loaded, opportunity=opp_loaded, application=app_loaded
+        )
+        ctx_before = build_authorized_ai_context(
+            work_db,
+            user_loaded,
+            material_type="resume",
+            opportunity=opp_loaded,
+            application=app_loaded,
+        )
+        assert bundle_before.profile is not None
+        assert bundle_before.profile.professional_title == "Desenvolvedor Backend Python"
+        assert ctx_before.opportunity is not None
+        assert ctx_before.opportunity.title == "Vaga Privada Original"
+        payload_before = ctx_before.to_provider_payload_json()
+        assert "Comitado" not in payload_before
+        assert "Comitada" not in payload_before
+
+        # NC-03: Verifica que TODAS as 8 instâncias ORM preservam seus atributos dirty na Session
+        assert prof_loaded.professional_title == "Engenheiro Backend Python Sênior Comitado"
+        assert exp_loaded.role == "Engenheiro de Software Pleno Comitado"
+        assert proj_loaded.name == "Plataforma de Busca V2 Comitada"
+        assert edu_loaded.course == "Engenharia de Computação Comitada"
+        assert skill_loaded.notes == "Nota legítima atualizada e comitada."
+        assert lang_loaded.cefr_level == "C1"
+        assert opp_loaded.title == "Vaga Privada Atualizada Comitada"
+        assert app_loaded.role_title == "Candidatura Atualizada Comitada"
+        for dirty_obj in (
+            prof_loaded,
+            exp_loaded,
+            proj_loaded,
+            edu_loaded,
+            skill_loaded,
+            lang_loaded,
+            opp_loaded,
+            app_loaded,
+        ):
+            assert dirty_obj in work_db.dirty
+
+        # Agora executa commit explícito na mesma Session
+        work_db.commit()
+
+    # Confirma em nova Session independente que todas as alterações legítimas foram persistidas
+    with SeedSession() as verify_db:
+        v_user = verify_db.get(User, user_id)
+        v_prof = verify_db.get(ProfessionalProfile, prof_id)
+        v_exp = verify_db.get(WorkExperience, exp_id)
+        v_proj = verify_db.get(ProfessionalProject, proj_id)
+        v_edu = verify_db.get(Education, edu_id)
+        v_skill = verify_db.get(Skill, skill_id)
+        v_lang = verify_db.get(Language, lang_id)
+        v_opp = verify_db.get(Opportunity, opp_id)
+        v_app = verify_db.get(Application, app_id)
+        assert v_prof.professional_title == "Engenheiro Backend Python Sênior Comitado"
+        assert v_exp.role == "Engenheiro de Software Pleno Comitado"
+        assert v_proj.name == "Plataforma de Busca V2 Comitada"
+        assert v_edu.course == "Engenharia de Computação Comitada"
+        assert v_skill.notes == "Nota legítima atualizada e comitada."
+        assert v_lang.cefr_level == "C1"
+        assert v_opp.title == "Vaga Privada Atualizada Comitada"
+        assert v_app.role_title == "Candidatura Atualizada Comitada"
+
+        # E agora uma nova chamada ao contexto autorizado enxerga os valores comitados
+        ctx_after = build_authorized_ai_context(
+            verify_db,
+            v_user,
+            material_type="resume",
+            opportunity=v_opp,
+            application=v_app,
+        )
+        payload_after = ctx_after.to_provider_payload_json()
+        assert "Engenheiro Backend Python Sênior Comitado" in payload_after
+        assert "Engenheiro de Software Pleno Comitado" in payload_after
+        assert "Plataforma de Busca V2 Comitada" in payload_after
+        assert "Engenharia de Computação Comitada" in payload_after
+        assert "Nota legítima atualizada e comitada." in payload_after
+        assert ctx_after.opportunity is not None
+        assert ctx_after.opportunity.title == "Vaga Privada Atualizada Comitada"
+
+
+@pytest.mark.parametrize("autoflush_enabled", [False, True])
+def test_g7_nc01_multi_tenant_user_id_tampering_in_identity_map_isolated(
+    db_engine,
+    autoflush_enabled: bool,
+) -> None:
+    """NC-01 (Seção 4.4): Adulteração de user_id em memória em entidades carregadas de outro
+    usuário nunca contamina o contexto do usuário autenticado."""
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.models.user import User
+    from app.services.materials.fact_selector import build_authorized_fact_bundle
+
+    SeedSession = _sessionmaker(bind=db_engine, autocommit=False, autoflush=False, class_=Session)
+    with SeedSession() as seed_db:
+        user_a = create_user_account(
+            seed_db,
+            email=f"nc01_iso_a_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Isolamento A",
+        )
+        user_b = create_user_account(
+            seed_db,
+            email=f"nc01_iso_b_{autoflush_enabled}@example.com",
+            password="ValidPassword123!",
+            display_name="Isolamento B",
+        )
+        ent_a = _create_confirmed_rich_profile(seed_db, user_a.id)
+        prof_b = ProfessionalProfile(
+            user_id=user_b.id,
+            full_name="Usuário Secreto B",
+            professional_title="Staff Security Engineer B",
+            professional_summary="Resumo confidencial do usuário B.",
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        exp_b = WorkExperience(
+            user_id=user_b.id,
+            company="CyberSec B Corp",
+            role="Lead Pentester B",
+            experience_type="clt",
+            start_date=date(2021, 1, 1),
+            is_current=True,
+            description="Operações confidenciais do usuário B.",
+            technologies=["Rust", "eBPF"],
+            eligible_as_target_role=True,
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        proj_b = ProfessionalProject(
+            user_id=user_b.id,
+            name="Scanner ZeroDay B",
+            role="Creator B",
+            description="Projeto exclusivo de B.",
+            technologies=["Rust"],
+            verified_results="Detectou 42 vulnerabilidades.",
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        edu_b = Education(
+            user_id=user_b.id,
+            institution="Stanford B",
+            course="MSc Cybersecurity B",
+            field_of_study="Security",
+            education_status=EducationStatus.COMPLETED.value,
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        skill_b = Skill(
+            user_id=user_b.id,
+            name="eBPFSecretSkillB",
+            category="Security",
+            proficiency_level=SkillProficiency.ADVANCED.value,
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        lang_b = Language(
+            user_id=user_b.id,
+            language_name="JaponêsSecretoB",
+            proficiency_level=LanguageProficiency.ADVANCED.value,
+            cefr_level="C1",
+            verification_status=VerificationStatus.CONFIRMED.value,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        seed_db.add_all([prof_b, exp_b, proj_b, edu_b, skill_b, lang_b])
+        seed_db.commit()
+        ids = (
+            user_a.id,
+            user_b.id,
+            ent_a["exp_confirmed_id"],
+            prof_b.id,
+            exp_b.id,
+            proj_b.id,
+            edu_b.id,
+            skill_b.id,
+            lang_b.id,
+        )
+
+    (
+        user_a_id,
+        user_b_id,
+        exp_a_id,
+        prof_b_id,
+        exp_b_id,
+        proj_b_id,
+        edu_b_id,
+        skill_b_id,
+        lang_b_id,
+    ) = ids
+
+    WorkSession = _sessionmaker(
+        bind=db_engine,
+        autocommit=False,
+        autoflush=autoflush_enabled,
+        class_=Session,
+    )
+    with WorkSession() as work_db:
+        user_a_loaded = work_db.get(User, user_a_id)
+        exp_a_loaded = work_db.get(WorkExperience, exp_a_id)
+        b_entities = [
+            work_db.get(ProfessionalProfile, prof_b_id),
+            work_db.get(WorkExperience, exp_b_id),
+            work_db.get(ProfessionalProject, proj_b_id),
+            work_db.get(Education, edu_b_id),
+            work_db.get(Skill, skill_b_id),
+            work_db.get(Language, lang_b_id),
+        ]
+        assert user_a_loaded is not None and exp_a_loaded is not None and all(b_entities)
+
+        # Adultera user_id das entidades de B em memória para apontar para user_a
+        for b_ent in b_entities:
+            b_ent.user_id = user_a_id
+        # E adultera user_id da experiência de A em memória para user_b
+        exp_a_loaded.user_id = user_b_id
+
+        bundle_a = build_authorized_fact_bundle(work_db, user_a_loaded)
+        ctx_a = build_authorized_ai_context(work_db, user_a_loaded, material_type="resume")
+        payload_a = ctx_a.to_provider_payload_json()
+
+        # Nenhum dado de B pode entrar no contexto de A
+        for forbidden_b in (
+            "Staff Security Engineer B",
+            "CyberSec B Corp",
+            "Lead Pentester B",
+            "Scanner ZeroDay B",
+            "Stanford B",
+            "eBPFSecretSkillB",
+            "JaponêsSecretoB",
+        ):
+            assert forbidden_b not in payload_a
+
+        # E a experiência persistida de A continua presente para A
+        assert len(bundle_a.experiences) == 1
+        assert bundle_a.experiences[0].id == exp_a_id
+        assert "Empresa Suporte Ltda" in payload_a
+
+        work_db.rollback()
+
+
+def test_g8_nc04_canonical_serialization_rejects_nan_and_matches_exact_bytes(
+    db_session: Session,
+) -> None:
+    """NC-04 (Seção 6): serialize_canonical_provider_payload rejeita NaN/Infinity e
+    serialized_bytes coincide byte a byte com to_provider_payload_bytes()."""
+    from app.services.materials.ai import serialize_canonical_provider_payload
+
+    for invalid_float in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            serialize_canonical_provider_payload({"invalid": invalid_float})
+
+    user = create_user_account(
+        db_session,
+        email="nc04_exact@example.com",
+        password="ValidPassword123!",
+        display_name="Usuário NC04 Exact",
+    )
+    _create_confirmed_rich_profile(db_session, user.id)
+    opp = _create_opportunity(
+        db_session,
+        title="Engenheiro de Computação & Integração Contínua",
+        company_name="São Paulo Tecnológica S/A",
+    )
+
+    for mat_type in (
+        "resume",
+        "cover_letter",
+        "recruiter_message",
+        "freelance_proposal",
+        "application_answers",
+    ):
+        ctx = build_authorized_ai_context(
+            db_session,
+            user,
+            material_type=mat_type,
+            opportunity=opp,
+        )
+        raw_bytes = ctx.to_provider_payload_bytes()
+        raw_json = ctx.to_provider_payload_json()
+        assert raw_json.encode("utf-8") == raw_bytes
+        assert ctx.truncation_metadata.serialized_bytes == len(raw_bytes)
+        assert len(raw_bytes) <= ctx.truncation_metadata.max_payload_bytes <= 24_000
+        # Verifica formato compacto canônico e preservação UTF-8 sem \uXXXX desnecessário
+        assert "São Paulo Tecnológica S/A" in raw_json
+        assert '": ' not in raw_json
+        assert json.loads(raw_bytes.decode("utf-8")) == ctx.to_provider_payload()

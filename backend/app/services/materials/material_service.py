@@ -146,10 +146,8 @@ def _get_user_application(
             Application.id == application_id,
             Application.user_id == user.id,
         )
-        .execution_options(populate_existing=True)
     )
-    with db.no_autoflush:
-        app = db.scalar(stmt)
+    app = db.scalar(stmt)
     if app is None:
         raise MaterialNotFoundError("Candidatura não encontrada.")
     return app
@@ -165,19 +163,14 @@ def _get_opportunity(db: Session, user: User, opportunity_id: uuid.UUID) -> Oppo
     Oportunidades privadas de terceiros retornam 404 idêntico ao de registro inexistente,
     sem revelar se a oportunidade existe.
     """
-    stmt = (
-        select(Opportunity)
-        .where(
-            Opportunity.id == opportunity_id,
-            or_(
-                Opportunity.source_id.is_not(None),
-                Opportunity.created_by_user_id == user.id,
-            ),
-        )
-        .execution_options(populate_existing=True)
+    stmt = select(Opportunity).where(
+        Opportunity.id == opportunity_id,
+        or_(
+            Opportunity.source_id.is_not(None),
+            Opportunity.created_by_user_id == user.id,
+        ),
     )
-    with db.no_autoflush:
-        opp = db.scalar(stmt)
+    opp = db.scalar(stmt)
     if opp is None:
         raise MaterialNotFoundError("Oportunidade não encontrada.")
     return opp

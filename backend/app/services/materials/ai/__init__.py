@@ -21,6 +21,7 @@ from app.services.materials.ai.ai_schemas import (
     STATIC_ALLOWED_SLOTS_BY_MATERIAL,
     SanitizedOpportunityContext,
     parse_and_validate_slot_for_material,
+    serialize_canonical_provider_payload,
 )
 from app.services.materials.ai.circuit_breaker import (
     CircuitBreakerSnapshot,
@@ -157,5 +158,6 @@ __all__ = [
     "release_ai_quota_reservation",
     "reserve_ai_quota",
     "resolve_llm_provider",
+    "serialize_canonical_provider_payload",
     "validate_safe_technical_identifier",
 ]

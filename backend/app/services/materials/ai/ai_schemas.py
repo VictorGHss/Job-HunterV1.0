@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -224,12 +225,22 @@ class SanitizedOpportunityContext(BaseModel):
     language: str | None = Field(default=None, max_length=32)
 
 
+def serialize_canonical_provider_payload(payload: Mapping[str, Any]) -> bytes:
+    """Serializa canonicamente o payload do provider em UTF-8 compacto (sem NaN/Infinity)."""
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class AuthorizedAIContext(BaseModel):
     """Contexto serializado fornecido à IA com garantia de autorização factual e minimização de PII.
 
     `user_id` e `truncation_metadata` são mantidos exclusivamente no backend (`exclude=True`)
-    e nunca são serializados para o provider em `model_dump`, `model_dump_json` ou
-    `to_provider_payload()`.
+    e nunca são serializados para o provider em `model_dump`, `model_dump_json`,
+    `to_provider_payload()`, `to_provider_payload_json()` ou `to_provider_payload_bytes()`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -245,7 +256,13 @@ class AuthorizedAIContext(BaseModel):
     )
 
     def to_provider_payload(self) -> dict[str, Any]:
-        """Retorna payload estritamente minimizado destinado ao LLMProvider (sem user_id/metadados)."""
+        """Retorna a representação lógica em memória (dict) do payload destinado ao LLMProvider.
+
+        IMPORTANTE (NC-04): Para transmissão efetiva ao provider e respeito estrito ao orçamento
+        de bytes (`serialized_bytes <= max_payload_bytes <= 24_000`), utilize SEMPRE
+        `to_provider_payload_bytes()` (ou `to_provider_payload_json()`). Não re-serialize este
+        mapping com configurações arbitrárias de `json.dumps`.
+        """
         payload = self.model_dump(mode="json", exclude={"user_id", "truncation_metadata"})
         return {
             "material_type": payload["material_type"],
@@ -253,6 +270,14 @@ class AuthorizedAIContext(BaseModel):
             "candidate_confirmed_facts": payload["authorized_facts"],
             "target_opportunity_context": payload["opportunity"],
         }
+
+    def to_provider_payload_bytes(self) -> bytes:
+        """Retorna os bytes UTF-8 canônicos do payload pronto para transmissão ao provider."""
+        return serialize_canonical_provider_payload(self.to_provider_payload())
+
+    def to_provider_payload_json(self) -> str:
+        """Retorna a string JSON canônica compacta (`separators=(',', ':')`, UTF-8) para transmissão."""
+        return self.to_provider_payload_bytes().decode("utf-8")
 
     def get_fact(self, fact_key: str) -> AuthorizedFactItem | None:
         for fact in self.authorized_facts:
