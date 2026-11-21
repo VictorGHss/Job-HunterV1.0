@@ -22,6 +22,7 @@ from app.models.ai_usage import AICircuitBreakerRecord, AICircuitState, AIUsageL
 from app.models.application import Application, ApplicationStatus
 from app.models.material import (
     ApplicationMaterial,
+    ApplicationMaterialLink,
     ApplicationMaterialVersion,
     MaterialVersionOrigin,
 )
@@ -64,32 +65,47 @@ from app.services.materials.ai import (
     AICircuitOpenError,
     AIDisabledError,
     AIGroundingRejectedError,
+    AIMaterialEnhanceOutput,
     AIOverlayConflictError,
     AIQuotaExceededError,
     AIReservationStateError,
     AIReviewStateError,
     AIStaleSourceVersionError,
+    AISuggestionItem,
+    CANONICAL_GROUNDING_CODES,
     ControlledOverlayMerger,
+    GroundingValidationResult,
     LLMProvider,
     LLMStructuredRequest,
     LLMStructuredResponse,
     LLMTokenUsage,
     MockLLMProvider,
+    build_sanitized_grounding_error,
+    confirm_ai_quota_usage,
     enhance_material_version_with_ai,
+    fail_ai_quota_usage,
     get_circuit_state,
+    record_circuit_failure,
+    record_circuit_success,
     reject_ai_assisted_version,
+    reserve_ai_quota,
+    serialize_canonical_provider_payload,
 )
+from app.services.materials.ai.orchestrator import _GROUNDING_SAFE_LABELS
 from app.services.materials.material_service import (
     MaterialImmutableError,
+    MaterialNotFoundError,
     MaterialPreconditionError,
     approve_material_version,
     create_material,
+    delete_material,
     derive_material_version,
     export_material_version,
     get_material_detail,
     link_material_version,
     list_materials,
     regenerate_material_version,
+    unlink_material,
     update_material_version,
 )
 from tests.conftest import resolve_test_database_url
@@ -139,8 +155,10 @@ def _ai_enabled_settings(**overrides: Any) -> Settings:
     defaults: dict[str, Any] = {
         "ai_assisted_enabled": True,
         "ai_provider": "mock",
-        "ai_model_name": "mock-deterministic-v1",
-        "ai_request_timeout_seconds": 10.0,
+        "ai_model": "mock-deterministic-v1",
+        "ai_http_total_timeout_seconds": 24.0,
+        "ai_http_connect_timeout_seconds": 5.0,
+        "ai_http_read_timeout_seconds": 20.0,
         "ai_user_window_max_requests": 10,
         "ai_rate_limit_window_seconds": 300,
         "ai_user_daily_max_requests": 40,
@@ -151,6 +169,8 @@ def _ai_enabled_settings(**overrides: Any) -> Settings:
         "ai_circuit_breaker_cooldown_seconds": 60,
     }
     defaults.update(overrides)
+    unknown_keys = set(defaults) - set(Settings.model_fields)
+    assert not unknown_keys, f"Chaves desconhecidas em Settings: {unknown_keys}"
     return Settings(**defaults)
 
 
@@ -395,8 +415,8 @@ def test_tc443_01_migration_0012_upgrade_downgrade_and_check_constraint(tmp_path
         }
         assert "ix_material_versions_mat_rejected_ver" in idx_names
 
-        # CheckConstraint bloqueia estados inconsistentes:
-        # 1) is_rejected=True com rejected_at=NULL
+        # CheckConstraint bloqueia os 3 ramos de estados inconsistentes (AUD-443-11):
+        # 1) is_rejected=True com rejected_at=NULL (is_approved=False)
         with pytest.raises(IntegrityError):
             with engine.begin() as conn:
                 conn.execute(
@@ -414,14 +434,32 @@ def test_tc443_01_migration_0012_upgrade_downgrade_and_check_constraint(tmp_path
                     },
                 )
 
-        # 2) is_rejected=True com is_approved=True
+        # 2) is_rejected=False com rejected_at!=NULL (is_approved=False)
+        with pytest.raises(IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO application_material_versions "
+                        "(id, material_id, version_number, origin, structured_content, source_facts_snapshot, unconfirmed_warnings, missing_requirements, is_approved, is_rejected, rejected_at, created_at, updated_at) "
+                        "VALUES (:id, :mid, 3, 'ai_assisted', '{}', '{}', '[]', '[]', :approved, :rejected, :now, :now, :now)"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()) if is_sqlite else uuid.uuid4(),
+                        "mid": str(mat_id) if is_sqlite else mat_id,
+                        "approved": False,
+                        "rejected": False,
+                        "now": now_param,
+                    },
+                )
+
+        # 3) is_rejected=True com rejected_at!=NULL e is_approved=True
         with pytest.raises(IntegrityError):
             with engine.begin() as conn:
                 conn.execute(
                     text(
                         "INSERT INTO application_material_versions "
                         "(id, material_id, version_number, origin, structured_content, source_facts_snapshot, unconfirmed_warnings, missing_requirements, is_approved, approved_at, is_rejected, rejected_at, created_at, updated_at) "
-                        "VALUES (:id, :mid, 3, 'ai_assisted', '{}', '{}', '[]', '[]', :approved, :now, :rejected, :now, :now, :now)"
+                        "VALUES (:id, :mid, 4, 'ai_assisted', '{}', '{}', '[]', '[]', :approved, :now, :rejected, :now, :now, :now)"
                     ),
                     {
                         "id": str(uuid.uuid4()) if is_sqlite else uuid.uuid4(),
@@ -432,7 +470,18 @@ def test_tc443_01_migration_0012_upgrade_downgrade_and_check_constraint(tmp_path
                     },
                 )
 
-        # Downgrade 0012 -> 0011 e upgrade até head
+        # Confirma preservação da versão v1 original com default is_rejected=False e rejected_at=None após upgrade
+        with engine.connect() as conn:
+            v1_row = conn.execute(
+                text(
+                    "SELECT version_number, is_rejected, rejected_at FROM application_material_versions WHERE version_number = 1"
+                )
+            ).one()
+            assert int(v1_row[0]) == 1
+            assert bool(v1_row[1]) is False
+            assert v1_row[2] is None
+
+        # Downgrade 0012 -> 0011 preserva registros existentes e upgrade até head
         with engine.begin() as conn:
             alembic_cfg.attributes["connection"] = conn
             command.downgrade(alembic_cfg, "0011_ai_usage_ledger")
@@ -442,6 +491,12 @@ def test_tc443_01_migration_0012_upgrade_downgrade_and_check_constraint(tmp_path
         }
         assert "is_rejected" not in cols_after_down
         assert "rejected_at" not in cols_after_down
+
+        with engine.connect() as conn:
+            preserved_count = conn.execute(
+                text("SELECT COUNT(*) FROM application_material_versions")
+            ).scalar_one()
+            assert int(preserved_count) == 1
 
         with engine.begin() as conn:
             alembic_cfg.attributes["connection"] = conn
@@ -1484,6 +1539,33 @@ def test_tc443_13_rejected_version_restrictions_across_all_operations(
         ).status_code
         == 422
     )
+    # 8) Vincular versão rejeitada a uma candidatura via endpoint real POST /link -> 422 (AUD-443-11)
+    app_row = Application(
+        user_id=user.id,
+        opportunity_id=facts["opportunity"].id,
+        company_name=facts["opportunity"].company_name,
+        role_title=facts["opportunity"].title,
+        status=ApplicationStatus.INTERESTED.value,
+    )
+    db_session.add(app_row)
+    db_session.commit()
+    db_session.refresh(app_row)
+
+    resp_link_rejected = client.post(
+        f"/api/v1/materials/{mat.id}/link",
+        json={"application_id": str(app_row.id), "version_id": v2_id},
+        headers=_csrf_headers(csrf),
+    )
+    assert resp_link_rejected.status_code == 422
+    db_session.expire_all()
+    assert (
+        db_session.scalar(
+            select(func.count(ApplicationMaterialLink.id)).where(
+                ApplicationMaterialLink.material_id == mat.id
+            )
+        )
+        == 0
+    )
 
 
 def test_tc443_14_ai_version_immutability_derive_and_approve_flows(
@@ -1951,3 +2033,1564 @@ def test_tc443_18_multitenant_isolation_and_csrf_enforcement(
         select(func.count(AIUsageLedger.id)).where(AIUsageLedger.user_id == user_b.id)
     )
     assert b_ledger_count == 0
+
+
+# ===========================================================================
+# Cobertura de Regressão Pós-Auditoria Independente (AUD-443-01 a AUD-443-12)
+# ===========================================================================
+
+
+def test_aud443_01_global_24000_byte_payload_budget_with_20_long_entities_and_multibyte(
+    db_session: Session,
+):
+    """AUD-443-01: Garante orçamento global <= 24.000 bytes UTF-8 sobre structured_input completo sem expulsar fatos confirmados."""
+    user = create_user_account(
+        db_session,
+        email="aud443_01@example.com",
+        display_name="AUD 01",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+
+    # Adiciona mais 11 experiências e 10 projetos longos com caracteres multibyte e aspas (totalizando 23 entidades longas)
+    extra_exp_ids: list[str] = []
+    for idx in range(11):
+        long_desc = (
+            f"Desenvolvimento de microsserviços críticos — módulo #{idx} com Python, FastAPI, PostgreSQL e Docker. "
+            + ("Arquitetura resiliente com integração contínua, mensageria e auditoria contábil (★ 🚀 áéíóúçãõ \"aspas\"). " * 14)
+        )[:1900]
+        exp = WorkExperience(
+            user_id=user.id,
+            company=f"Corporação Tecnológica Multibyte {idx} S/A",
+            role=f"Desenvolvedor Backend Python Pleno {idx}",
+            description=long_desc,
+            start_date=date(2020, 1, 1),
+            end_date=date(2022, 12, 1),
+            is_current=False,
+            experience_type=ExperienceType.CLT.value,
+            eligible_as_target_role=True,
+            technologies=["Python", "FastAPI", "PostgreSQL", "Docker"],
+            verification_status=VerificationStatus.CONFIRMED.value,
+        )
+        db_session.add(exp)
+        db_session.flush()
+        extra_exp_ids.append(str(exp.id))
+
+    for idx in range(10):
+        long_proj_desc = (
+            f"Plataforma distribuída de conciliação financeira #{idx} em Python, FastAPI, PostgreSQL e Docker. "
+            + ("Processamento assíncrono auditável com validações criptográficas (★ 🚀 áéíóúçãõ \"json\"). " * 14)
+        )[:1900]
+        proj = ProfessionalProject(
+            user_id=user.id,
+            name=f"Sistema Distribuído de Conciliação #{idx}",
+            description=long_proj_desc,
+            technologies=["Python", "FastAPI", "PostgreSQL", "Docker"],
+            verified_results="Processamento de lotes diários em Python e PostgreSQL.",
+            links={},
+            verification_status=VerificationStatus.CONFIRMED.value,
+        )
+        db_session.add(proj)
+
+    db_session.commit()
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+    assert len(v1.structured_content.experiences) >= 12
+    assert len(v1.structured_content.projects) >= 11
+
+    long_multibyte_instructions = (
+        "Priorize clareza técnica, concisão e vocabulário formal em português brasileiro (áéíóúçãõ — ★ 🚀 \"destaque\"). "
+        * 16
+    )[:1500]
+
+    provider = _CallbackLLMProvider(
+        lambda req: {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Backend Python com sólida experiência confirmada em FastAPI, PostgreSQL e Docker.",
+                    "cited_fact_keys": [
+                        f["fact_key"]
+                        for f in req.structured_input["candidate_confirmed_facts"][:2]
+                    ],
+                }
+            ],
+        }
+    )
+
+    enhanced = enhance_material_version_with_ai(
+        db_session,
+        user,
+        material_id=mat.id,
+        version_id=v1.id,
+        payload=MaterialAIEnhanceRequest(
+            user_instructions=long_multibyte_instructions,
+        ),
+        injected_provider=provider,
+        settings_override=cfg,
+    )
+    assert enhanced.latest_active_version_number == 2
+    assert len(provider.captured_requests) == 1
+
+    captured_input = provider.captured_requests[0].structured_input
+    serialized_bytes = len(serialize_canonical_provider_payload(captured_input))
+    assert serialized_bytes <= 24_000, f"Payload excedeu 24.000 bytes: {serialized_bytes}"
+
+    # Verifica que fatos confirmados foram preservados prioritariamente (ocupando a maior parte do orçamento e não espremidos para 2KB)
+    confirmed_facts = captured_input["candidate_confirmed_facts"]
+    confirmed_facts_bytes = len(
+        serialize_canonical_provider_payload({"facts": confirmed_facts})
+    )
+    assert len(confirmed_facts) >= 8
+    assert confirmed_facts_bytes >= 14_000
+    assert len(captured_input["eligible_target_slots"]) >= 5
+    assert captured_input["user_writing_preferences"] is not None
+    assert (
+        captured_input["user_writing_preferences"]["trust_level"]
+        == "style_and_emphasis_only_not_factual_evidence"
+    )
+
+    # Caso de orçamento insuficiente: quando um slot explicitamente solicitado teve seu fato truncado pelo orçamento
+    # (ex.: orçamento forçado para 1.200 bytes onde nem a entidade cabe), falha ANTES de reservar quota.
+    v2 = enhanced.versions[0]
+    ledger_count_before = int(
+        db_session.scalar(
+            select(func.count(AIUsageLedger.id)).where(AIUsageLedger.user_id == user.id)
+        )
+        or 0
+    )
+    with pytest.raises(AIOverlayConflictError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat.id,
+            version_id=v2.id,
+            payload=MaterialAIEnhanceRequest(
+                target_slot_ids=[f"experience_highlight:{extra_exp_ids[-1]}"],
+            ),
+            injected_provider=provider,
+            settings_override=cfg,
+            max_payload_bytes=1024,
+        )
+    ledger_count_after = int(
+        db_session.scalar(
+            select(func.count(AIUsageLedger.id)).where(AIUsageLedger.user_id == user.id)
+        )
+        or 0
+    )
+    assert ledger_count_after == ledger_count_before
+
+
+def test_aud443_02_explicit_commit_false_contract_prevents_premature_commit_after_flush(
+    db_engine,
+    db_session: Session,
+):
+    """AUD-443-02: Em SQLite e PostgreSQL, commit=False nunca comita implicitamente após add() + flush()."""
+    user = create_user_account(
+        db_session,
+        email="aud443_02@example.com",
+        display_name="AUD 02",
+        password="StrongPass!2026",
+    )
+    cfg = _ai_enabled_settings()
+    SessionMaker = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+
+    # 1) record_circuit_success(commit=False) após add() + flush() -> rollback() descarta tudo
+    sentinel_mat_1 = uuid.uuid4()
+    with SessionMaker() as s1:
+        s1.add(
+            ApplicationMaterial(
+                id=sentinel_mat_1,
+                user_id=user.id,
+                opportunity_id=None,
+                material_type="resume",
+                title="Sentinel 1",
+                target_language="pt-BR",
+            )
+        )
+        s1.flush()
+        assert not s1.new and not s1.dirty and not s1.deleted
+        record_circuit_success(
+            s1,
+            provider_key="probe_cb_ok",
+            settings_override=cfg,
+            commit=False,
+        )
+        s1.rollback()
+
+    with SessionMaker() as verify_db:
+        assert verify_db.get(ApplicationMaterial, sentinel_mat_1) is None
+        assert (
+            verify_db.scalar(
+                select(AICircuitBreakerRecord).where(
+                    AICircuitBreakerRecord.provider_key == "probe_cb_ok"
+                )
+            )
+            is None
+        )
+
+    # 2) record_circuit_failure(commit=False) após add() + flush() -> rollback() descarta tudo
+    sentinel_mat_2 = uuid.uuid4()
+    with SessionMaker() as s2:
+        s2.add(
+            ApplicationMaterial(
+                id=sentinel_mat_2,
+                user_id=user.id,
+                opportunity_id=None,
+                material_type="resume",
+                title="Sentinel 2",
+                target_language="pt-BR",
+            )
+        )
+        s2.flush()
+        record_circuit_failure(
+            s2,
+            provider_key="probe_cb_fail",
+            reason_code="provider_timeout",
+            settings_override=cfg,
+            commit=False,
+        )
+        s2.rollback()
+
+    with SessionMaker() as verify_db:
+        assert verify_db.get(ApplicationMaterial, sentinel_mat_2) is None
+        assert (
+            verify_db.scalar(
+                select(AICircuitBreakerRecord).where(
+                    AICircuitBreakerRecord.provider_key == "probe_cb_fail"
+                )
+            )
+            is None
+        )
+
+    # 3) confirm_ai_quota_usage(commit=False) após add() + flush() -> rollback() descarta versão e confirmação
+    reservation_1 = reserve_ai_quota(
+        db_session,
+        user_id=user.id,
+        operation_type="material_enhance",
+        reserved_tokens=500,
+        provider_name="mock",
+        model_name="mock-v1",
+        settings_override=cfg,
+    )
+    sentinel_mat_3 = uuid.uuid4()
+    with SessionMaker() as s3:
+        s3.add(
+            ApplicationMaterial(
+                id=sentinel_mat_3,
+                user_id=user.id,
+                opportunity_id=None,
+                material_type="resume",
+                title="Sentinel 3",
+                target_language="pt-BR",
+            )
+        )
+        s3.flush()
+        confirm_ai_quota_usage(
+            s3,
+            reservation_id=reservation_1.id,
+            user_id=user.id,
+            provider_name="mock",
+            model_name="mock-v1",
+            token_usage=LLMTokenUsage(input_tokens=100, output_tokens=50),
+            latency_ms=10,
+            commit=False,
+        )
+        s3.rollback()
+
+    with SessionMaker() as verify_db:
+        assert verify_db.get(ApplicationMaterial, sentinel_mat_3) is None
+        ledger_1 = verify_db.get(AIUsageLedger, reservation_1.id)
+        assert ledger_1 is not None
+        assert ledger_1.status == AIUsageStatus.RESERVED.value
+
+    # 4) fail_ai_quota_usage(commit=False) após add() + flush() -> rollback() mantém reserva como RESERVED
+    sentinel_mat_4 = uuid.uuid4()
+    with SessionMaker() as s4:
+        s4.add(
+            ApplicationMaterial(
+                id=sentinel_mat_4,
+                user_id=user.id,
+                opportunity_id=None,
+                material_type="resume",
+                title="Sentinel 4",
+                target_language="pt-BR",
+            )
+        )
+        s4.flush()
+        fail_ai_quota_usage(
+            s4,
+            reservation_id=reservation_1.id,
+            user_id=user.id,
+            error_code="provider_error",
+            provider_name="mock",
+            model_name="mock-v1",
+            commit=False,
+        )
+        s4.rollback()
+
+    with SessionMaker() as verify_db:
+        assert verify_db.get(ApplicationMaterial, sentinel_mat_4) is None
+        ledger_1_after = verify_db.get(AIUsageLedger, reservation_1.id)
+        assert ledger_1_after is not None
+        assert ledger_1_after.status == AIUsageStatus.RESERVED.value
+
+
+def test_aud443_03_control_chars_nbsp_unicode_whitespace_and_overlay_validation_error(
+    make_client,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AUD-443-03: Rejeita &nbsp;, whitespace Unicode e bytes de controle sem HTTP 500 e sem persistir versão."""
+    monkeypatch.setattr(
+        "app.services.materials.ai.orchestrator.get_settings",
+        lambda: _ai_enabled_settings(ai_circuit_breaker_failure_threshold=10),
+    )
+    user, client, csrf = _seed_user_and_csrf(make_client, db_session, "aud443_03@example.com")
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+
+    invalid_texts = [
+        "&nbsp;",
+        "&nbsp; &#160; &nbsp;",
+        "   \u00a0\u2000\u200b   ",
+        "Desenvolvedor Python\x00\x01\x02 com FastAPI",
+        "\x07\x1bTexto com controle ASCII",
+    ]
+
+    for bad_text in invalid_texts:
+        bad_provider = _CallbackLLMProvider(
+            lambda _req, txt=bad_text: {
+                "schema_version": 1,
+                "material_type": "resume",
+                "target_language": "pt-BR",
+                "suggestions": [
+                    {
+                        "slot_id": "summary",
+                        "suggested_text": txt,
+                        "cited_fact_keys": [facts["profile_key"]],
+                    }
+                ],
+            }
+        )
+        app.dependency_overrides[get_optional_llm_provider] = lambda: bad_provider
+        try:
+            resp = client.post(
+                f"/api/v1/materials/{mat.id}/versions/{v1.id}/ai-enhance",
+                json={"target_slot_ids": ["summary"]},
+                headers=_csrf_headers(csrf),
+            )
+        finally:
+            app.dependency_overrides.pop(get_optional_llm_provider, None)
+
+        assert resp.status_code == 502, f"Esperado 502 para texto inválido {bad_text!r}, obtido {resp.status_code}"
+        assert resp.headers.get("X-AI-Error-Code") == "malformed_output"
+        assert bad_text not in resp.text
+        assert "\x00" not in resp.text
+
+    # Verifica no banco que nenhuma versão extra foi persistida
+    db_session.expire_all()
+    assert len(get_material_detail(db_session, user, mat.id).versions) == 1
+
+    # Verifica também chamada direta a ControlledOverlayMerger.apply_overlay com model_construct bypassando schema
+    bypassed_item = AISuggestionItem.model_construct(
+        slot_id="summary",
+        suggested_text="&nbsp;",
+        cited_fact_keys=[facts["profile_key"]],
+    )
+    bypassed_output = AIMaterialEnhanceOutput.model_construct(
+        schema_version=1,
+        material_type="resume",
+        target_language="pt-BR",
+        suggestions=[bypassed_item],
+    )
+    with pytest.raises(AIOverlayConflictError) as exc_info:
+        ControlledOverlayMerger.apply_overlay(
+            material_type="resume",
+            source_content=v1.structured_content,
+            ai_output=bypassed_output,
+            target_slot_ids=["summary"],
+        )
+    assert "&nbsp;" not in str(exc_info.value)
+
+    # Texto legítimo com acentos, Unicode e pontuação funciona normalmente (201 Created)
+    valid_provider = _CallbackLLMProvider(
+        lambda _req: {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Atuação técnica sólida — Python, FastAPI, PostgreSQL e Docker na DataFlow Tecnologia.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+    )
+    app.dependency_overrides[get_optional_llm_provider] = lambda: valid_provider
+    try:
+        resp_ok = client.post(
+            f"/api/v1/materials/{mat.id}/versions/{v1.id}/ai-enhance",
+            json={"target_slot_ids": ["summary"]},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        app.dependency_overrides.pop(get_optional_llm_provider, None)
+    assert resp_ok.status_code == 201
+
+
+def test_aud443_04_never_echo_arbitrary_provider_slot_id_in_grounding_or_overlay_errors(
+    make_client,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AUD-443-04: Nunca ecoa slot_id arbitrário fabricado pelo provider em respostas HTTP 422 ou headers."""
+    monkeypatch.setattr(
+        "app.services.materials.ai.orchestrator.get_settings",
+        lambda: _ai_enabled_settings(),
+    )
+    user, client, csrf = _seed_user_and_csrf(make_client, db_session, "aud443_04@example.com")
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+
+    markers = [
+        ("experience_highlight:SECRET_MARKER_XYZ", "SECRET_MARKER_XYZ"),
+        ("project_highlight:SECRET_MARKER_ABC", "SECRET_MARKER_ABC"),
+        ("experience_highlight:PROVIDER_MARKER_EXFIL_999", "PROVIDER_MARKER_EXFIL_999"),
+    ]
+
+    for fake_slot, marker in markers:
+        # 1) Falha no grounding validator (cita profile_key em slot entity_bound fabricado)
+        provider_grounding = _CallbackLLMProvider(
+            lambda _req, fs=fake_slot: {
+                "schema_version": 1,
+                "material_type": "resume",
+                "target_language": "pt-BR",
+                "suggestions": [
+                    {
+                        "slot_id": fs,
+                        "suggested_text": "Desenvolvimento com Python e FastAPI.",
+                        "cited_fact_keys": [facts["profile_key"]],
+                    }
+                ],
+            }
+        )
+        app.dependency_overrides[get_optional_llm_provider] = lambda: provider_grounding
+        try:
+            resp_g = client.post(
+                f"/api/v1/materials/{mat.id}/versions/{v1.id}/ai-enhance",
+                json={},
+                headers=_csrf_headers(csrf),
+            )
+        finally:
+            app.dependency_overrides.pop(get_optional_llm_provider, None)
+
+        assert resp_g.status_code == 422
+        assert marker not in resp_g.text
+        for h_k, h_v in resp_g.headers.items():
+            assert marker not in h_k and marker not in h_v
+
+        # 2) Chamada direta ao ControlledOverlayMerger.apply_overlay com slot fabricado
+        direct_output = AIMaterialEnhanceOutput(
+            schema_version=1,
+            material_type="resume",
+            target_language="pt-BR",
+            suggestions=[
+                AISuggestionItem(
+                    slot_id=fake_slot,
+                    suggested_text="Desenvolvimento com Python e FastAPI.",
+                    cited_fact_keys=[facts["experience_key"]],
+                )
+            ],
+        )
+        with pytest.raises(AIOverlayConflictError) as exc_info:
+            ControlledOverlayMerger.apply_overlay(
+                material_type="resume",
+                source_content=v1.structured_content,
+                ai_output=direct_output,
+            )
+        assert marker not in str(exc_info.value)
+        assert exc_info.value.slot_id == "unrecognized_slot"
+
+
+@pytest.mark.parametrize("grounding_code", CANONICAL_GROUNDING_CODES)
+def test_aud443_05_all_canonical_grounding_codes_mapped_without_generic_fallback(
+    grounding_code: str,
+):
+    """AUD-443-05: Todos os códigos emitidos por StructuredGroundingValidator possuem mapeamento explícito sem fallback genérico."""
+    assert grounding_code in _GROUNDING_SAFE_LABELS
+    expected_label = _GROUNDING_SAFE_LABELS[grounding_code]
+    assert expected_label != "violação de fundamentação factual"
+
+    if grounding_code in ("material_type_mismatch", "language_mismatch"):
+        result = GroundingValidationResult(
+            is_valid=False,
+            rejection_reasons=[f"{grounding_code}: internal detail"],
+            flagged_items=[{"error": grounding_code, "detail": "SECRET_DETAIL_DO_NOT_ECHO"}],
+        )
+        err = build_sanitized_grounding_error(result, authorized_slot_ids={"summary"})
+        assert ("document", grounding_code) in err.violation_codes
+        assert expected_label in str(err)
+        assert "SECRET_DETAIL_DO_NOT_ECHO" not in str(err)
+    else:
+        result = GroundingValidationResult(
+            is_valid=False,
+            rejection_reasons=[f"[summary] {grounding_code}: SECRET_RAW_CLAIM"],
+            flagged_items=[
+                {
+                    "slot_id": "summary",
+                    "suggestion_index": 0,
+                    "flags": [f"{grounding_code}: SECRET_RAW_CLAIM"],
+                }
+            ],
+        )
+        err = build_sanitized_grounding_error(result, authorized_slot_ids={"summary"})
+        assert ("summary", grounding_code) in err.violation_codes
+        assert expected_label in str(err)
+        assert "SECRET_RAW_CLAIM" not in str(err)
+
+
+def test_aud443_06_recruiter_message_character_count_matches_normalized_rendered_text(
+    db_session: Session,
+):
+    """AUD-443-06: Recalcula character_count DEPOIS da normalização Pydantic, garantindo igualdade exata com o texto renderizado."""
+    user = create_user_account(
+        db_session,
+        email="aud443_06@example.com",
+        display_name="AUD 06",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+
+    rm_mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="recruiter_message",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+            writing_options=WritingGenerationOptions(channel="email", contact_name="Ana"),
+        ),
+    )
+    v1 = rm_mat.versions[0]
+
+    # Sugestão com múltiplos espaços repetidos, quebras de linha consecutivas e Unicode
+    provider = _CallbackLLMProvider(
+        lambda _req: {
+            "schema_version": 1,
+            "material_type": "recruiter_message",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "subject",
+                    "suggested_text": "   Candidatura   —   Desenvolvedor   Python   Backend   (FastAPI)   ",
+                    "cited_fact_keys": [facts["profile_key"]],
+                },
+                {
+                    "slot_id": "body",
+                    "suggested_text": (
+                        "Entro   em   contato   sobre   a   oportunidade   de   Desenvolvedor   Python   Backend.\n\n\n\n"
+                        "atuei   com   Python,   FastAPI   e   PostgreSQL   na   DataFlow Tecnologia (★)."
+                    ),
+                    "cited_fact_keys": [facts["experience_key"]],
+                },
+            ],
+        }
+    )
+
+    res = enhance_material_version_with_ai(
+        db_session,
+        user,
+        material_id=rm_mat.id,
+        version_id=v1.id,
+        payload=MaterialAIEnhanceRequest(),
+        injected_provider=provider,
+        settings_override=cfg,
+    )
+    v2 = res.versions[0]
+    expected_len = len(v2.rendered_plain_text.strip())
+    assert v2.structured_content.character_count == expected_len
+
+    # Verifica também o valor persistido diretamente no banco
+    db_session.expire_all()
+    persisted_ver = db_session.get(ApplicationMaterialVersion, v2.id)
+    assert persisted_ver is not None
+    assert persisted_ver.structured_content["character_count"] == expected_len
+
+
+def test_aud443_07_concurrent_deletion_and_mutations_without_database_locked(
+    db_engine,
+    db_session: Session,
+):
+    """AUD-443-07: Exclusão concorrente durante o provider, contra edição e contra lock de aprimoramento sem database is locked."""
+    user = create_user_account(
+        db_session,
+        email="aud443_07@example.com",
+        display_name="AUD 07",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+    SessionMaker = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+
+    # Cenário 1: Exclusão vence durante a execução do provider -> AIStaleSourceVersionError, ledger failed (material_id=None)
+    mat_1 = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_1 = mat_1.versions[0]
+
+    def _delete_during_provider(_req: LLMStructuredRequest) -> dict[str, Any]:
+        with SessionMaker() as del_db:
+            delete_material(del_db, user, mat_1.id)
+        return {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat_1.id,
+            version_id=v1_1.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_delete_during_provider),
+            settings_override=cfg,
+        )
+
+    db_session.expire_all()
+    assert db_session.get(ApplicationMaterial, mat_1.id) is None
+    ledger_1 = db_session.scalar(
+        select(AIUsageLedger).where(AIUsageLedger.user_id == user.id)
+    )
+    assert ledger_1 is not None
+    assert ledger_1.status == AIUsageStatus.FAILED.value
+    assert ledger_1.error_code == "stale_source_version"
+    assert ledger_1.material_id is None
+
+    # Cenário 2: Corrida simultânea entre delete_material e enhance_material_version_with_ai na aquisição do lock da Sessão #2
+    mat_2 = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_2 = mat_2.versions[0]
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def _provider_releasing_delete(_req: LLMStructuredRequest) -> dict[str, Any]:
+        barrier.wait(timeout=10.0)
+        return {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+
+    def _delete_worker() -> None:
+        barrier.wait(timeout=10.0)
+        with SessionMaker() as del_db:
+            try:
+                delete_material(del_db, user, mat_2.id)
+                with lock:
+                    results.append("deleted")
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+    def _enhance_worker() -> None:
+        with SessionMaker() as enh_db:
+            try:
+                enhance_material_version_with_ai(
+                    enh_db,
+                    user,
+                    material_id=mat_2.id,
+                    version_id=v1_2.id,
+                    payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+                    session_factory=SessionMaker,
+                    injected_provider=_CallbackLLMProvider(_provider_releasing_delete),
+                    settings_override=cfg,
+                )
+                with lock:
+                    results.append("enhanced")
+            except (AIStaleSourceVersionError, MaterialNotFoundError):
+                with lock:
+                    results.append("enhance_aborted_after_delete")
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+    t_del = threading.Thread(target=_delete_worker)
+    t_enh = threading.Thread(target=_enhance_worker)
+    t_del.start()
+    t_enh.start()
+    t_del.join(timeout=20.0)
+    t_enh.join(timeout=20.0)
+
+    assert not errors, f"Erros não tratados na corrida delete vs enhance: {errors}"
+    assert "deleted" in results
+    db_session.expire_all()
+    assert db_session.get(ApplicationMaterial, mat_2.id) is None
+
+    # Cenário 3: Corrida simultânea entre delete_material e update_material_version
+    mat_3 = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_3 = mat_3.versions[0]
+    edited_payload = v1_3.structured_content.model_dump(mode="json")
+    barrier_3 = threading.Barrier(2)
+    errors_3: list[Exception] = []
+
+    def _del_3() -> None:
+        barrier_3.wait(timeout=10.0)
+        with SessionMaker() as d_db:
+            try:
+                delete_material(d_db, user, mat_3.id)
+            except Exception as exc:
+                with lock:
+                    errors_3.append(exc)
+
+    def _upd_3() -> None:
+        barrier_3.wait(timeout=10.0)
+        with SessionMaker() as u_db:
+            try:
+                update_material_version(
+                    u_db,
+                    user,
+                    mat_3.id,
+                    v1_3.id,
+                    MaterialVersionUpdateRequest(structured_content=edited_payload),
+                )
+            except MaterialNotFoundError:
+                pass
+            except Exception as exc:
+                with lock:
+                    errors_3.append(exc)
+
+    td3 = threading.Thread(target=_del_3)
+    tu3 = threading.Thread(target=_upd_3)
+    td3.start()
+    tu3.start()
+    td3.join(timeout=20.0)
+    tu3.join(timeout=20.0)
+
+    assert not errors_3, f"Erros não tratados na corrida delete vs update: {errors_3}"
+    db_session.expire_all()
+    assert db_session.get(ApplicationMaterial, mat_3.id) is None
+
+    # Cenário 4: Comportamento quando o aprimoramento vence o lock da Sessão #2 antes da exclusão
+    mat_4 = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_4 = mat_4.versions[0]
+    enh_entered_lock = threading.Event()
+    allow_enh_commit = threading.Event()
+    errors_4: list[Exception] = []
+    outcomes_4: list[str] = []
+
+    BaseSession4 = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+    sess_count_4 = {"n": 0}
+
+    def _synced_post_factory() -> Session:
+        sess_count_4["n"] += 1
+        s = BaseSession4()
+        if sess_count_4["n"] == 2:
+            real_flush = s.flush
+
+            def _flush_and_signal(*a: Any, **kw: Any) -> None:
+                real_flush(*a, **kw)
+                if not enh_entered_lock.is_set():
+                    enh_entered_lock.set()
+                    allow_enh_commit.wait(timeout=10.0)
+
+            s.flush = _flush_and_signal  # type: ignore[method-assign]
+        return s
+
+    def _enh_wins_worker() -> None:
+        with SessionMaker() as e_db:
+            try:
+                res_4 = enhance_material_version_with_ai(
+                    e_db,
+                    user,
+                    material_id=mat_4.id,
+                    version_id=v1_4.id,
+                    payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+                    session_factory=_synced_post_factory,
+                    injected_provider=_CallbackLLMProvider(
+                        lambda _r: {
+                            "schema_version": 1,
+                            "material_type": "resume",
+                            "target_language": "pt-BR",
+                            "suggestions": [
+                                {
+                                    "slot_id": "summary",
+                                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                                    "cited_fact_keys": [
+                                        facts["profile_key"],
+                                        facts["experience_key"],
+                                    ],
+                                }
+                            ],
+                        }
+                    ),
+                    settings_override=cfg,
+                )
+                assert res_4.latest_active_version_number == 2
+                with lock:
+                    outcomes_4.append("enhanced_first")
+            except Exception as exc:
+                with lock:
+                    errors_4.append(exc)
+            finally:
+                enh_entered_lock.set()
+
+    def _del_after_enh_lock_worker() -> None:
+        enh_entered_lock.wait(timeout=10.0)
+        allow_enh_commit.set()
+        with SessionMaker() as d_db:
+            try:
+                delete_material(d_db, user, mat_4.id)
+                with lock:
+                    outcomes_4.append("deleted_second")
+            except Exception as exc:
+                with lock:
+                    errors_4.append(exc)
+
+    te4 = threading.Thread(target=_enh_wins_worker)
+    td4 = threading.Thread(target=_del_after_enh_lock_worker)
+    te4.start()
+    td4.start()
+    te4.join(timeout=20.0)
+    td4.join(timeout=20.0)
+
+    assert not errors_4, f"Erros não tratados quando aprimoramento vence antes da exclusão: {errors_4}"
+    assert sorted(outcomes_4) == ["deleted_second", "enhanced_first"]
+    db_session.expire_all()
+    assert db_session.get(ApplicationMaterial, mat_4.id) is None
+    # O ledger da chamada que venceu permanece COMPLETED com material_id=None e version_id=None
+    completed_after_del = db_session.scalars(
+        select(AIUsageLedger).where(
+            AIUsageLedger.user_id == user.id,
+            AIUsageLedger.status == AIUsageStatus.COMPLETED.value,
+        )
+    ).first()
+    assert completed_after_del is not None
+    assert completed_after_del.material_id is None
+    assert completed_after_del.version_id is None
+
+
+def test_aud443_08_contingency_session_creation_and_query_failures_preserve_original_exception(
+    db_engine,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AUD-443-08: Falha ao criar ou consultar a sessão de contingência nunca mascara a exceção original de persistência."""
+    user = create_user_account(
+        db_session,
+        email="aud443_08@example.com",
+        display_name="AUD 08",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+
+    provider = _CallbackLLMProvider(
+        lambda _req: {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+    )
+
+    BaseSession = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+
+    # Parte 1: 3ª chamada a session_factory() (db_contingency) falha na criação
+    counter_1 = {"n": 0}
+
+    def _factory_failing_on_3rd() -> Session:
+        counter_1["n"] += 1
+        if counter_1["n"] == 3:
+            raise ConnectionError("Secondary contingency session creation failure")
+        return BaseSession()
+
+    def _original_persist_error(*_args: Any, **_kwargs: Any):
+        raise ValueError("Original primary persistence error AUD-443-08-A")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            "app.services.materials.ai.execution_guard.confirm_ai_quota_usage",
+            _original_persist_error,
+        )
+        with pytest.raises(ValueError, match="Original primary persistence error AUD-443-08-A"):
+            enhance_material_version_with_ai(
+                db_session,
+                user,
+                material_id=mat.id,
+                version_id=v1.id,
+                payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+                session_factory=_factory_failing_on_3rd,
+                injected_provider=provider,
+                settings_override=cfg,
+            )
+
+    # Parte 2: 3ª sessão abre, mas db_contingency.scalar() falha ao consultar o banco
+    counter_2 = {"n": 0}
+
+    def _factory_failing_query_on_3rd() -> Session:
+        counter_2["n"] += 1
+        sess = BaseSession()
+        if counter_2["n"] == 3:
+            def _broken_scalar(*_a: Any, **_kw: Any):
+                raise RuntimeError("Secondary contingency query failure")
+
+            sess.scalar = _broken_scalar  # type: ignore[method-assign]
+        return sess
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            "app.services.materials.ai.execution_guard.confirm_ai_quota_usage",
+            _original_persist_error,
+        )
+        with pytest.raises(ValueError, match="Original primary persistence error AUD-443-08-A"):
+            enhance_material_version_with_ai(
+                db_session,
+                user,
+                material_id=mat.id,
+                version_id=v1.id,
+                payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+                session_factory=_factory_failing_query_on_3rd,
+                injected_provider=provider,
+                settings_override=cfg,
+            )
+
+
+def test_aud443_09_overlay_merger_no_silent_truncation_cross_entity_and_manual_edits_flag(
+    db_session: Session,
+):
+    """AUD-443-09: Sem truncamento silencioso, defesa cross-entity no merger e recálculo de has_unverified_manual_edits."""
+    user = create_user_account(
+        db_session,
+        email="aud443_09@example.com",
+        display_name="AUD 09",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+
+    res_mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    res_sc = res_mat.versions[0].structured_content
+
+    rm_mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="recruiter_message",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+            writing_options=WritingGenerationOptions(channel="email"),
+        ),
+    )
+    rm_sc = rm_mat.versions[0].structured_content
+
+    # Parte A: Rejeita texto que excede o limite do slot sem truncar silenciosamente
+    # 1) summary > 3000 chars
+    out_summary_long = AIMaterialEnhanceOutput(
+        schema_version=1,
+        material_type="resume",
+        target_language="pt-BR",
+        suggestions=[
+            AISuggestionItem(
+                slot_id="summary",
+                suggested_text="A" * 3001,
+                cited_fact_keys=[facts["profile_key"]],
+            )
+        ],
+    )
+    with pytest.raises(AIOverlayConflictError) as exc_sum:
+        ControlledOverlayMerger.apply_overlay(
+            material_type="resume",
+            source_content=res_sc,
+            ai_output=out_summary_long,
+        )
+    assert exc_sum.value.reason_code == "slot_text_too_long"
+
+    # 2) target_alignment > 1000 chars
+    out_align_long = AIMaterialEnhanceOutput(
+        schema_version=1,
+        material_type="resume",
+        target_language="pt-BR",
+        suggestions=[
+            AISuggestionItem(
+                slot_id="target_alignment",
+                suggested_text="B" * 1001,
+                cited_fact_keys=[facts["experience_key"]],
+            )
+        ],
+    )
+    with pytest.raises(AIOverlayConflictError) as exc_align:
+        ControlledOverlayMerger.apply_overlay(
+            material_type="resume",
+            source_content=res_sc,
+            ai_output=out_align_long,
+        )
+    assert exc_align.value.reason_code == "slot_text_too_long"
+
+    # 3) recruiter_message subject > 300 chars
+    out_subj_long = AIMaterialEnhanceOutput(
+        schema_version=1,
+        material_type="recruiter_message",
+        target_language="pt-BR",
+        suggestions=[
+            AISuggestionItem(
+                slot_id="subject",
+                suggested_text="C" * 301,
+                cited_fact_keys=[facts["profile_key"]],
+            )
+        ],
+    )
+    with pytest.raises(AIOverlayConflictError) as exc_subj:
+        ControlledOverlayMerger.apply_overlay(
+            material_type="recruiter_message",
+            source_content=rm_sc,
+            ai_output=out_subj_long,
+        )
+    assert exc_subj.value.reason_code == "slot_text_too_long"
+
+    # Parte B: Defesa em profundidade contra citações cross-entity diretamente no ControlledOverlayMerger
+    out_cross_entity = AIMaterialEnhanceOutput(
+        schema_version=1,
+        material_type="resume",
+        target_language="pt-BR",
+        suggestions=[
+            AISuggestionItem(
+                slot_id=f"experience_highlight:{facts['experience_id']}",
+                suggested_text="Desenvolvimento de APIs REST com Python e FastAPI.",
+                cited_fact_keys=[facts["experience_key"], facts["project_key"]],
+            )
+        ],
+    )
+    with pytest.raises(AIOverlayConflictError) as exc_cross:
+        ControlledOverlayMerger.apply_overlay(
+            material_type="resume",
+            source_content=res_sc,
+            ai_output=out_cross_entity,
+        )
+    assert exc_cross.value.reason_code == "cross_entity_citation"
+
+    # Citação multi-fatos em slot geral (summary) é permitida; citação exata da entidade em experience_highlight é permitida
+    out_valid_citations = AIMaterialEnhanceOutput(
+        schema_version=1,
+        material_type="resume",
+        target_language="pt-BR",
+        suggestions=[
+            AISuggestionItem(
+                slot_id="summary",
+                suggested_text="Desenvolvedor Python Backend com atuação confirmada em FastAPI e PostgreSQL.",
+                cited_fact_keys=[facts["profile_key"], facts["experience_key"]],
+            ),
+            AISuggestionItem(
+                slot_id=f"experience_highlight:{facts['experience_id']}",
+                suggested_text="Construção de APIs REST com Python, FastAPI e PostgreSQL na DataFlow Tecnologia.",
+                cited_fact_keys=[facts["experience_key"]],
+            ),
+        ],
+    )
+    valid_merge = ControlledOverlayMerger.apply_overlay(
+        material_type="resume",
+        source_content=res_sc,
+        ai_output=out_valid_citations,
+    )
+    assert len(valid_merge.applied_slot_ids) == 2
+
+    # Parte C: Recálculo de has_unverified_manual_edits
+    # 1) Quando summary é o ÚNICO bloco manual_edit e é substituído via target_slot_ids=["summary"],
+    #    has_unverified_manual_edits passa de True para False.
+    sc_with_one_manual = res_sc.model_copy(deep=True)
+    assert sc_with_one_manual.summary is not None
+    sc_with_one_manual.summary.provenance = "manual_edit"
+    sc_with_one_manual.has_unverified_manual_edits = True
+
+    merged_clean = ControlledOverlayMerger.apply_overlay(
+        material_type="resume",
+        source_content=sc_with_one_manual,
+        ai_output=AIMaterialEnhanceOutput(
+            schema_version=1,
+            material_type="resume",
+            target_language="pt-BR",
+            suggestions=[
+                AISuggestionItem(
+                    slot_id="summary",
+                    suggested_text="Resumo confirmado em Python, FastAPI e PostgreSQL.",
+                    cited_fact_keys=[facts["profile_key"]],
+                )
+            ],
+        ),
+        target_slot_ids=["summary"],
+    )
+    assert merged_clean.merged_content.has_unverified_manual_edits is False
+
+    # 2) Quando outro bloco continua manual_edit (ex.: target_alignment), has_unverified_manual_edits continua True
+    sc_with_two_manual = sc_with_one_manual.model_copy(deep=True)
+    assert sc_with_two_manual.target_alignment is not None
+    sc_with_two_manual.target_alignment.provenance = "manual_edit"
+
+    merged_still_manual = ControlledOverlayMerger.apply_overlay(
+        material_type="resume",
+        source_content=sc_with_two_manual,
+        ai_output=AIMaterialEnhanceOutput(
+            schema_version=1,
+            material_type="resume",
+            target_language="pt-BR",
+            suggestions=[
+                AISuggestionItem(
+                    slot_id="summary",
+                    suggested_text="Resumo confirmado em Python, FastAPI e PostgreSQL.",
+                    cited_fact_keys=[facts["profile_key"]],
+                )
+            ],
+        ),
+        target_slot_ids=["summary"],
+    )
+    assert merged_still_manual.merged_content.has_unverified_manual_edits is True
+
+
+def test_aud443_10_historical_link_unlink_cycle_during_provider_detected_by_toctou_fingerprint(
+    db_engine,
+    db_session: Session,
+):
+    """AUD-443-10: Ciclo de link seguido de unlink durante a execução do provider é detectado pelo fingerprint histórico."""
+    user = create_user_account(
+        db_session,
+        email="aud443_10@example.com",
+        display_name="AUD 10",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+
+    app_row = Application(
+        user_id=user.id,
+        opportunity_id=facts["opportunity"].id,
+        company_name=facts["opportunity"].company_name,
+        role_title=facts["opportunity"].title,
+        status=ApplicationStatus.INTERESTED.value,
+    )
+    db_session.add(app_row)
+    db_session.commit()
+    db_session.refresh(app_row)
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+    # Aprova v1 antes de iniciar o ai-enhance para que possa ser vinculada e desvinculada durante o provider
+    approve_material_version(db_session, user, mat.id, v1.id)
+
+    SessionMaker = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+
+    def _link_and_unlink_during_provider(_req: LLMStructuredRequest) -> dict[str, Any]:
+        from app.schemas.material import MaterialUnlinkRequest
+
+        with SessionMaker() as concurrent_db:
+            link_material_version(
+                concurrent_db,
+                user,
+                mat.id,
+                MaterialLinkRequest(application_id=app_row.id, version_id=v1.id),
+            )
+            unlink_material(
+                concurrent_db,
+                user,
+                mat.id,
+                MaterialUnlinkRequest(application_id=app_row.id),
+            )
+        return {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat.id,
+            version_id=v1.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_link_and_unlink_during_provider),
+            settings_override=cfg,
+        )
+
+    db_session.expire_all()
+    reloaded = get_material_detail(db_session, user, mat.id)
+    assert len(reloaded.versions) == 1
+    assert len(reloaded.links) == 1
+    assert reloaded.links[0].is_active is False
+
+    ledger = db_session.scalar(
+        select(AIUsageLedger).where(AIUsageLedger.material_id == mat.id)
+    )
+    assert ledger is not None
+    assert ledger.status == AIUsageStatus.FAILED.value
+    assert ledger.error_code == "stale_source_version"
+
+
+def test_aud443_11_concurrent_edit_derive_regenerate_and_link_during_provider(
+    db_engine,
+    db_session: Session,
+):
+    """AUD-443-11: Edição, derivação, regeneração e vínculo concorrentes durante o provider abortam com stale_source_version."""
+    user = create_user_account(
+        db_session,
+        email="aud443_11@example.com",
+        display_name="AUD 11",
+        password="StrongPass!2026",
+    )
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+    cfg = _ai_enabled_settings()
+    SessionMaker = sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
+
+    app_row = Application(
+        user_id=user.id,
+        opportunity_id=facts["opportunity"].id,
+        company_name=facts["opportunity"].company_name,
+        role_title=facts["opportunity"].title,
+        status=ApplicationStatus.INTERESTED.value,
+    )
+    db_session.add(app_row)
+    db_session.commit()
+    db_session.refresh(app_row)
+
+    def _valid_ai_payload(_req: LLMStructuredRequest) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "material_type": "resume",
+            "target_language": "pt-BR",
+            "suggestions": [
+                {
+                    "slot_id": "summary",
+                    "suggested_text": "Desenvolvedor Python com atuação confirmada em FastAPI e PostgreSQL.",
+                    "cited_fact_keys": [facts["profile_key"], facts["experience_key"]],
+                }
+            ],
+        }
+
+    # 1) Edição concorrente (update_material_version) durante o provider
+    mat_edit = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_edit = mat_edit.versions[0]
+
+    def _on_edit(req: LLMStructuredRequest) -> dict[str, Any]:
+        with SessionMaker() as c_db:
+            sc_dump = v1_edit.structured_content.model_dump(mode="json")
+            sc_dump["manual_notes"] = [
+                {
+                    "id": "concurrent-note",
+                    "title": "Nota",
+                    "content": "Edição concorrente durante o provider.",
+                    "source_fact_keys": [],
+                    "provenance": "user_authored",
+                }
+            ]
+            update_material_version(
+                c_db,
+                user,
+                mat_edit.id,
+                v1_edit.id,
+                MaterialVersionUpdateRequest(structured_content=sc_dump),
+            )
+        return _valid_ai_payload(req)
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat_edit.id,
+            version_id=v1_edit.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_on_edit),
+            settings_override=cfg,
+        )
+    db_session.expire_all()
+    assert len(get_material_detail(db_session, user, mat_edit.id).versions) == 1
+
+    # 2) Derivação concorrente (derive_material_version) durante o provider
+    mat_derive = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_derive = mat_derive.versions[0]
+
+    def _on_derive(req: LLMStructuredRequest) -> dict[str, Any]:
+        with SessionMaker() as c_db:
+            derive_material_version(
+                c_db,
+                user,
+                mat_derive.id,
+                v1_derive.id,
+                MaterialVersionDeriveRequest(user_instructions="Derivação concorrente"),
+            )
+        return _valid_ai_payload(req)
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat_derive.id,
+            version_id=v1_derive.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_on_derive),
+            settings_override=cfg,
+        )
+    db_session.expire_all()
+    derive_versions = get_material_detail(db_session, user, mat_derive.id).versions
+    assert len(derive_versions) == 2
+    assert derive_versions[0].origin == "derived"
+
+    # 3) Regeneração concorrente (regenerate_material_version) durante o provider
+    mat_regen = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_regen = mat_regen.versions[0]
+
+    def _on_regen(req: LLMStructuredRequest) -> dict[str, Any]:
+        with SessionMaker() as c_db:
+            regenerate_material_version(
+                c_db,
+                user,
+                mat_regen.id,
+                MaterialRegenerateRequest(user_instructions="Regeneração concorrente"),
+            )
+        return _valid_ai_payload(req)
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat_regen.id,
+            version_id=v1_regen.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_on_regen),
+            settings_override=cfg,
+        )
+    db_session.expire_all()
+    regen_versions = get_material_detail(db_session, user, mat_regen.id).versions
+    assert len(regen_versions) == 2
+    assert regen_versions[0].origin == "regenerated"
+
+    # 4) Vínculo concorrente (link_material_version) durante o provider
+    mat_link = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1_link = mat_link.versions[0]
+    approve_material_version(db_session, user, mat_link.id, v1_link.id)
+
+    def _on_link(req: LLMStructuredRequest) -> dict[str, Any]:
+        with SessionMaker() as c_db:
+            link_material_version(
+                c_db,
+                user,
+                mat_link.id,
+                MaterialLinkRequest(application_id=app_row.id, version_id=v1_link.id),
+            )
+        return _valid_ai_payload(req)
+
+    with pytest.raises(AIStaleSourceVersionError):
+        enhance_material_version_with_ai(
+            db_session,
+            user,
+            material_id=mat_link.id,
+            version_id=v1_link.id,
+            payload=MaterialAIEnhanceRequest(target_slot_ids=["summary"]),
+            session_factory=SessionMaker,
+            injected_provider=_CallbackLLMProvider(_on_link),
+            settings_override=cfg,
+        )
+    db_session.expire_all()
+    link_detail = get_material_detail(db_session, user, mat_link.id)
+    assert len(link_detail.versions) == 1
+    assert len(link_detail.links) == 1
+    assert link_detail.links[0].is_active is True
+
+
+def test_aud443_12_cors_expose_headers_for_ai_error_code_and_retry_after(
+    make_client,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AUD-443-12: CORSMiddleware expõe Content-Disposition, X-AI-Error-Code e Retry-After para o frontend."""
+    user, client, csrf = _seed_user_and_csrf(make_client, db_session, "aud443_12@example.com")
+    facts = _seed_confirmed_facts_and_opportunity(db_session, user.id)
+
+    mat = create_material(
+        db_session,
+        user,
+        MaterialCreateRequest(
+            material_type="resume",
+            opportunity_id=facts["opportunity"].id,
+            target_language="pt-BR",
+        ),
+    )
+    v1 = mat.versions[0]
+
+    monkeypatch.setattr(
+        "app.services.materials.ai.orchestrator.get_settings",
+        lambda: _ai_enabled_settings(ai_assisted_enabled=False),
+    )
+    headers = {
+        **_csrf_headers(csrf),
+        "Origin": "http://localhost:5180",
+    }
+    resp = client.post(
+        f"/api/v1/materials/{mat.id}/versions/{v1.id}/ai-enhance",
+        json={},
+        headers=headers,
+    )
+    assert resp.status_code == 503
+    assert resp.headers.get("X-AI-Error-Code") == "ai_disabled"
+    exposed = resp.headers.get("access-control-expose-headers", "")
+    exposed_set = {h.strip() for h in exposed.split(",") if h.strip()}
+    assert {"Content-Disposition", "X-AI-Error-Code", "Retry-After"}.issubset(
+        exposed_set
+    )
+

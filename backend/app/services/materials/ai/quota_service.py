@@ -535,6 +535,7 @@ def _load_owned_entry_for_transition(
     reservation_id: uuid.UUID,
     user_id: uuid.UUID,
     current_time: datetime,
+    allow_transaction_reset: bool = True,
 ) -> AIUsageLedger:
     _, _, day_key = _utc_day_bounds(current_time)
     acquire_quota_scope_locks(
@@ -544,6 +545,7 @@ def _load_owned_entry_for_transition(
             (f"user:{user_id}", "user"),
         ],
         current_time,
+        allow_transaction_reset=allow_transaction_reset,
     )
     stmt = select(AIUsageLedger).where(
         AIUsageLedger.id == reservation_id,
@@ -554,7 +556,8 @@ def _load_owned_entry_for_transition(
 
     entry = db.scalar(stmt)
     if entry is None:
-        db.rollback()
+        if allow_transaction_reset:
+            db.rollback()
         raise AIReservationNotFoundError("Reserva de IA não encontrada.")
     return entry
 
@@ -599,19 +602,22 @@ def confirm_ai_quota_usage(
             reservation_id=reservation_id,
             user_id=user_id,
             current_time=current_time,
+            allow_transaction_reset=commit,
         )
         if entry.status not in (
             AIUsageStatus.RESERVED.value,
             AIUsageStatus.EXPIRED.value,
         ):
-            db.rollback()
+            if commit:
+                db.rollback()
             raise AIReservationStateError(
                 f"Não é possível confirmar reserva no estado '{entry.status}'."
             )
 
         if resolved_version_id is not None:
             if entry.material_id is None:
-                db.rollback()
+                if commit:
+                    db.rollback()
                 raise AIReservationStateError(
                     "Não é possível vincular version_id a uma reserva sem material_id."
                 )
@@ -622,7 +628,8 @@ def confirm_ai_quota_usage(
                 )
             )
             if ver_exists is None:
-                db.rollback()
+                if commit:
+                    db.rollback()
                 raise AIReservationNotFoundError(
                     "Versão gerada informada para confirmação do ledger não pertence ao material."
                 )
@@ -711,12 +718,14 @@ def fail_ai_quota_usage(
             reservation_id=reservation_id,
             user_id=user_id,
             current_time=current_time,
+            allow_transaction_reset=commit,
         )
         if entry.status not in (
             AIUsageStatus.RESERVED.value,
             AIUsageStatus.EXPIRED.value,
         ):
-            db.rollback()
+            if commit:
+                db.rollback()
             raise AIReservationStateError(
                 f"Não é possível registrar falha para reserva no estado '{entry.status}'."
             )

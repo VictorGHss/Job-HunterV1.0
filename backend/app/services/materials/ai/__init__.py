@@ -76,6 +76,7 @@ from app.services.materials.ai.grounding_validator import (
 from app.services.materials.ai.orchestrator import (
     AI_ENHANCE_OPERATION_TYPE,
     AI_ENHANCE_SCHEMA_NAME,
+    CANONICAL_GROUNDING_CODES,
     DEFAULT_ENHANCE_MAX_OUTPUT_TOKENS,
     DEFAULT_RESERVED_TOKENS,
     build_sanitized_grounding_error,
@@ -136,6 +137,7 @@ __all__ = [
     "AI_SUPPORTED_MATERIAL_TYPES",
     "AuthorizedAIContext",
     "AuthorizedFactItem",
+    "CANONICAL_GROUNDING_CODES",
     "CircuitBreakerSnapshot",
     "ContextTruncationMetadata",
     "ControlledOverlayMerger",

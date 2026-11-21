@@ -24,12 +24,22 @@ def ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(UTC)
 
 
-def prepare_atomic_write_transaction(db: Session) -> str:
-    """Prepara uma transação curta de escrita evitando upgrade deadlock no SQLite."""
+def prepare_atomic_write_transaction(
+    db: Session,
+    *,
+    allow_transaction_reset: bool = True,
+) -> str:
+    """Prepara uma transação curta de escrita evitando upgrade deadlock no SQLite.
+
+    Quando ``allow_transaction_reset=False`` (ex.: operações chamadas com ``commit=False``
+    dentro de uma transação composta já aberta), NUNCA executa ``db.commit()`` implícito,
+    mesmo que ``db.new``, ``db.dirty`` e ``db.deleted`` estejam vazios após ``db.flush()``.
+    """
     dialect_name = db.get_bind().dialect.name
     if dialect_name == "sqlite":
         if (
-            not db.info.get("_in_composite_tx")
+            allow_transaction_reset
+            and not db.info.get("_in_composite_tx")
             and db.in_transaction()
             and not (db.new or db.dirty or db.deleted)
         ):
@@ -43,6 +53,8 @@ def acquire_quota_scope_locks(
     db: Session,
     scope_items: Sequence[tuple[str, str]],
     now: datetime,
+    *,
+    allow_transaction_reset: bool = True,
 ) -> None:
     """Adquire locks atômicos determinísticos sobre os escopos de cota informados.
 
@@ -55,7 +67,10 @@ def acquire_quota_scope_locks(
     if not scope_items:
         return
 
-    dialect_name = prepare_atomic_write_transaction(db)
+    dialect_name = prepare_atomic_write_transaction(
+        db,
+        allow_transaction_reset=allow_transaction_reset,
+    )
     dedup_sorted = sorted(dict(scope_items).items(), key=lambda pair: pair[0])
     rows = [
         {
@@ -112,6 +127,7 @@ def acquire_material_exclusivity_lock(
     user_id: uuid.UUID,
     material_id: uuid.UUID,
     source_version_id: uuid.UUID | None = None,
+    allow_transaction_reset: bool = True,
 ) -> None:
     """Adquire lock exclusivo sobre o material pai (e opcionalmente a versão-fonte).
 
@@ -124,7 +140,10 @@ def acquire_material_exclusivity_lock(
       após ``prepare_atomic_write_transaction``, obtendo ``RESERVED`` write lock antes
       de qualquer leitura da transação e evitando deadlocks de upgrade ``SHARED -> RESERVED``.
     """
-    dialect_name = prepare_atomic_write_transaction(db)
+    dialect_name = prepare_atomic_write_transaction(
+        db,
+        allow_transaction_reset=allow_transaction_reset,
+    )
     if dialect_name == "sqlite":
         db.execute(
             update(ApplicationMaterial)

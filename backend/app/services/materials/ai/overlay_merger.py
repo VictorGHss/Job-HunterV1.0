@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import re
+
+from pydantic import ValidationError
 
 from app.schemas.material import (
     AnyMaterialStructuredContent,
@@ -15,12 +18,105 @@ from app.services.materials.ai.ai_schemas import (
     AIMaterialEnhanceOutput,
     AIMaterialTypeLiteral,
     AISuggestionItem,
+    has_visible_unicode_text,
     parse_and_validate_slot_for_material,
 )
 from app.services.materials.ai.contracts import AIOverlayConflictError
 from app.services.materials.recruiter_message_composer import (
     render_recruiter_message_plain_text,
 )
+from app.services.opportunities.sanitization import sanitize_external_html_text
+
+_FORBIDDEN_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+_SLOT_MAX_LENGTHS: dict[tuple[str, str], int] = {
+    ("resume", "summary"): 3000,
+    ("resume", "target_alignment"): 1000,
+    ("recruiter_message", "subject"): 300,
+}
+_DEFAULT_SLOT_MAX_LENGTH = 4000
+
+
+def _resolve_slot_max_length(
+    material_type: AIMaterialTypeLiteral,
+    slot_id: str,
+) -> int:
+    return _SLOT_MAX_LENGTHS.get((material_type, slot_id), _DEFAULT_SLOT_MAX_LENGTH)
+
+
+def _recompute_has_unverified_manual_edits(
+    content: AnyMaterialStructuredContent,
+) -> bool:
+    """Recalcula has_unverified_manual_edits com a mesma semântica dos compositores/reconciliadores."""
+    if isinstance(content, ResumeStructuredContent):
+        return any(
+            [
+                content.header.provenance != "confirmed_fact",
+                content.summary is not None and content.summary.provenance != "confirmed_fact",
+                content.target_alignment is not None
+                and content.target_alignment.provenance != "confirmed_fact",
+                any(item.provenance != "confirmed_fact" for item in content.experiences),
+                any(item.provenance != "confirmed_fact" for item in content.projects),
+                any(item.provenance != "confirmed_fact" for item in content.education),
+                any(item.provenance != "confirmed_fact" for item in content.skills),
+                any(item.provenance != "confirmed_fact" for item in content.languages),
+                len(content.manual_notes) > 0,
+            ]
+        )
+
+    if isinstance(content, CoverLetterStructuredContent):
+        return any(
+            [
+                content.header.provenance != "confirmed_fact",
+                content.recipient_line.provenance != "confirmed_fact",
+                content.greeting.provenance != "confirmed_fact",
+                content.opening.provenance != "confirmed_fact",
+                any(
+                    item.provenance != "confirmed_fact"
+                    for item in content.relevance_highlights
+                ),
+                content.opportunity_alignment is not None
+                and content.opportunity_alignment.provenance != "confirmed_fact",
+                content.closing.provenance != "confirmed_fact",
+                len(content.manual_notes) > 0,
+            ]
+        )
+
+    if isinstance(content, RecruiterMessageStructuredContent):
+        return any(
+            [
+                content.subject is not None and content.subject.provenance != "confirmed_fact",
+                content.greeting.provenance != "confirmed_fact",
+                content.body.provenance != "confirmed_fact",
+                content.sign_off.provenance != "confirmed_fact",
+                len(content.manual_notes) > 0,
+            ]
+        )
+
+    if isinstance(content, FreelanceProposalStructuredContent):
+        return any(
+            [
+                content.header.provenance != "confirmed_fact",
+                content.introduction.provenance != "confirmed_fact",
+                content.project_understanding.provenance != "confirmed_fact",
+                any(
+                    ev.provenance != "confirmed_fact"
+                    for ev in content.relevant_evidence
+                ),
+                content.suggested_approach.provenance != "confirmed_fact",
+                content.alignment_points.provenance != "confirmed_fact",
+                content.closing.provenance != "confirmed_fact",
+                len(content.manual_notes) > 0,
+            ]
+        )
+
+    if isinstance(content, ApplicationAnswersStructuredContent):
+        return (
+            any(it.provenance != "confirmed_fact" for it in content.items)
+            or len(content.manual_notes) > 0
+        )
+
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +174,9 @@ class ControlledOverlayMerger:
     - Implementa Política 2 para ``manual_edit``: protegido em modo automático (``target_slot_ids=None``)
       e permitido apenas quando explicitamente listado em ``target_slot_ids`` (exceto em
       ``application_answers``, onde apenas ``answered_from_facts`` + ``confirmed_fact`` são elegíveis).
-    - Validação All-or-Nothing: qualquer slot inválido, protegido ou sem entidade correspondente
-      aborta a operação inteira sem aplicar alterações parciais.
+    - Validação All-or-Nothing: qualquer slot inválido, protegido, com citação cruzada, texto acima do
+      limite ou sem entidade correspondente aborta a operação inteira sem aplicar alterações parciais
+      e sem ecoar ``slot_id`` não reconhecido na versão de origem.
     """
 
     @staticmethod
@@ -243,7 +340,7 @@ class ControlledOverlayMerger:
             return slots
 
         raise AIOverlayConflictError(
-            f"Tipo de material não suportado para overlay de IA: '{material_type}'.",
+            "Tipo de material não suportado para overlay de IA.",
             reason_code="unsupported_material_type",
         )
 
@@ -266,14 +363,14 @@ class ControlledOverlayMerger:
                     parsed = parse_and_validate_slot_for_material(material_type, raw_slot)
                 except ValueError as exc:
                     raise AIOverlayConflictError(
-                        str(exc),
-                        slot_id=raw_slot.strip(),
+                        "Um ou mais slots solicitados não são permitidos para este tipo de material.",
+                        slot_id="unrecognized_slot",
                         reason_code="invalid_slot_for_material",
                     ) from exc
                 if parsed.slot_id not in inspected_map:
                     raise AIOverlayConflictError(
-                        f"O slot solicitado '{parsed.slot_id}' não existe na versão de origem.",
-                        slot_id=parsed.slot_id,
+                        "Um ou mais slots solicitados não existem na versão de origem.",
+                        slot_id="unrecognized_slot",
                         reason_code="slot_target_not_found",
                     )
                 if parsed.slot_id not in explicit_targets:
@@ -377,10 +474,11 @@ class ControlledOverlayMerger:
         """Aplica sugestões validadas de IA de forma All-or-Nothing sobre cópia profunda de source_content."""
         if ai_output.material_type != material_type:
             raise AIOverlayConflictError(
-                f"Tipo de material da resposta da IA ('{ai_output.material_type}') diverge do material ('{material_type}').",
+                "O tipo de material da sugestão da IA diverge do material de origem.",
                 reason_code="material_type_mismatch",
             )
 
+        inspected_map = cls._inspect_all_addressable_slots(material_type, source_content)
         resolution = cls.resolve_eligible_slots(
             material_type=material_type,
             source_content=source_content,
@@ -390,21 +488,80 @@ class ControlledOverlayMerger:
 
         # Fase 1: Validação All-or-Nothing antes de qualquer mutação na cópia
         for suggestion in ai_output.suggestions:
-            if suggestion.slot_id not in eligible_map:
+            raw_slot_id = suggestion.slot_id
+            # Nunca ecoa slot_id desconhecido na versão de origem (AUD-443-04)
+            safe_slot_id = (
+                raw_slot_id if raw_slot_id in inspected_map else "unrecognized_slot"
+            )
+            if raw_slot_id not in eligible_map:
+                if safe_slot_id == "unrecognized_slot":
+                    msg = "Sugestão retornada para slot não reconhecido na versão de origem."
+                else:
+                    msg = f"Sugestão retornada para slot protegido ou não solicitado: '{safe_slot_id}'."
                 raise AIOverlayConflictError(
-                    f"Sugestão retornada para slot não elegível ou não solicitado: '{suggestion.slot_id}'.",
-                    slot_id=suggestion.slot_id,
+                    msg,
+                    slot_id=safe_slot_id,
                     reason_code="ineligible_or_unrequested_slot",
                 )
-            slot_info = eligible_map[suggestion.slot_id]
+
+            slot_info = eligible_map[raw_slot_id]
+
+            # Validação de citação factual obrigatória e defesa em profundidade contra cross-entity (AUD-443-09B)
+            if not suggestion.cited_fact_keys:
+                raise AIOverlayConflictError(
+                    f"O slot '{safe_slot_id}' exige ao menos uma citação factual confirmada.",
+                    slot_id=safe_slot_id,
+                    reason_code="missing_citation",
+                )
+            if slot_info.required_fact_key is not None:
+                if slot_info.required_fact_key not in suggestion.cited_fact_keys:
+                    raise AIOverlayConflictError(
+                        f"O slot parametrizado '{safe_slot_id}' exige citação da entidade correspondente.",
+                        slot_id=safe_slot_id,
+                        reason_code="missing_entity_fact_citation",
+                    )
+                for cited_key in suggestion.cited_fact_keys:
+                    if cited_key != slot_info.required_fact_key:
+                        raise AIOverlayConflictError(
+                            f"O slot parametrizado '{safe_slot_id}' não permite citação cruzada de outra entidade.",
+                            slot_id=safe_slot_id,
+                            reason_code="cross_entity_citation",
+                        )
+
+            # Defesa em profundidade contra caracteres de controle, texto vazio pós-sanitização e excesso de tamanho (AUD-443-03 / AUD-443-09A)
+            raw_text = suggestion.suggested_text
+            if not isinstance(raw_text, str) or _FORBIDDEN_CONTROL_CHARS_RE.search(raw_text):
+                raise AIOverlayConflictError(
+                    f"O texto sugerido para o slot '{safe_slot_id}' contém caracteres de controle inválidos.",
+                    slot_id=safe_slot_id,
+                    reason_code="invalid_control_characters",
+                )
+            max_len = _resolve_slot_max_length(material_type, raw_slot_id)
+            if len(raw_text.strip()) > max_len:
+                raise AIOverlayConflictError(
+                    f"O texto sugerido para o slot '{safe_slot_id}' excede o limite máximo de {max_len} caracteres.",
+                    slot_id=safe_slot_id,
+                    reason_code="slot_text_too_long",
+                )
+            normalized_text = sanitize_external_html_text(
+                raw_text,
+                max_length=max_len + 16,
+            )
             if (
-                slot_info.required_fact_key is not None
-                and slot_info.required_fact_key not in suggestion.cited_fact_keys
+                not normalized_text
+                or not normalized_text.strip()
+                or not has_visible_unicode_text(normalized_text)
             ):
                 raise AIOverlayConflictError(
-                    f"O slot parametrizado '{suggestion.slot_id}' exige citação de '{slot_info.required_fact_key}'.",
-                    slot_id=suggestion.slot_id,
-                    reason_code="missing_entity_fact_citation",
+                    f"O texto sugerido para o slot '{safe_slot_id}' tornou-se vazio após sanitização.",
+                    slot_id=safe_slot_id,
+                    reason_code="empty_after_sanitization",
+                )
+            if len(normalized_text.strip()) > max_len:
+                raise AIOverlayConflictError(
+                    f"O texto sugerido para o slot '{safe_slot_id}' excede o limite máximo de {max_len} caracteres.",
+                    slot_id=safe_slot_id,
+                    reason_code="slot_text_too_long",
                 )
 
         # Fase 2: Aplicação em cópia profunda (source_content original permanece intacto)
@@ -419,12 +576,29 @@ class ControlledOverlayMerger:
             )
             applied_ids.append(suggestion.slot_id)
 
-        if isinstance(cloned, RecruiterMessageStructuredContent):
-            plain = render_recruiter_message_plain_text(cloned, language=cloned.language).strip()
-            cloned.character_count = len(plain)
+        # Recalcula has_unverified_manual_edits sobre os blocos resultantes (AUD-443-09C)
+        cloned.has_unverified_manual_edits = _recompute_has_unverified_manual_edits(cloned)
 
-        # Fase 3: Revalidação estrutural Pydantic do modelo resultante
-        validated_clone = cloned.__class__.model_validate(cloned.model_dump(mode="python"))
+        # Fase 3: Revalidação e normalização estrutural Pydantic do modelo resultante (AUD-443-03)
+        try:
+            validated_clone = cloned.__class__.model_validate(
+                cloned.model_dump(mode="python")
+            )
+        except ValidationError:
+            raise AIOverlayConflictError(
+                "O conteúdo resultante da sugestão violou as restrições estruturais do material.",
+                reason_code="structural_validation_failed",
+            ) from None
+
+        # Fase 4: Recalcula character_count DEPOIS da normalização Pydantic (AUD-443-06)
+        if isinstance(validated_clone, RecruiterMessageStructuredContent):
+            plain = render_recruiter_message_plain_text(
+                validated_clone,
+                language=validated_clone.language,
+            ).strip()
+            validated_clone = validated_clone.model_copy(
+                update={"character_count": len(plain)}
+            )
 
         return OverlayMergeResult(
             merged_content=validated_clone,
@@ -441,18 +615,31 @@ class ControlledOverlayMerger:
         suggestion: AISuggestionItem,
     ) -> None:
         slot_id = suggestion.slot_id
+        max_len = _resolve_slot_max_length(material_type, slot_id)
         text = suggestion.suggested_text.strip()
+        if not text or not has_visible_unicode_text(text):
+            raise AIOverlayConflictError(
+                "O texto sugerido tornou-se vazio após sanitização.",
+                slot_id=slot_id,
+                reason_code="empty_after_sanitization",
+            )
+        if len(text) > max_len:
+            raise AIOverlayConflictError(
+                f"O texto sugerido para o slot '{slot_id}' excede o limite máximo de {max_len} caracteres.",
+                slot_id=slot_id,
+                reason_code="slot_text_too_long",
+            )
         cited = list(suggestion.cited_fact_keys)
 
         if material_type == "resume":
             assert isinstance(cloned_content, ResumeStructuredContent)
             if slot_id == "summary" and cloned_content.summary is not None:
-                cloned_content.summary.text = text[:3000]
+                cloned_content.summary.text = text
                 cloned_content.summary.provenance = "confirmed_fact"
                 cloned_content.summary.source_fact_keys = cited
                 return
             if slot_id == "target_alignment" and cloned_content.target_alignment is not None:
-                cloned_content.target_alignment.alignment_note = text[:1000]
+                cloned_content.target_alignment.alignment_note = text
                 cloned_content.target_alignment.provenance = "confirmed_fact"
                 cloned_content.target_alignment.source_fact_keys = cited
                 return
@@ -460,7 +647,7 @@ class ControlledOverlayMerger:
                 target_id = slot_id.split(":", 1)[1]
                 for exp in cloned_content.experiences:
                     if exp.entity_id == target_id:
-                        exp.description = text[:4000]
+                        exp.description = text
                         exp.provenance = "confirmed_fact"
                         exp.source_fact_keys = cited
                         return
@@ -468,13 +655,13 @@ class ControlledOverlayMerger:
                 target_id = slot_id.split(":", 1)[1]
                 for proj in cloned_content.projects:
                     if proj.entity_id == target_id:
-                        proj.description = text[:4000]
+                        proj.description = text
                         proj.provenance = "confirmed_fact"
                         proj.source_fact_keys = cited
                         return
             raise AIOverlayConflictError(
-                f"Slot '{slot_id}' não encontrado no currículo.",
-                slot_id=slot_id,
+                "Slot não encontrado no currículo.",
+                slot_id="unrecognized_slot",
                 reason_code="slot_target_not_found",
             )
 
@@ -484,8 +671,8 @@ class ControlledOverlayMerger:
                 blk = getattr(cloned_content, slot_id)
                 if blk is None:
                     raise AIOverlayConflictError(
-                        f"O slot '{slot_id}' não está ativo nesta carta.",
-                        slot_id=slot_id,
+                        "O slot solicitado não está ativo nesta carta.",
+                        slot_id="unrecognized_slot",
                         reason_code="slot_target_not_found",
                     )
                 blk.text = text
@@ -501,8 +688,8 @@ class ControlledOverlayMerger:
                         ev.source_fact_keys = cited
                         return
             raise AIOverlayConflictError(
-                f"Slot '{slot_id}' não encontrado na carta de apresentação.",
-                slot_id=slot_id,
+                "Slot não encontrado na carta de apresentação.",
+                slot_id="unrecognized_slot",
                 reason_code="slot_target_not_found",
             )
 
@@ -512,10 +699,10 @@ class ControlledOverlayMerger:
                 if cloned_content.subject is None:
                     raise AIOverlayConflictError(
                         "O slot 'subject' não está ativo nesta mensagem.",
-                        slot_id=slot_id,
+                        slot_id="unrecognized_slot",
                         reason_code="slot_target_not_found",
                     )
-                cloned_content.subject.text = text[:300]
+                cloned_content.subject.text = text
                 cloned_content.subject.provenance = "confirmed_fact"
                 cloned_content.subject.source_fact_keys = cited
                 return
@@ -526,8 +713,8 @@ class ControlledOverlayMerger:
                 blk.source_fact_keys = cited
                 return
             raise AIOverlayConflictError(
-                f"Slot '{slot_id}' não encontrado na mensagem para recrutador.",
-                slot_id=slot_id,
+                "Slot não encontrado na mensagem para recrutador.",
+                slot_id="unrecognized_slot",
                 reason_code="slot_target_not_found",
             )
 
@@ -554,8 +741,8 @@ class ControlledOverlayMerger:
                         ev.source_fact_keys = cited
                         return
             raise AIOverlayConflictError(
-                f"Slot '{slot_id}' não encontrado na proposta freelance.",
-                slot_id=slot_id,
+                "Slot não encontrado na proposta freelance.",
+                slot_id="unrecognized_slot",
                 reason_code="slot_target_not_found",
             )
 
@@ -572,7 +759,7 @@ class ControlledOverlayMerger:
                         item.source_fact_keys = cited
                         return
             raise AIOverlayConflictError(
-                f"Slot '{slot_id}' não encontrado nas respostas de candidatura.",
-                slot_id=slot_id,
+                "Slot não encontrado nas respostas de candidatura.",
+                slot_id="unrecognized_slot",
                 reason_code="slot_target_not_found",
             )

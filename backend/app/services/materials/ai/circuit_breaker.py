@@ -51,8 +51,13 @@ def _lock_or_create_breaker_row(
     db: Session,
     provider_key: str,
     now: datetime,
+    *,
+    allow_transaction_reset: bool = True,
 ) -> AICircuitBreakerRecord:
-    dialect_name = prepare_atomic_write_transaction(db)
+    dialect_name = prepare_atomic_write_transaction(
+        db,
+        allow_transaction_reset=allow_transaction_reset,
+    )
     init_values = {
         "provider_key": provider_key,
         "state": AICircuitState.CLOSED.value,
@@ -325,7 +330,12 @@ def record_circuit_success(
     key = _normalize_provider_key(provider_key)
 
     def _tx() -> CircuitBreakerSnapshot:
-        row = _lock_or_create_breaker_row(db, key, current_time)
+        row = _lock_or_create_breaker_row(
+            db,
+            key,
+            current_time,
+            allow_transaction_reset=commit,
+        )
         row.state = AICircuitState.CLOSED.value
         row.consecutive_failures = 0
         row.opened_at = None
@@ -369,7 +379,12 @@ def record_circuit_failure(
     )
 
     def _tx() -> CircuitBreakerSnapshot:
-        row = _lock_or_create_breaker_row(db, key, current_time)
+        row = _lock_or_create_breaker_row(
+            db,
+            key,
+            current_time,
+            allow_transaction_reset=commit,
+        )
         prev_state = row.state
         next_failures = int(row.consecutive_failures) + 1
         row.consecutive_failures = next_failures

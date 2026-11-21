@@ -336,8 +336,9 @@ def _reconcile_post_commit_failure(
     cfg: Settings,
 ) -> GuardedAIExecutionResult[T]:
     """Reconcilia falhas pré-commit ou commits ambíguos em sessão curta de contingência."""
-    db_contingency = session_factory()
+    db_contingency: Session | None = None
     try:
+        db_contingency = session_factory()
         ledger_row = db_contingency.scalar(
             select(AIUsageLedger).where(
                 AIUsageLedger.id == reservation.id,
@@ -409,13 +410,21 @@ def _reconcile_post_commit_failure(
                 now=now,
             )
     except Exception as contingency_exc:
-        db_contingency.rollback()
+        if db_contingency is not None:
+            try:
+                db_contingency.rollback()
+            except Exception:
+                pass
         logger.warning(
             "Sessão de contingência indisponível para reconciliar reserva reservation_id=%s error_class=%s",
             str(reservation.id),
             contingency_exc.__class__.__name__,
         )
     finally:
-        db_contingency.close()
+        if db_contingency is not None:
+            try:
+                db_contingency.close()
+            except Exception:
+                pass
 
     raise persist_exc
