@@ -4360,4 +4360,120 @@ describe("Job Hunter Frontend - Fase 04.4.4 AI Studio", () => {
     expect(exportSpy).not.toHaveBeenCalled();
     expect(downloadSpy).not.toHaveBeenCalled();
   });
+
+  it("04.4.5 Integração: Candidatura -> Workspace -> AI Studio -> Rejeição -> retorno à candidatura preserva v1 ativa", async () => {
+    const selectedApp: ApplicationItem = {
+      id: "app-445-int",
+      opportunity_id: "opp-1",
+      opportunity_source_status: "active",
+      role_title: "Backend Python Engineer",
+      company_name: "Orbit",
+      source_name: "RemoteOK",
+      source_url: "https://example.com/vaga-445",
+      application_url: "https://example.com/apply-445",
+      work_mode: "remote",
+      employment_type: "pj",
+      seniority_level: "junior",
+      location_text: "Remoto",
+      status: "preparing",
+      status_label: "Preparando",
+      is_closed: false,
+      next_action: null,
+      next_action_due_at: null,
+      next_deadline_at: null,
+      next_deadline_label: null,
+      applied_at: null,
+      interview_at: null,
+      assessment_deadline_at: null,
+      expected_response_at: null,
+      closed_at: null,
+      personal_summary: null,
+      notes: null,
+      last_external_interaction_at: null,
+      last_external_interaction_type: null,
+      last_external_interaction_type_label: null,
+      last_external_interaction_note: null,
+      interviews: [],
+      assessments: [],
+      contacts: [],
+      status_history: [],
+      created_at: "2026-11-20T10:00:00Z",
+      updated_at: "2026-11-20T10:00:00Z",
+    };
+
+    let rejectedState = false;
+    const buildSummary = () => ({
+      id: "mat-444",
+      opportunity_id: "opp-1",
+      opportunity_title: "Backend Python Engineer",
+      opportunity_company_name: "Orbit",
+      material_type: "cover_letter",
+      title: "Carta 444",
+      target_language: "pt-BR",
+      latest_version_number: rejectedState ? 2 : 1,
+      latest_version_id: rejectedState ? "ver-444-2" : "ver-444-1",
+      latest_is_approved: !rejectedState,
+      latest_active_version_number: 1,
+      latest_active_version_id: "ver-444-1",
+      latest_active_is_approved: true,
+      linked_version_id: "ver-444-1",
+      linked_version_number: 1,
+      linked_version_is_approved: true,
+      has_approved_version: true,
+      active_links_count: 1,
+      created_at: "2026-11-20T10:00:00Z",
+      updated_at: "2026-11-21T10:00:00Z",
+    });
+
+    vi.spyOn(api.materials, "list").mockImplementation(async () => [buildSummary()]);
+    vi.spyOn(api.materials, "get").mockResolvedValue(
+      mkMaterial([{ ...v1, is_approved: true, is_mutable: false }], v1.id)
+    );
+    vi.spyOn(api.materials, "aiEnhanceVersion").mockResolvedValue(
+      mkMaterial([v2, { ...v1, is_approved: true, is_mutable: false }], v2.id)
+    );
+    vi.spyOn(api.materials, "rejectAiVersion").mockImplementation(async () => {
+      rejectedState = true;
+      return mkMaterial(
+        [
+          { ...v1, is_approved: true, is_mutable: false },
+          { ...v2, is_rejected: true, rejected_at: "2026-11-21T12:00:00Z" },
+        ],
+        v1.id
+      );
+    });
+
+    render(
+      <ApplicationDetailModal
+        selectedApp={selectedApp}
+        initialTab="materials"
+        allStatusOptions={[{ value: "preparing", label: "Preparando" }]}
+        workModeLabels={{ remote: "Remoto", hybrid: "Híbrido", onsite: "Presencial", unknown: "Não informado" }}
+        employmentLabels={{ clt: "CLT", pj: "PJ", internship: "Estágio", freelance: "Freelance", temporary: "Temporário", other: "Outro", unknown: "Não informado" }}
+        seniorityLabels={{ internship: "Estágio", entry_level: "Trainee", junior: "Júnior", mid_level: "Pleno", senior: "Sênior", staff_principal: "Staff", management: "Gestão", unknown: "Não informado" }}
+        onClose={vi.fn()}
+        onRefreshApplication={vi.fn().mockResolvedValue(undefined)}
+        onDeletedApplication={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    expect(await screen.findByText("Carta 444")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Abrir \/ Editar/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^AI Studio & Comparação$/i }));
+    await screen.findByTestId("ai-studio-panel");
+
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Rejeitar sugestão/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/rejeitada e mantida no histórico/i)).toBeInTheDocument()
+    );
+
+    // Fecha o workspace e confirma que a listagem da candidatura mantém v1 como ativa/vinculada
+    fireEvent.click(screen.getByRole("button", { name: /Fechar janela de material/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("ai-studio-panel")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("v1")).toBeInTheDocument();
+    expect(screen.queryByText("v2")).not.toBeInTheDocument();
+  });
 });

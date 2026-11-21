@@ -6,6 +6,23 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.5] - 2026-11-21 — Subfase 04.4.5: Hardening e Integração Final (MVP 1.0)
+
+### Adicionado e Validado
+
+- **Testes de Integração Ponta a Ponta (`backend/tests/test_integration_hardening_phase0445.py`):**
+  - `TC-445-01`: jornada vertical completa conectando oportunidade, compatibilidade, candidatura, evolução de status, entrevista, interação externa, agenda, perfil confirmado (com isolamento de habilidades pendentes), geração determinística de material, aprovação explícita, vínculo e exportação binária PDF/DOCX.
+  - `TC-445-02`: ciclo integrado de AI Studio (com provider determinístico restrito a testes) sobre material já aprovado e vinculado, validando rejeição persistida de v2, recuperação de v1 ativa em `latest_active_version_*` e nas listagens da candidatura, preservação de v2 no histórico, ledger confirmado e bloqueio de aprovação/derivação/vínculo/exportação em v2 rejeitada.
+  - `TC-445-03`: isolamento multiusuário integrado entre duas contas independentes cobrindo perfil, oportunidade privada, candidatura, material, AI Studio (sem consumo de quota/ledger de terceiros), proteção CSRF em mutações e revogação de sessão no logout.
+  - `TC-445-04`: validação de defaults seguros (`AI_ASSISTED_ENABLED=false`, `AI_PROVIDER=disabled`), recusa de `AI_PROVIDER='mock'` em `ENVIRONMENT=production` na validação de `Settings` e presença dos cabeçalhos HTTP de segurança.
+- **Integração Frontend (`frontend/src/test/App.test.tsx`):**
+  - Novo teste integrado percorrendo `ApplicationDetailModal` → `MaterialWorkspaceModal` → `AI Studio` → rejeição de sugestão v2 → retorno à candidatura confirmando preservação de v1 como ativa/vinculada (**27/27 testes Vitest**).
+- **Documentação consolidada (`README.md`, `CHANGELOG.md`):**
+  - Cabeçalho de fase e árvore de diretórios do `README.md` sincronizados com migrations `0011`/`0012`, pacote `services/materials/ai/`, suítes `04.4.1`–`04.4.5` e componentes do AI Studio.
+  - Corrigida contagem consolidada de testes na entrada `0.4.4.4` do `CHANGELOG.md` (26/26 após correções pós-auditoria).
+
+---
+
 ## [0.4.4.4] - 2026-11-21 — Subfase 04.4.4: AI Studio (Frontend)
 
 ### Adicionado
@@ -15,7 +32,7 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 - **Decisão humana:** Aprovar sugestão, Editar como versão derivada (`/derive`, nunca `PUT` em versão imutável) e Rejeitar sugestão (`/reject-ai`); versões rejeitadas exibem selo e têm aprovação, edição, exportação, download e novo aprimoramento bloqueados.
 - **Erros categorizados:** `ApiError` agora expõe `errorCode` (`X-AI-Error-Code`) e `retryAfterSeconds` (`Retry-After`); mensagens para quota, IA desabilitada, circuit breaker, versão desatualizada (com "Recarregar material"), conflito de estado, grounding/overlay, timeout e falha de provider.
 - Tipos: `ai_assisted`, `is_rejected`, `rejected_at`, `latest_active_version_*`, `MaterialAIEnhancePayload`, `MaterialAIOverlayMetadata`.
-- 5 novos testes Vitest (20/20 no total).
+- 11 novos testes Vitest no total da subfase (5 na implementação inicial + 6 nas correções pós-auditoria; 26/26 no total).
 
 ### Segurança
 
