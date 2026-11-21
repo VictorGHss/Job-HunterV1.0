@@ -3585,3 +3585,210 @@ describe("Job Hunter Frontend - Fase 04.3 Exportação Profissional em PDF e DOC
     });
   });
 });
+
+
+describe("Job Hunter Frontend - Fase 04.4.4 AI Studio", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.history.replaceState({}, "", "/");
+    vi.restoreAllMocks();
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+  });
+
+  const FACT = "project:proj-1";
+  const baseCover = (opening: string, prov: "confirmed_fact" | "manual_edit" = "confirmed_fact"): CoverLetterStructuredContent => ({
+    schema_version: 1,
+    material_type: "cover_letter",
+    language: "pt-BR",
+    header: { full_name: "Usuário Teste", professional_title: null, email: null, phone: null, location_text: null, links: [], source_fact_keys: [], provenance: "confirmed_fact" },
+    recipient_line: { text: "Equipe", source_fact_keys: [], provenance: "confirmed_fact" },
+    greeting: { text: "Olá,", source_fact_keys: [], provenance: "confirmed_fact" },
+    opening: { text: opening, source_fact_keys: [FACT], provenance: prov },
+    relevance_highlights: [],
+    opportunity_alignment: null,
+    closing: { text: "Atenciosamente.", source_fact_keys: [], provenance: "user_authored" },
+    manual_notes: [],
+    has_unverified_manual_edits: false,
+  });
+
+  const versionBase = {
+    material_id: "mat-444",
+    material_type: "cover_letter",
+    user_instructions: null,
+    source_facts_snapshot: { schema_version: 1, facts: { [FACT]: { entity_type: "project", name: "Job Hunter", role: "Dev" } } },
+    unconfirmed_warnings: [],
+    missing_requirements: [],
+    rendered_markdown: "# carta",
+    rendered_plain_text: "carta",
+    has_blocking_pending_fields: false,
+    pending_requirements_count: 0,
+    approved_at: null,
+    is_linked_to_any_application: false,
+    created_at: "2026-11-20T10:00:00Z",
+    updated_at: "2026-11-20T10:00:00Z",
+  };
+
+  const v1 = {
+    ...versionBase,
+    id: "ver-444-1",
+    version_number: 1,
+    origin: "generated",
+    parent_version_id: null,
+    structured_content: baseCover("Abertura original."),
+    is_approved: false,
+    is_mutable: true,
+    is_rejected: false,
+  } as MaterialDetailResponse["versions"][number];
+
+  const v2 = {
+    ...versionBase,
+    id: "ver-444-2",
+    version_number: 2,
+    origin: "ai_assisted",
+    parent_version_id: "ver-444-1",
+    structured_content: baseCover("Abertura aprimorada pela IA."),
+    source_facts_snapshot: {
+      ...versionBase.source_facts_snapshot,
+      ai_overlay: { applied_slot_ids: ["opening"], preserved_user_authored_slot_ids: ["closing"], preserved_manual_edit_slot_ids: [] },
+    },
+    is_approved: false,
+    is_mutable: false,
+    is_rejected: false,
+  } as MaterialDetailResponse["versions"][number];
+
+  const mkMaterial = (versions: MaterialDetailResponse["versions"], activeId: string): MaterialDetailResponse => ({
+    id: "mat-444",
+    material_type: "cover_letter",
+    title: "Carta 444",
+    target_language: "pt-BR",
+    opportunity_id: "opp-1",
+    opportunity_title: "Desenvolvedor Júnior",
+    opportunity_company_name: "Orbit",
+    latest_version_number: versions[0].version_number,
+    latest_active_version_number: versions.find((v) => v.id === activeId)?.version_number,
+    latest_active_version_id: activeId,
+    has_approved_version: false,
+    versions,
+    links: [],
+    created_at: "2026-11-20T10:00:00Z",
+    updated_at: "2026-11-20T10:00:00Z",
+  });
+
+  async function openStudio() {
+    vi.spyOn(api.auth, "me").mockResolvedValue({ authenticated: true, user: mockUser, csrf_token: "c" });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue([]);
+    vi.spyOn(api.opportunities, "list").mockResolvedValue({
+      items: [buildMockOpportunity({ tracked_application_id: "app-444", tracked_application_status: "preparing" })],
+      total: 1, page: 1, page_size: 12, total_pages: 1,
+    });
+    vi.spyOn(api.materials, "preAnalyze").mockResolvedValue({
+      can_generate: true, blocking_reasons: [], material_type: "resume",
+      compatible_material_types: ["resume", "cover_letter"], target_language: "pt-BR",
+      opportunity_context: { opportunity_id: "opp-1", application_id: "app-444", title: "x", company_name: "Orbit", professional_area: null, seniority_level: null, experience_summary: null, required_technologies: [], desirable_technologies: [], all_technologies: [], language: "pt-BR" },
+      contact_preview: { profile_confirmed: true, has_full_name: true, has_email: true, has_phone: false, has_location: true, links_count: 0, location_label: null },
+      used_facts: [], unconfirmed_warnings: [], missing_requirements: [], confirmed_counts: {},
+    } as MaterialPreAnalysisResponse);
+    vi.spyOn(api.materials, "create").mockResolvedValue(mkMaterial([v1], v1.id));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: /Gerar currículo/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Gerar Currículo Direcionado/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^AI Studio & Comparação$/i }));
+    await screen.findByTestId("ai-studio-panel");
+  }
+
+  it("solicita aprimoramento, exibe diff estruturado, fatos citados e aprova sugestão", async () => {
+    const enhanceSpy = vi.spyOn(api.materials, "aiEnhanceVersion").mockResolvedValue(mkMaterial([v2, v1], v1.id));
+    const approveSpy = vi.spyOn(api.materials, "approveVersion").mockResolvedValue(
+      mkMaterial([{ ...v2, is_approved: true }, v1], v2.id)
+    );
+    await openStudio();
+    fireEvent.change(screen.getByLabelText(/Instruções opcionais/i), { target: { value: "Seja objetivo" } });
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    await waitFor(() =>
+      expect(enhanceSpy).toHaveBeenCalledWith("mat-444", "ver-444-1", {
+        target_slot_ids: null,
+        user_instructions: "Seja objetivo",
+      })
+    );
+    expect((await screen.findAllByText(/Revisão Humana Obrigatória/i)).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId("slot-diff-opening")).toHaveTextContent("Alterado pela IA");
+    expect(screen.getByTestId("slot-diff-opening")).toHaveTextContent("Abertura aprimorada pela IA.");
+    expect(screen.getByTestId("slot-diff-opening")).toHaveTextContent("Job Hunter");
+    expect(screen.getByTestId("slot-diff-closing")).toHaveTextContent("Autoral");
+    fireEvent.click(screen.getByRole("button", { name: /Aprovar sugestão/i }));
+    await waitFor(() => expect(approveSpy).toHaveBeenCalledWith("mat-444", "ver-444-2"));
+  });
+
+  it("rejeita sugestão, restaura versão ativa e bloqueia ações em versão rejeitada", async () => {
+    vi.spyOn(api.materials, "aiEnhanceVersion").mockResolvedValue(mkMaterial([v2, v1], v1.id));
+    const rejectSpy = vi.spyOn(api.materials, "rejectAiVersion").mockResolvedValue(
+      mkMaterial([{ ...v2, is_rejected: true, rejected_at: "2026-11-21T10:00:00Z" }, v1], v1.id)
+    );
+    await openStudio();
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Rejeitar sugestão/i }));
+    await waitFor(() => expect(rejectSpy).toHaveBeenCalledWith("mat-444", "ver-444-2"));
+    await waitFor(() => expect(screen.getByText(/rejeitada e mantida no histórico/i)).toBeInTheDocument());
+    // versão rejeitada selecionável: ações bloqueadas
+    fireEvent.click(screen.getByRole("button", { name: /v2.*Rejeitada/i }));
+    expect(await screen.findByText(/Versão v2 rejeitada:/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Aprovar versão/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Aprimorar com IA/i })).toBeDisabled();
+  });
+
+  it("edita sugestão salvando como versão derivada via /derive", async () => {
+    vi.spyOn(api.materials, "aiEnhanceVersion").mockResolvedValue(mkMaterial([v2, v1], v1.id));
+    const updateSpy = vi.spyOn(api.materials, "updateVersion");
+    const deriveSpy = vi.spyOn(api.materials, "deriveVersion").mockResolvedValue(
+      mkMaterial([{ ...v1, id: "ver-444-3", version_number: 3, origin: "derived", parent_version_id: "ver-444-2" }, v2, v1], "ver-444-3")
+    );
+    await openStudio();
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Editar como versão derivada/i }));
+    const ta = await screen.findByDisplayValue("Abertura aprimorada pela IA.");
+    fireEvent.change(ta, { target: { value: "Abertura revisada por mim." } });
+    fireEvent.click(screen.getAllByRole("button", { name: /Salvar versão derivada/i })[0]);
+    await waitFor(() =>
+      expect(deriveSpy).toHaveBeenCalledWith(
+        "mat-444",
+        "ver-444-2",
+        expect.objectContaining({ structured_content: expect.objectContaining({ material_type: "cover_letter" }) })
+      )
+    );
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it("apresenta erros categorizados de quota com Retry-After e stale com recarga", async () => {
+    const enhanceSpy = vi
+      .spyOn(api.materials, "aiEnhanceVersion")
+      .mockRejectedValueOnce(new ApiError("Quota excedida.", 429, "quota_exceeded:user_daily", 30))
+      .mockRejectedValueOnce(new ApiError("Versão mudou.", 409, "stale_source_version"));
+    const getSpy = vi.spyOn(api.materials, "get").mockResolvedValue(mkMaterial([v1], v1.id));
+    await openStudio();
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    expect(await screen.findByText(/Quota de IA atingida/i)).toBeInTheDocument();
+    expect(screen.getByText(/30 segundo/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Aprimorar com IA/i }));
+    await waitFor(() => expect(enhanceSpy).toHaveBeenCalledTimes(2));
+    fireEvent.click(await screen.findByRole("button", { name: /Recarregar material/i }));
+    await waitFor(() => expect(getSpy).toHaveBeenCalledWith("mat-444"));
+  });
+
+  it("ApiError captura X-AI-Error-Code e Retry-After do cliente HTTP", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 503,
+      headers: new Headers({ "content-type": "application/json", "X-AI-Error-Code": "circuit_open", "Retry-After": "45" }),
+      json: async () => ({ detail: "Circuito aberto." }),
+    } as unknown as Response);
+    await expect(api.materials.aiEnhanceVersion("m", "v", {})).rejects.toMatchObject({
+      status: 503,
+      errorCode: "circuit_open",
+      retryAfterSeconds: 45,
+    });
+  });
+});

@@ -840,7 +840,12 @@ export interface MaterialDownloadResult {
   contentType: string;
   sizeBytes: number;
 }
-export type MaterialVersionOrigin = "generated" | "manual_edit" | "regenerated" | "derived";
+export type MaterialVersionOrigin =
+  | "generated"
+  | "manual_edit"
+  | "regenerated"
+  | "derived"
+  | "ai_assisted";
 export type MaterialTypeValue =
   | "resume"
   | "cover_letter"
@@ -1196,6 +1201,35 @@ export interface MaterialLinkItem {
   is_active: boolean;
 }
 
+export interface MaterialAIOverlayMetadata {
+  ledger_entry_id?: string | null;
+  source_version_id?: string;
+  source_version_number?: number;
+  provider_name?: string;
+  model_name?: string;
+  eligible_slot_ids?: string[];
+  applied_slot_ids?: string[];
+  preserved_user_authored_slot_ids?: string[];
+  preserved_manual_edit_slot_ids?: string[];
+}
+
+export interface MaterialSnapshotFactItem {
+  fact_key?: string;
+  entity_type?: MaterialFactEntityType | string;
+  entity_id?: string;
+  confirmed_at?: string | null;
+  label?: string;
+  summary?: string;
+  relevance_score?: number;
+  matched_requirements?: string[];
+  eligible_as_target_role?: boolean | null;
+}
+
+export interface MaterialAIEnhancePayload {
+  target_slot_ids?: string[] | null;
+  user_instructions?: string | null;
+}
+
 export interface MaterialVersionItem {
   id: string;
   material_id: string;
@@ -1214,6 +1248,8 @@ export interface MaterialVersionItem {
   pending_requirements_count?: number;
   is_approved: boolean;
   approved_at: string | null;
+  is_rejected?: boolean;
+  rejected_at?: string | null;
   is_linked_to_any_application: boolean;
   is_mutable: boolean;
   created_at: string;
@@ -1229,6 +1265,8 @@ export interface MaterialDetailResponse {
   title: string;
   target_language: MaterialTargetLanguage | string;
   latest_version_number: number;
+  latest_active_version_number?: number;
+  latest_active_version_id?: string | null;
   has_approved_version: boolean;
   versions: MaterialVersionItem[];
   links: MaterialLinkItem[];
@@ -1247,6 +1285,9 @@ export interface MaterialSummaryItem {
   latest_version_number: number;
   latest_version_id: string | null;
   latest_is_approved: boolean;
+  latest_active_version_number?: number;
+  latest_active_version_id?: string | null;
+  latest_active_is_approved?: boolean;
   linked_version_id?: string | null;
   linked_version_number?: number | null;
   linked_version_is_approved?: boolean;

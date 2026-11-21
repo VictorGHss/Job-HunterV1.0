@@ -6,6 +6,23 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.4] - 2026-11-21 — Subfase 04.4.4: AI Studio (Frontend)
+
+### Adicionado
+
+- **AI Studio** (`MaterialAIStudioPanel.tsx`, `aiStudioUtils.ts`) integrado ao `MaterialWorkspaceModal`: solicitação de aprimoramento (`ai-enhance`) com seleção automática ou manual de slots (Política 2 para `manual_edit`; `user_authored` e `pending_fields` bloqueados), instruções opcionais (≤ 1500 caracteres) e prevenção de envio duplicado.
+- **Comparação estruturada slot a slot** entre versão pai e sugestão `ai_assisted`, com proveniência (`confirmed_fact`, `manual_edit`, `user_authored`) e fatos citados resolvidos apenas a partir de `source_facts_snapshot` (nenhuma citação inventada).
+- **Decisão humana:** Aprovar sugestão, Editar como versão derivada (`/derive`, nunca `PUT` em versão imutável) e Rejeitar sugestão (`/reject-ai`); versões rejeitadas exibem selo e têm aprovação, edição, exportação, download e novo aprimoramento bloqueados.
+- **Erros categorizados:** `ApiError` agora expõe `errorCode` (`X-AI-Error-Code`) e `retryAfterSeconds` (`Retry-After`); mensagens para quota, IA desabilitada, circuit breaker, versão desatualizada (com "Recarregar material"), conflito de estado, grounding/overlay, timeout e falha de provider.
+- Tipos: `ai_assisted`, `is_rejected`, `rejected_at`, `latest_active_version_*`, `MaterialAIEnhancePayload`, `MaterialAIOverlayMetadata`.
+- 5 novos testes Vitest (20/20 no total).
+
+### Segurança
+
+- Nenhum SDK de IA nem chamada externa no navegador; nenhuma aprovação automática de sugestões.
+
+---
+
 ## [0.4.4.3] - 2026-11-21 — Subfase 04.4.3: Orquestração e Versionamento da IA Assistida
 
 ### Adicionado e Endurecido

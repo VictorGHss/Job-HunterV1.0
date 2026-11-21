@@ -33,6 +33,11 @@ import { Input, Label } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { DocumentPreviewCard } from "@/components/materials/DocumentPreviewCard";
 import {
+  formatAIErrorPresentation,
+  type AIErrorPresentation,
+} from "@/components/materials/aiStudioUtils";
+import { MaterialAIStudioPanel } from "@/components/materials/MaterialAIStudioPanel";
+import {
   ApplicationAnswersEditor,
   CoverLetterEditor,
   FreelanceProposalEditor,
@@ -46,6 +51,7 @@ import type {
   DocumentDownloadFormat,
   DocumentTemplateId,
   FreelanceProposalStructuredContent,
+  MaterialAIEnhancePayload,
   MaterialBlockProvenance,
   MaterialDetailResponse,
   MaterialExportFormat,
@@ -74,7 +80,7 @@ interface MaterialWorkspaceModalProps {
   onNavigateProfile?: () => void;
 }
 
-type WorkspacePanelTab = "editor" | "preview" | "history";
+type WorkspacePanelTab = "editor" | "ai_studio" | "preview" | "history";
 
 const DEFAULT_CONTACT_OPTIONS: ContactInclusionOptions = {
   include_email: true,
@@ -97,6 +103,7 @@ const ORIGIN_LABELS: Record<string, string> = {
   manual_edit: "Editado",
   regenerated: "Regenerado",
   derived: "Derivado",
+  ai_assisted: "IA assistida",
 };
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
@@ -226,6 +233,9 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   );
   const [downloadingFormat, setDownloadingFormat] =
     useState<DocumentDownloadFormat | null>(null);
+  const [aiEnhancing, setAiEnhancing] = useState(false);
+  const [aiError, setAiError] = useState<AIErrorPresentation | null>(null);
+  const [isDerivingEditMode, setIsDerivingEditMode] = useState(false);
 
   const buildWritingOptionsPayload = useCallback(() => {
     const cleanedQuestions = questionDrafts
@@ -297,12 +307,20 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   const loadExistingMaterial = useCallback(async (matId: string) => {
     setBusyAction(true);
     setErrorMsg(null);
+    setAiError(null);
+    setIsDerivingEditMode(false);
     try {
       const detail = await api.materials.get(matId);
       setMaterial(detail);
-      const latest = detail.versions[0] || null;
-      setActiveVersionId(latest?.id || null);
-      setDraftContent(latest ? latest.structured_content : null);
+      const preferred =
+        (detail.latest_active_version_id
+          ? detail.versions.find((v) => v.id === detail.latest_active_version_id)
+          : null) ||
+        detail.versions.find((v) => !v.is_rejected) ||
+        detail.versions[0] ||
+        null;
+      setActiveVersionId(preferred?.id || null);
+      setDraftContent(preferred ? preferred.structured_content : null);
       if (detail.target_language === "en" || detail.target_language === "pt-BR") {
         setTargetLanguage(detail.target_language);
       }
@@ -351,20 +369,35 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
     selectedMaterialType,
   ]);
 
+  const latestActiveVersion: MaterialVersionItem | null = useMemo(() => {
+    if (!material || material.versions.length === 0) return null;
+    if (material.latest_active_version_id) {
+      const matched = material.versions.find(
+        (v) => v.id === material.latest_active_version_id
+      );
+      if (matched) return matched;
+    }
+    return (
+      material.versions.find((v) => !v.is_rejected) || material.versions[0]
+    );
+  }, [material]);
+
   const activeVersion: MaterialVersionItem | null = useMemo(() => {
     if (!material || material.versions.length === 0) return null;
     if (activeVersionId) {
       return (
         material.versions.find((v) => v.id === activeVersionId) ||
+        latestActiveVersion ||
         material.versions[0]
       );
     }
-    return material.versions[0];
-  }, [activeVersionId, material]);
+    return latestActiveVersion || material.versions[0];
+  }, [activeVersionId, latestActiveVersion, material]);
 
   useEffect(() => {
     if (activeVersion) {
       setDraftContent(activeVersion.structured_content);
+      setIsDerivingEditMode(false);
     }
   }, [activeVersion]);
 
@@ -570,9 +603,10 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   };
 
   const handleApproveVersion = async () => {
-    if (!material || !activeVersion) return;
+    if (!material || !activeVersion || activeVersion.is_rejected) return;
     setBusyAction(true);
     setErrorMsg(null);
+    setAiError(null);
     setSuccessMsg(null);
     try {
       const updated = await api.materials.approveVersion(
@@ -580,17 +614,151 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
         activeVersion.id
       );
       setMaterial(updated);
+      setIsDerivingEditMode(false);
       setSuccessMsg(
         `Versão v${activeVersion.version_number} aprovada e bloqueada contra mutações.`
       );
       onMaterialChanged?.();
     } catch (err) {
+      const formatted = formatAIErrorPresentation(err);
+      setAiError(formatted);
       setErrorMsg(
         err instanceof Error ? err.message : "Falha ao aprovar versão."
       );
     } finally {
       setBusyAction(false);
     }
+  };
+
+  const handleRunAiEnhance = async (payload: MaterialAIEnhancePayload) => {
+    if (!material || !activeVersion || busyAction || aiEnhancing) return;
+    setAiEnhancing(true);
+    setBusyAction(true);
+    setErrorMsg(null);
+    setAiError(null);
+    setSuccessMsg(null);
+    try {
+      const updated = await api.materials.aiEnhanceVersion(
+        material.id,
+        activeVersion.id,
+        payload
+      );
+      setMaterial(updated);
+      const newest = updated.versions[0] || null;
+      if (newest) {
+        setActiveVersionId(newest.id);
+        setDraftContent(newest.structured_content);
+      }
+      setIsDerivingEditMode(false);
+      setPanelTab("ai_studio");
+      setSuccessMsg(
+        `Sugestão de IA v${newest?.version_number || ""} gerada como rascunho não aprovado. Revise a comparação estruturada e escolha uma decisão humana.`
+      );
+      onMaterialChanged?.();
+    } catch (err) {
+      const formatted = formatAIErrorPresentation(err);
+      setAiError(formatted);
+      setErrorMsg(formatted.description);
+    } finally {
+      setAiEnhancing(false);
+      setBusyAction(false);
+    }
+  };
+
+  const handleRejectAiVersion = async () => {
+    if (!material || !activeVersion || busyAction) return;
+    setBusyAction(true);
+    setErrorMsg(null);
+    setAiError(null);
+    setSuccessMsg(null);
+    try {
+      const rejectedVerNum = activeVersion.version_number;
+      const updated = await api.materials.rejectAiVersion(
+        material.id,
+        activeVersion.id
+      );
+      setMaterial(updated);
+      const restored =
+        (updated.latest_active_version_id
+          ? updated.versions.find(
+              (v) => v.id === updated.latest_active_version_id
+            )
+          : null) ||
+        updated.versions.find((v) => !v.is_rejected) ||
+        updated.versions[0] ||
+        null;
+      setActiveVersionId(restored?.id || null);
+      setDraftContent(restored ? restored.structured_content : null);
+      setIsDerivingEditMode(false);
+      setSuccessMsg(
+        `Sugestão de IA v${rejectedVerNum} rejeitada e mantida no histórico como rejeitada. A versão ativa voltou para v${restored?.version_number || ""}.`
+      );
+      onMaterialChanged?.();
+    } catch (err) {
+      const formatted = formatAIErrorPresentation(err);
+      setAiError(formatted);
+      setErrorMsg(formatted.description);
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleStartDeriveEdit = () => {
+    if (!activeVersion || activeVersion.is_rejected) return;
+    setDraftContent(activeVersion.structured_content);
+    setIsDerivingEditMode(true);
+    setPanelTab("editor");
+    setSuccessMsg(
+      `Modo de edição derivada ativado a partir da sugestão v${activeVersion.version_number}. Edite os blocos desejados e clique em "Salvar versão derivada".`
+    );
+  };
+
+  const handleCancelDeriveEdit = () => {
+    if (activeVersion) {
+      setDraftContent(activeVersion.structured_content);
+    }
+    setIsDerivingEditMode(false);
+    setSuccessMsg(null);
+  };
+
+  const handleSaveDerivedFromAi = async () => {
+    if (!material || !activeVersion || !draftContent || busyAction) return;
+    setBusyAction(true);
+    setErrorMsg(null);
+    setAiError(null);
+    setSuccessMsg(null);
+    try {
+      const updated = await api.materials.deriveVersion(
+        material.id,
+        activeVersion.id,
+        {
+          structured_content: draftContent,
+        }
+      );
+      setMaterial(updated);
+      const newest = updated.versions[0] || null;
+      if (newest) {
+        setActiveVersionId(newest.id);
+        setDraftContent(newest.structured_content);
+      }
+      setIsDerivingEditMode(false);
+      setPanelTab("editor");
+      setSuccessMsg(
+        `Versão v${newest?.version_number || ""} salva como versão derivada editável a partir da sugestão v${activeVersion.version_number}.`
+      );
+      onMaterialChanged?.();
+    } catch (err) {
+      const formatted = formatAIErrorPresentation(err);
+      setAiError(formatted);
+      setErrorMsg(formatted.description);
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleReloadCurrentMaterial = async () => {
+    if (!material) return;
+    await loadExistingMaterial(material.id);
   };
 
   const handleLinkToApplication = async () => {
@@ -733,6 +901,12 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
     draftContent && !("material_type" in draftContent)
       ? (draftContent as ResumeStructuredContent)
       : null;
+
+  const canEditDraft = Boolean(
+    activeVersion &&
+      !activeVersion.is_rejected &&
+      (activeVersion.is_mutable || isDerivingEditMode)
+  );
 
   const selectedTypeMeta =
     MATERIAL_TYPE_OPTIONS.find((opt) => opt.value === selectedMaterialType) ||
@@ -1391,7 +1565,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
             </div>
           )}
 
-          {/* MODO 2: EDITOR, PREVIEW, HISTÓRICO, APROVAÇÃO E VÍNCULO */}
+          {/* MODO 2: EDITOR, AI STUDIO, PREVIEW, HISTÓRICO, APROVAÇÃO E VÍNCULO */}
           {material && activeVersion && draftContent && (
             <div className="space-y-4">
               {/* Barra de versões */}
@@ -1407,13 +1581,20 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                         className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
                           isSelected
                             ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border bg-background text-foreground hover:bg-muted/40"
+                            : ver.is_rejected
+                              ? "border-destructive/40 bg-destructive/5 text-muted-foreground hover:bg-destructive/10"
+                              : "border-border bg-background text-foreground hover:bg-muted/40"
                         }`}
                       >
                         <span>v{ver.version_number}</span>
                         <span className="opacity-80">
                           {ORIGIN_LABELS[ver.origin] || ver.origin}
                         </span>
+                        {ver.is_rejected && (
+                          <span className="rounded bg-destructive/20 px-1 py-0.2 text-[10px] font-semibold">
+                            Rejeitada
+                          </span>
+                        )}
                         {ver.is_approved && <Lock className="h-3 w-3" />}
                       </button>
                     );
@@ -1424,6 +1605,20 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                   <Button
                     type="button"
                     size="sm"
+                    variant={panelTab === "ai_studio" ? "default" : "outline"}
+                    disabled={busyAction}
+                    onClick={() => setPanelTab("ai_studio")}
+                  >
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                    {activeVersion.origin === "ai_assisted" &&
+                    !activeVersion.is_approved &&
+                    !activeVersion.is_rejected
+                      ? "Revisar sugestão IA"
+                      : "AI Studio"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
                     variant="outline"
                     disabled={busyAction}
                     onClick={handleRegenerate}
@@ -1431,7 +1626,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
                     Regenerar do Perfil
                   </Button>
-                  {!activeVersion.is_mutable && (
+                  {!activeVersion.is_mutable && !activeVersion.is_rejected && (
                     <Button
                       type="button"
                       size="sm"
@@ -1443,7 +1638,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                       Criar versão derivada para editar
                     </Button>
                   )}
-                  {!activeVersion.is_approved && (
+                  {!activeVersion.is_approved && !activeVersion.is_rejected && (
                     <Button
                       type="button"
                       size="sm"
@@ -1457,24 +1652,28 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                       Aprovar versão
                     </Button>
                   )}
-                  {applicationId && activeVersion.is_approved && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={
-                        activeLinkForCurrentApp?.version_id === activeVersion.id
-                          ? "secondary"
-                          : "default"
-                      }
-                      disabled={busyAction}
-                      onClick={handleLinkToApplication}
-                    >
-                      <Link2 className="mr-1.5 h-3.5 w-3.5" />
-                      {activeLinkForCurrentApp?.version_id === activeVersion.id
-                        ? "Versão ativa na candidatura"
-                        : "Vincular à candidatura"}
-                    </Button>
-                  )}
+                  {applicationId &&
+                    activeVersion.is_approved &&
+                    !activeVersion.is_rejected && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={
+                          activeLinkForCurrentApp?.version_id ===
+                          activeVersion.id
+                            ? "secondary"
+                            : "default"
+                        }
+                        disabled={busyAction}
+                        onClick={handleLinkToApplication}
+                      >
+                        <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                        {activeLinkForCurrentApp?.version_id ===
+                        activeVersion.id
+                          ? "Versão ativa na candidatura"
+                          : "Vincular à candidatura"}
+                      </Button>
+                    )}
                   {applicationId && activeLinkForCurrentApp && (
                     <Button
                       type="button"
@@ -1490,9 +1689,127 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 </div>
               </div>
 
+              {/* Banner de versão rejeitada (bloqueia ações incompatíveis) */}
+              {activeVersion.is_rejected && (
+                <div
+                  role="status"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive"
+                >
+                  <span>
+                    <strong>
+                      Versão v{activeVersion.version_number} rejeitada:
+                    </strong>{" "}
+                    esta sugestão gerada por IA foi rejeitada pelo usuário e é
+                    mantida apenas para auditoria no histórico. Aprovação,
+                    edição, derivação, exportação e vinculação estão bloqueadas.
+                  </span>
+                  {latestActiveVersion &&
+                    latestActiveVersion.id !== activeVersion.id && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setActiveVersionId(latestActiveVersion.id)}
+                      >
+                        Voltar para versão ativa (v
+                        {latestActiveVersion.version_number})
+                      </Button>
+                    )}
+                </div>
+              )}
+
+              {/* Barra de decisão humana quando visualizando sugestão IA fora da aba AI Studio */}
+              {activeVersion.origin === "ai_assisted" &&
+                !activeVersion.is_approved &&
+                !activeVersion.is_rejected &&
+                panelTab !== "ai_studio" && (
+                  <div className="flex flex-col gap-2.5 rounded-xl border border-primary/50 bg-primary/5 p-3 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                    <div className="space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-1.5 font-semibold text-foreground">
+                        <Sparkles className="h-4 w-4 text-primary" />
+                        <span>
+                          Sugestão de IA (v{activeVersion.version_number}) —
+                          Rascunho não aprovado (exige revisão humana)
+                        </span>
+                      </div>
+                      <p className="text-muted-foreground">
+                        {isDerivingEditMode
+                          ? "Modo de edição derivada ativo: edite os campos abaixo e clique em 'Salvar versão derivada' para consolidar sem alterar a sugestão original da IA."
+                          : "Inspecione a comparação estruturada no AI Studio ou escolha aprovar, editar como versão derivada ou rejeitar."}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setPanelTab("ai_studio")}
+                      >
+                        Ver comparação estruturada
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={
+                          busyAction ||
+                          Boolean(activeVersion.has_blocking_pending_fields)
+                        }
+                        onClick={handleApproveVersion}
+                      >
+                        <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                        Aprovar sugestão
+                      </Button>
+                      {!isDerivingEditMode ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busyAction}
+                          onClick={handleStartDeriveEdit}
+                        >
+                          Editar como versão derivada
+                        </Button>
+                      ) : (
+                        <>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="default"
+                            disabled={busyAction}
+                            onClick={handleSaveDerivedFromAi}
+                          >
+                            <FileCheck2 className="mr-1.5 h-3.5 w-3.5" />
+                            Salvar versão derivada
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={busyAction}
+                            onClick={handleCancelDeriveEdit}
+                          >
+                            Cancelar edição derivada
+                          </Button>
+                        </>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                        disabled={busyAction}
+                        onClick={handleRejectAiVersion}
+                      >
+                        Rejeitar sugestão
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
               {/* Aviso de pendências obrigatórias antes de aprovar (Subfase 04.2) */}
               {activeVersion.has_blocking_pending_fields &&
-                !activeVersion.is_approved && (
+                !activeVersion.is_approved &&
+                !activeVersion.is_rejected && (
                   <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
                     <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
@@ -1501,15 +1818,21 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                         {activeVersion.pending_requirements_count || 1}
                       </strong>{" "}
                       informação(ões) obrigatória(s) pendente(s). Preencha-as no
-                      editor e clique em <strong>Salvar rascunho</strong> para
-                      liberar a aprovação.
+                      editor e clique em{" "}
+                      <strong>
+                        {isDerivingEditMode
+                          ? "Salvar versão derivada"
+                          : "Salvar rascunho"}
+                      </strong>{" "}
+                      para liberar a aprovação.
                     </span>
                   </div>
                 )}
 
               {/* Aviso de edição manual ou imutabilidade */}
               {draftContent.has_unverified_manual_edits &&
-                !activeVersion.is_approved && (
+                !activeVersion.is_approved &&
+                !activeVersion.is_rejected && (
                   <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
@@ -1520,26 +1843,43 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                   </div>
                 )}
 
-              {!activeVersion.is_mutable && (
-                <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  <Lock className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                  <span>
-                    Versão v{activeVersion.version_number} está{" "}
-                    {activeVersion.is_approved ? "aprovada" : "somente leitura"} e
-                    não pode ser sobrescrita diretamente. Use{" "}
-                    <strong>Criar versão derivada</strong> ou{" "}
-                    <strong>Regenerar do Perfil</strong> para criar um novo
-                    rascunho editável.
-                  </span>
-                </div>
-              )}
+              {!activeVersion.is_mutable &&
+                !activeVersion.is_rejected &&
+                !isDerivingEditMode && (
+                  <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+                    <Lock className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <span>
+                      Versão v{activeVersion.version_number} está{" "}
+                      {activeVersion.is_approved ? "aprovada" : "somente leitura"} e
+                      não pode ser sobrescrita diretamente. Use{" "}
+                      <strong>
+                        {activeVersion.origin === "ai_assisted" &&
+                        !activeVersion.is_approved
+                          ? "Editar como versão derivada"
+                          : "Criar versão derivada"}
+                      </strong>{" "}
+                      ou <strong>Regenerar do Perfil</strong> para criar um novo
+                      rascunho editável.
+                    </span>
+                  </div>
+                )}
 
-              {/* Subabas: Editor Estruturado | Pré-visualização | Histórico & Lacunas */}
+              {/* Subabas: Editor Estruturado | AI Studio & Comparação | Pré-visualização | Histórico & Lacunas */}
               <div className="flex flex-wrap gap-1.5 border-b border-border pb-2">
                 {[
                   { id: "editor" as const, label: "Editor Estruturado" },
-                  { id: "preview" as const, label: "Pré-visualização & Exportação" },
-                  { id: "history" as const, label: "Histórico, Fatos & Lacunas" },
+                  {
+                    id: "ai_studio" as const,
+                    label: "AI Studio & Comparação",
+                  },
+                  {
+                    id: "preview" as const,
+                    label: "Pré-visualização & Exportação",
+                  },
+                  {
+                    id: "history" as const,
+                    label: "Histórico, Fatos & Lacunas",
+                  },
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -1556,6 +1896,28 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 ))}
               </div>
 
+              {/* TAB AI STUDIO & COMPARAÇÃO */}
+              {panelTab === "ai_studio" && (
+                <MaterialAIStudioPanel
+                  material={material}
+                  activeVersion={activeVersion}
+                  latestActiveVersion={latestActiveVersion}
+                  busyAction={busyAction}
+                  aiEnhancing={aiEnhancing}
+                  aiError={aiError}
+                  isDerivingEditMode={isDerivingEditMode}
+                  onDismissAiError={() => setAiError(null)}
+                  onReloadMaterial={handleReloadCurrentMaterial}
+                  onSelectVersion={(ver) => setActiveVersionId(ver.id)}
+                  onRunAiEnhance={handleRunAiEnhance}
+                  onApproveVersion={handleApproveVersion}
+                  onStartDeriveEdit={handleStartDeriveEdit}
+                  onSaveDerivedVersion={handleSaveDerivedFromAi}
+                  onCancelDeriveEdit={handleCancelDeriveEdit}
+                  onRejectAiVersion={handleRejectAiVersion}
+                />
+              )}
+
               {/* TAB EDITOR */}
               {panelTab === "editor" && (
                 <div className="space-y-4">
@@ -1563,7 +1925,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     draftContent.material_type === "cover_letter" && (
                       <CoverLetterEditor
                         content={draftContent as CoverLetterStructuredContent}
-                        isMutable={activeVersion.is_mutable}
+                        isMutable={canEditDraft}
                         onChange={(next) => setDraftContent(next)}
                       />
                     )}
@@ -1572,7 +1934,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     draftContent.material_type === "recruiter_message" && (
                       <RecruiterMessageEditor
                         content={draftContent as RecruiterMessageStructuredContent}
-                        isMutable={activeVersion.is_mutable}
+                        isMutable={canEditDraft}
                         onChange={(next) => setDraftContent(next)}
                       />
                     )}
@@ -1581,7 +1943,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     draftContent.material_type === "freelance_proposal" && (
                       <FreelanceProposalEditor
                         content={draftContent as FreelanceProposalStructuredContent}
-                        isMutable={activeVersion.is_mutable}
+                        isMutable={canEditDraft}
                         onChange={(next) => setDraftContent(next)}
                       />
                     )}
@@ -1592,7 +1954,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                         content={
                           draftContent as ApplicationAnswersStructuredContent
                         }
-                        isMutable={activeVersion.is_mutable}
+                        isMutable={canEditDraft}
                         onChange={(next) => setDraftContent(next)}
                       />
                     )}
@@ -1619,7 +1981,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             <Label htmlFor="ed-fullname">Nome completo</Label>
                             <Input
                               id="ed-fullname"
-                              disabled={!activeVersion.is_mutable}
+                              disabled={!canEditDraft}
                               value={resumeDraft.header.full_name || ""}
                               onChange={(e) =>
                                 setDraftContent({
@@ -1637,7 +1999,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             <Label htmlFor="ed-title">Título profissional</Label>
                             <Input
                               id="ed-title"
-                              disabled={!activeVersion.is_mutable}
+                              disabled={!canEditDraft}
                               value={resumeDraft.header.professional_title || ""}
                               onChange={(e) =>
                                 setDraftContent({
@@ -1655,7 +2017,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             <Label htmlFor="ed-loc">Localização</Label>
                             <Input
                               id="ed-loc"
-                              disabled={!activeVersion.is_mutable}
+                              disabled={!canEditDraft}
                               value={resumeDraft.header.location_text || ""}
                               onChange={(e) =>
                                 setDraftContent({
@@ -1673,7 +2035,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             <Label htmlFor="ed-email">E-mail de contato</Label>
                             <Input
                               id="ed-email"
-                              disabled={!activeVersion.is_mutable}
+                              disabled={!canEditDraft}
                               value={resumeDraft.header.email || ""}
                               onChange={(e) =>
                                 setDraftContent({
@@ -1715,7 +2077,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                           <CardContent>
                             <textarea
                               rows={3}
-                              disabled={!activeVersion.is_mutable}
+                              disabled={!canEditDraft}
                               value={resumeDraft.summary.text}
                               onChange={(e) =>
                                 setDraftContent({
@@ -1783,7 +2145,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                   <Input
                                     aria-label={`Cargo da experiência ${idx + 1}`}
-                                    disabled={!activeVersion.is_mutable}
+                                    disabled={!canEditDraft}
                                     value={exp.role}
                                     onChange={(e) =>
                                       updateExperienceItem(idx, {
@@ -1793,7 +2155,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                   />
                                   <Input
                                     aria-label={`Empresa da experiência ${idx + 1}`}
-                                    disabled={!activeVersion.is_mutable}
+                                    disabled={!canEditDraft}
                                     value={exp.company}
                                     onChange={(e) =>
                                       updateExperienceItem(idx, {
@@ -1805,7 +2167,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                 <textarea
                                   rows={2}
                                   aria-label={`Descrição da experiência ${idx + 1}`}
-                                  disabled={!activeVersion.is_mutable}
+                                  disabled={!canEditDraft}
                                   value={exp.description || ""}
                                   onChange={(e) =>
                                     updateExperienceItem(idx, {
@@ -1854,7 +2216,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                   <Input
                                     aria-label={`Nome do projeto ${idx + 1}`}
-                                    disabled={!activeVersion.is_mutable}
+                                    disabled={!canEditDraft}
                                     value={proj.name}
                                     onChange={(e) =>
                                       updateProjectItem(idx, {
@@ -1864,7 +2226,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                   />
                                   <Input
                                     aria-label={`Papel no projeto ${idx + 1}`}
-                                    disabled={!activeVersion.is_mutable}
+                                    disabled={!canEditDraft}
                                     value={proj.role || ""}
                                     placeholder="Papel / atuação"
                                     onChange={(e) =>
@@ -1877,7 +2239,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                 <textarea
                                   rows={2}
                                   aria-label={`Descrição do projeto ${idx + 1}`}
-                                  disabled={!activeVersion.is_mutable}
+                                  disabled={!canEditDraft}
                                   value={proj.description || ""}
                                   onChange={(e) =>
                                     updateProjectItem(idx, {
@@ -1959,7 +2321,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                               Notas Adicionais do Usuário (
                               {resumeDraft.manual_notes.length})
                             </CardTitle>
-                            {activeVersion.is_mutable && (
+                            {canEditDraft && (
                               <Button
                                 type="button"
                                 size="sm"
@@ -1980,7 +2342,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <Input
-                                  disabled={!activeVersion.is_mutable}
+                                  disabled={!canEditDraft}
                                   value={note.title}
                                   onChange={(e) => {
                                     const next = [...resumeDraft.manual_notes];
@@ -1991,7 +2353,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                                     });
                                   }}
                                 />
-                                {activeVersion.is_mutable && (
+                                {canEditDraft && (
                                   <Button
                                     type="button"
                                     size="icon"
@@ -2013,7 +2375,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                               </div>
                               <textarea
                                 rows={2}
-                                disabled={!activeVersion.is_mutable}
+                                disabled={!canEditDraft}
                                 value={note.content}
                                 onChange={(e) => {
                                   const next = [...resumeDraft.manual_notes];
@@ -2035,7 +2397,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                     </>
                   )}
 
-                  {activeVersion.is_mutable && (
+                  {activeVersion.is_mutable && !activeVersion.is_rejected && (
                     <div className="flex justify-end gap-2">
                       <Button
                         type="button"
@@ -2044,6 +2406,27 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                       >
                         <FileCheck2 className="mr-1.5 h-4 w-4" />
                         {busyAction ? "Salvando..." : "Salvar rascunho"}
+                      </Button>
+                    </div>
+                  )}
+
+                  {isDerivingEditMode && !activeVersion.is_rejected && (
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={busyAction}
+                        onClick={handleCancelDeriveEdit}
+                      >
+                        Cancelar edição derivada
+                      </Button>
+                      <Button
+                        type="button"
+                        disabled={busyAction}
+                        onClick={handleSaveDerivedFromAi}
+                      >
+                        <FileCheck2 className="mr-1.5 h-4 w-4" />
+                        {busyAction ? "Salvando..." : "Salvar versão derivada"}
                       </Button>
                     </div>
                   )}
@@ -2058,11 +2441,13 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 const hasBlocking = Boolean(
                   activeVersion.has_blocking_pending_fields
                 );
+                const isRejected = Boolean(activeVersion.is_rejected);
                 const isDraftMode = !activeVersion.is_approved;
                 const downloadDisabled =
                   busyAction ||
                   downloadingFormat !== null ||
-                  hasBlocking;
+                  hasBlocking ||
+                  isRejected;
 
                 return (
                   <Card>
@@ -2081,7 +2466,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             type="button"
                             size="sm"
                             variant={preferPlainCopy ? "default" : "outline"}
-                            disabled={busyAction}
+                            disabled={busyAction || isRejected}
                             onClick={() => handleCopyExport("text")}
                           >
                             <Copy className="mr-1.5 h-3.5 w-3.5" />
@@ -2093,7 +2478,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                             type="button"
                             size="sm"
                             variant="outline"
-                            disabled={busyAction}
+                            disabled={busyAction || isRejected}
                             onClick={() => handleCopyExport("markdown")}
                           >
                             <Copy className="mr-1.5 h-3.5 w-3.5" />
@@ -2201,7 +2586,11 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                         </div>
                       </div>
 
-                      {hasBlocking ? (
+                      {isRejected ? (
+                        <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
+                          Exportação e aprovação bloqueadas: esta versão foi rejeitada e permanece no histórico apenas para auditoria.
+                        </div>
+                      ) : hasBlocking ? (
                         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
                           <span>
                             Downloads PDF/DOCX bloqueados: há{" "}
@@ -2296,12 +2685,32 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                               {ver.approved_at
                                 ? ` · Aprovada em ${formatDateTimePtBr(ver.approved_at)}`
                                 : ""}
+                              {ver.rejected_at
+                                ? ` · Rejeitada em ${formatDateTimePtBr(ver.rejected_at)}`
+                                : ""}
                             </div>
                           </div>
                           <Badge
-                            variant={ver.is_approved ? "default" : "secondary"}
+                            variant={
+                              ver.is_rejected
+                                ? "outline"
+                                : ver.is_approved
+                                  ? "default"
+                                  : "secondary"
+                            }
+                            className={
+                              ver.is_rejected
+                                ? "border-destructive/50 text-destructive"
+                                : undefined
+                            }
                           >
-                            {ver.is_approved ? "Aprovada" : "Rascunho"}
+                            {ver.is_rejected
+                              ? "Rejeitada"
+                              : ver.is_approved
+                                ? "Aprovada"
+                                : ver.origin === "ai_assisted"
+                                  ? "Sugestão IA (Rascunho)"
+                                  : "Rascunho"}
                           </Badge>
                         </div>
                       ))}

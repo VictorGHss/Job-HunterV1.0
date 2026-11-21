@@ -156,3 +156,7 @@ Para que o rate limiting de login identifique corretamente o cliente sem aceitar
 Mesmo com a autenticação Argon2id + Sessão HttpOnly nativa do Job Hunter, recomenda-se configurar uma **Application Policy** no **Cloudflare Zero Trust (Cloudflare Access)** para o hostname `jobhunter.ctrls.dev.br`:
 - **Política:** `Allow` apenas para a lista explícita de e-mails autorizados (One-Time Pin ou provedor de identidade GitHub/Google).
 - **Benefício:** Bloqueia bots, scanners e tentativas de força bruta na borda da Cloudflare antes mesmo de atingirem a máquina local.
+
+### 04.4.4 — AI Studio (frontend)
+
+Sem novas variáveis de ambiente. O frontend consome os endpoints ai-enhance e reject-ai da 04.4.3. Em proxies reversos/CORS, mantenha expostos os cabeçalhos X-AI-Error-Code e Retry-After (o backend já os expõe via CORSMiddleware).

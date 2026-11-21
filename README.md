@@ -363,3 +363,8 @@ npm run build
 - [DEPLOY.md](DEPLOY.md): Instruções detalhadas de execução local, portas e preparação para publicação segura via Cloudflare Tunnel (`https://jobhunter.ctrls.dev.br`).
 - [SECURITY.md](SECURITY.md): Arquitetura de segurança, isolamento multiusuário (`user_id`), Argon2id, sessões HttpOnly, proteção CSRF e controles aplicados.
 - [CHANGELOG.md](CHANGELOG.md): Histórico de entregas do projeto.
+
+### Subfase 04.4.4 — AI Studio (frontend)
+
+O modal de materiais possui a aba **AI Studio & Comparação**: solicitar aprimoramento por IA (todos os 5 tipos), comparar estruturadamente a sugestão com a versão de origem, ver proveniência e fatos citados, e decidir (aprovar, editar como versão derivada ou rejeitar). Sugestões nunca são aprovadas automaticamente. A UI depende de AI_ENABLED e do provider configurados no backend; erros são exibidos com base em X-AI-Error-Code/Retry-After.
+
