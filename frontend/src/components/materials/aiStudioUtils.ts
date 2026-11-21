@@ -101,6 +101,9 @@ export function extractMaterialSlots(
         } else if (params.provenance === "user_authored") {
           protectionReason =
             "Protegido: conteúdo autoral do usuário (user_authored) nunca é sobrescrito pela IA.";
+        } else if (!visible) {
+          protectionReason =
+            "Protegido: resposta sem conteúdo confirmado disponível para aprimoramento.";
         } else {
           protectionReason =
             "Protegido: apenas respostas geradas diretamente de fatos confirmados são elegíveis.";
@@ -131,20 +134,6 @@ export function extractMaterialSlots(
         manualSelectable: false,
         protectionReason:
           "Protegido: bloco autoral do usuário (user_authored) é sempre preservado.",
-      };
-    }
-
-    if (!visible) {
-      return {
-        slotId: params.slotId,
-        label: params.label,
-        subtitle: params.subtitle ?? null,
-        text: cleanText,
-        provenance: params.provenance,
-        sourceFactKeys: params.sourceFactKeys,
-        autoEligible: false,
-        manualSelectable: false,
-        protectionReason: "Slot sem texto base disponível para aprimoramento.",
       };
     }
 
@@ -530,6 +519,7 @@ export function resolveFactReferenceDisplay(
   entityTypeLabel: string;
   title: string;
   detail: string | null;
+  foundInSnapshot: boolean;
 } {
   const prefix = factKey.includes(":") ? factKey.split(":")[0] : "";
   const entityTypeLabel = ENTITY_TYPE_LABELS[prefix] || "Fato confirmado";
@@ -554,9 +544,10 @@ export function resolveFactReferenceDisplay(
   if (!factObj) {
     return {
       factKey,
-      entityTypeLabel,
+      entityTypeLabel: ENTITY_TYPE_LABELS[prefix] || "Referência declarada",
       title: factKey,
       detail: null,
+      foundInSnapshot: false,
     };
   }
 
@@ -599,8 +590,16 @@ export function resolveFactReferenceDisplay(
     entityTypeLabel,
     title,
     detail,
+    foundInSnapshot: true,
   };
 }
+
+const QUOTA_SCOPE_LABELS: Record<string, string> = {
+  user_window_requests: "limite de requisições por janela curta",
+  user_daily_requests: "limite diário de requisições da sua conta",
+  user_daily_tokens: "limite diário de tokens da sua conta",
+  global_daily_tokens: "limite diário global de tokens da instância",
+};
 
 function formatRetryAfterFriendly(seconds: number | null): string | null {
   if (!seconds || seconds <= 0) return null;
@@ -619,13 +618,7 @@ export function formatAIErrorPresentation(error: unknown): AIErrorPresentation {
     if (error.status === 429 || code.startsWith("quota_exceeded")) {
       const scopePart = code.includes(":") ? code.split(":")[1] : "";
       const scopeLabel =
-        scopePart === "global_daily"
-          ? "limite diário global da instância"
-          : scopePart === "user_daily"
-            ? "limite diário da sua conta"
-            : scopePart === "user_burst"
-              ? "limite de requisições por janela curta"
-              : "limite de uso de IA";
+        QUOTA_SCOPE_LABELS[scopePart] || "limite de uso de IA";
       return {
         title: `Quota de IA atingida (${scopeLabel})`,
         description:

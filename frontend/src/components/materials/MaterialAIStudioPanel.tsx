@@ -100,11 +100,21 @@ export function MaterialAIStudioPanel({
   onCancelDeriveEdit,
   onRejectAiVersion,
 }: MaterialAIStudioPanelProps) {
+  const versionContextKey = `${material.id}:${activeVersion.id}`;
   const [selectionMode, setSelectionMode] = useState<"auto" | "manual">("auto");
   const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
-  const [aiInstructions, setAiInstructions] = useState<string>(
-    activeVersion.user_instructions || ""
-  );
+  const [instructionsByContext, setInstructionsByContext] = useState<
+    Record<string, string>
+  >({});
+  const aiInstructions =
+    instructionsByContext[versionContextKey] ??
+    (activeVersion.user_instructions || "");
+  const handleInstructionsChange = (value: string) => {
+    setInstructionsByContext((prev) => ({
+      ...prev,
+      [versionContextKey]: value,
+    }));
+  };
   const [diffFilter, setDiffFilter] = useState<"all" | "changed" | "preserved">(
     "all"
   );
@@ -747,9 +757,10 @@ export function MaterialAIStudioPanel({
                           factKey,
                           activeVersion.source_facts_snapshot
                         );
-                        return (
+                        return resolved.foundInSnapshot ? (
                           <span
                             key={factKey}
+                            data-fact-status="resolved"
                             title={
                               resolved.detail
                                 ? `${resolved.title} — ${resolved.detail} (${resolved.factKey})`
@@ -765,6 +776,22 @@ export function MaterialAIStudioPanel({
                                 ({resolved.factKey})
                               </code>
                             )}
+                          </span>
+                        ) : (
+                          <span
+                            key={factKey}
+                            data-fact-status="missing"
+                            title={`Referência declarada (${resolved.factKey}), mas não localizada no snapshot de fatos confirmados.`}
+                            className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-900 dark:text-amber-200"
+                          >
+                            <AlertTriangle className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+                            <strong>{resolved.entityTypeLabel}:</strong>{" "}
+                            <code className="font-mono text-[10px]">
+                              {resolved.factKey}
+                            </code>
+                            <span className="text-[10px] opacity-90">
+                              (não localizado no snapshot)
+                            </span>
                           </span>
                         );
                       })
@@ -997,7 +1024,7 @@ export function MaterialAIStudioPanel({
               maxLength={1500}
               disabled={busyAction || aiEnhancing || activeVersion.is_rejected || !isLatestActive}
               value={aiInstructions}
-              onChange={(e) => setAiInstructions(e.target.value)}
+              onChange={(e) => handleInstructionsChange(e.target.value)}
               placeholder="Ex.: Destaque resultados técnicos em Python e mantenha tom objetivo para leitura rápida."
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground"
             />

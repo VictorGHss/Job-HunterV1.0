@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -237,6 +237,32 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   const [aiError, setAiError] = useState<AIErrorPresentation | null>(null);
   const [isDerivingEditMode, setIsDerivingEditMode] = useState(false);
 
+  const isMountedRef = useRef(true);
+  const isOpenRef = useRef(open);
+  const activeMaterialIdRef = useRef<string | null>(material?.id ?? null);
+  const aiEnhanceRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      aiEnhanceRequestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    isOpenRef.current = open;
+    if (!open) {
+      aiEnhanceRequestIdRef.current += 1;
+      setAiEnhancing(false);
+      setBusyAction(false);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    activeMaterialIdRef.current = material?.id ?? null;
+  }, [material?.id]);
+
   const buildWritingOptionsPayload = useCallback(() => {
     const cleanedQuestions = questionDrafts
       .map((q) => q.trim())
@@ -305,12 +331,15 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   );
 
   const loadExistingMaterial = useCallback(async (matId: string) => {
+    aiEnhanceRequestIdRef.current += 1;
+    setAiEnhancing(false);
     setBusyAction(true);
     setErrorMsg(null);
     setAiError(null);
     setIsDerivingEditMode(false);
     try {
       const detail = await api.materials.get(matId);
+      if (!isMountedRef.current || !isOpenRef.current) return;
       setMaterial(detail);
       const preferred =
         (detail.latest_active_version_id
@@ -325,13 +354,16 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
         setTargetLanguage(detail.target_language);
       }
     } catch (err) {
+      if (!isMountedRef.current || !isOpenRef.current) return;
       setErrorMsg(
         err instanceof Error
           ? err.message
           : "Não foi possível carregar o material selecionado."
       );
     } finally {
-      setBusyAction(false);
+      if (isMountedRef.current && isOpenRef.current) {
+        setBusyAction(false);
+      }
     }
   }, []);
 
@@ -632,6 +664,14 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
 
   const handleRunAiEnhance = async (payload: MaterialAIEnhancePayload) => {
     if (!material || !activeVersion || busyAction || aiEnhancing) return;
+    const requestId = ++aiEnhanceRequestIdRef.current;
+    const requestedMaterialId = material.id;
+    const isStaleRequest = () =>
+      !isMountedRef.current ||
+      !isOpenRef.current ||
+      aiEnhanceRequestIdRef.current !== requestId ||
+      activeMaterialIdRef.current !== requestedMaterialId;
+
     setAiEnhancing(true);
     setBusyAction(true);
     setErrorMsg(null);
@@ -643,6 +683,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
         activeVersion.id,
         payload
       );
+      if (isStaleRequest()) return;
       setMaterial(updated);
       const newest = updated.versions[0] || null;
       if (newest) {
@@ -656,12 +697,15 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
       );
       onMaterialChanged?.();
     } catch (err) {
+      if (isStaleRequest()) return;
       const formatted = formatAIErrorPresentation(err);
       setAiError(formatted);
       setErrorMsg(formatted.description);
     } finally {
-      setAiEnhancing(false);
-      setBusyAction(false);
+      if (!isStaleRequest()) {
+        setAiEnhancing(false);
+        setBusyAction(false);
+      }
     }
   };
 
@@ -811,7 +855,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   };
 
   const handleCopyExport = async (fmt: MaterialExportFormat) => {
-    if (!material || !activeVersion) return;
+    if (!material || !activeVersion || activeVersion.is_rejected) return;
     setBusyAction(true);
     setErrorMsg(null);
     try {
@@ -835,7 +879,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
   };
 
   const handleDownloadBinary = async (fmt: DocumentDownloadFormat) => {
-    if (!material || !activeVersion) return;
+    if (!material || !activeVersion || activeVersion.is_rejected) return;
     if (activeVersion.has_blocking_pending_fields) return;
     setDownloadingFormat(fmt);
     setErrorMsg(null);
@@ -939,7 +983,7 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 ] || "Material"}
               </Badge>
               <Badge variant="secondary" className="text-[11px]">
-                Fase 04.2 · Sem IA
+                Fatos confirmados · Revisão humana
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -956,6 +1000,8 @@ export const MaterialWorkspaceModal: React.FC<MaterialWorkspaceModalProps> = ({
                 variant="outline"
                 size="sm"
                 onClick={() => {
+                  aiEnhanceRequestIdRef.current += 1;
+                  setAiEnhancing(false);
                   setMaterial(null);
                   setActiveVersionId(null);
                   void loadPreAnalysis(
