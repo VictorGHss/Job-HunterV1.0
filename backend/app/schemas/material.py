@@ -736,6 +736,21 @@ class MaterialRegenerateRequest(BaseModel):
         return _sanitize_long(value, 1500)
 
 
+class MaterialAIEnhanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_slot_ids: list[str] | None = Field(
+        default=None,
+        max_length=30,
+    )
+    user_instructions: str | None = Field(default=None, max_length=1500)
+
+    @field_validator("user_instructions")
+    @classmethod
+    def _clean_instructions(cls, value: str | None) -> str | None:
+        return _sanitize_long(value, 1500)
+
+
 class MaterialLinkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -780,6 +795,8 @@ class MaterialVersionResponse(BaseModel):
     pending_requirements_count: int = 0
     is_approved: bool
     approved_at: datetime | None = None
+    is_rejected: bool = False
+    rejected_at: datetime | None = None
     is_linked_to_any_application: bool = False
     is_mutable: bool = True
     created_at: datetime
@@ -795,6 +812,8 @@ class MaterialResponse(BaseModel):
     title: str
     target_language: TargetLanguage | str
     latest_version_number: int
+    latest_active_version_number: int = 0
+    latest_active_version_id: uuid.UUID | None = None
     has_approved_version: bool
     versions: list[MaterialVersionResponse] = Field(default_factory=list)
     links: list[MaterialLinkResponse] = Field(default_factory=list)
@@ -813,6 +832,9 @@ class MaterialSummaryResponse(BaseModel):
     latest_version_number: int
     latest_version_id: uuid.UUID | None = None
     latest_is_approved: bool = False
+    latest_active_version_number: int = 0
+    latest_active_version_id: uuid.UUID | None = None
+    latest_active_is_approved: bool = False
     linked_version_id: uuid.UUID | None = None
     linked_version_number: int | None = None
     linked_version_is_approved: bool = False

@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -35,6 +36,7 @@ class MaterialVersionOrigin(StrEnum):
     MANUAL_EDIT = "manual_edit"
     REGENERATED = "regenerated"
     DERIVED = "derived"
+    AI_ASSISTED = "ai_assisted"
 
 
 ACTIVE_MATERIAL_LINK_UNIQUE_INDEX_NAME = "uq_active_link_per_app_material"
@@ -104,6 +106,17 @@ class ApplicationMaterialVersion(Base, TimestampMixin):
             "id",
             name="uq_material_versions_mat_id_id",
         ),
+        CheckConstraint(
+            "(NOT is_rejected AND rejected_at IS NULL) "
+            "OR (is_rejected AND rejected_at IS NOT NULL AND NOT is_approved)",
+            name="rejection_state_consistent",
+        ),
+        Index(
+            "ix_material_versions_mat_rejected_ver",
+            "material_id",
+            "is_rejected",
+            "version_number",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -156,6 +169,16 @@ class ApplicationMaterialVersion(Base, TimestampMixin):
         index=True,
     )
     approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    is_rejected: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

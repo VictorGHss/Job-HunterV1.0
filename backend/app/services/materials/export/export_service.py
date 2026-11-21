@@ -83,6 +83,11 @@ def export_material_document(
     material = _get_user_material(db, user, material_id)
     version = _locate_version_or_raise(material, version_id)
 
+    if getattr(version, "is_rejected", False):
+        raise DocumentExportValidationError(
+            "Versão rejeitada não pode ser exportada como documento final ou rascunho."
+        )
+
     mat_type, fmt, tpl_id = validate_export_parameters(
         material.material_type, export_format, template_id
     )

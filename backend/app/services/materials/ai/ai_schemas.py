@@ -4,10 +4,13 @@ from dataclasses import dataclass
 import json
 import re
 from typing import Any, Literal, Mapping
+import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.material import TargetLanguage
+from app.services.materials.ai.safety import find_active_or_html_content
+from app.services.opportunities.sanitization import sanitize_external_html_text
 
 AI_SUPPORTED_MATERIAL_TYPES = (
     "resume",
@@ -39,6 +42,19 @@ _ENTITY_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _FACT_KEY_RE = re.compile(
     r"^(profile|experience|project|education|skill|language):[A-Za-z0-9_-]{1,64}$"
 )
+# Caracteres de controle C0/C1 proibidos (exceto \t, \n, \r)
+_FORBIDDEN_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def has_visible_unicode_text(value: str | None) -> bool:
+    """Verifica se a string possui ao menos um caractere visível real (ignorando espaços e formato Cf/Cc)."""
+    if not value:
+        return False
+    return any(
+        not ch.isspace()
+        and unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Zs")
+        for ch in value
+    )
 
 # Allowlist explícita de slots narrativos estáticos por tipo de material,
 # derivada estritamente dos contratos de structured_content em app/schemas/material.py.
@@ -339,10 +355,33 @@ class AISuggestionItem(BaseModel):
     @field_validator("suggested_text")
     @classmethod
     def _validate_text(cls, value: str) -> str:
-        clean = value.strip()
-        if not clean:
+        if _FORBIDDEN_CONTROL_CHARS_RE.search(value):
+            raise ValueError(
+                "suggested_text contém caracteres de controle proibidos."
+            )
+        raw_stripped = value.strip()
+        if not raw_stripped or not has_visible_unicode_text(raw_stripped):
             raise ValueError("suggested_text não pode ser vazio.")
-        return clean
+        if len(raw_stripped) > 4000:
+            raise ValueError("suggested_text excede o limite máximo de 4000 caracteres.")
+        if not find_active_or_html_content(raw_stripped):
+            normalized_probe = sanitize_external_html_text(
+                raw_stripped,
+                max_length=4000,
+            )
+            if (
+                not normalized_probe
+                or not normalized_probe.strip()
+                or not has_visible_unicode_text(normalized_probe)
+            ):
+                raise ValueError(
+                    "suggested_text tornou-se vazio após sanitização e normalização."
+                )
+            if _FORBIDDEN_CONTROL_CHARS_RE.search(normalized_probe):
+                raise ValueError(
+                    "suggested_text contém caracteres de controle proibidos após normalização."
+                )
+        return raw_stripped
 
     @field_validator("cited_fact_keys")
     @classmethod

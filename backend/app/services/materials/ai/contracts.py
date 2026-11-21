@@ -113,6 +113,54 @@ class LLMMalformedOutputError(LLMProviderError):
     error_code: str = "malformed_output"
 
 
+class AIGroundingRejectedError(AIFoundationError):
+    """Sugestão do provider rejeitada pelo validador determinístico de grounding.
+
+    Nunca armazena ou ecoa trechos textuais da saída do provider na mensagem HTTP;
+    mantém apenas códigos técnicos sanitizados e identificadores de slots.
+    """
+
+    error_code: str = "grounding_rejected"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        violation_codes: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.violation_codes: tuple[tuple[str, str], ...] = tuple(violation_codes)
+
+
+class AIOverlayConflictError(AIFoundationError):
+    """Conflito de elegibilidade ou proteção de slots no ControlledOverlayMerger."""
+
+    error_code: str = "overlay_conflict"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        slot_id: str | None = None,
+        reason_code: str = "overlay_conflict",
+    ) -> None:
+        super().__init__(message)
+        self.slot_id: str | None = slot_id
+        self.reason_code: str = reason_code
+
+
+class AIStaleSourceVersionError(AIFoundationError):
+    """Versão-fonte ou estado do material alterado concorrentemente durante a chamada externa (TOCTOU)."""
+
+    error_code: str = "stale_source_version"
+
+
+class AIReviewStateError(AIFoundationError):
+    """Operação de revisão (aprovação/rejeição/aprimoramento) incompatível com o estado da versão."""
+
+    error_code: str = "review_state_conflict"
+
+
 def validate_safe_technical_identifier(
     raw_value: str | None,
     *,

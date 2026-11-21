@@ -5,11 +5,12 @@ import uuid
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.base import utc_now
+from app.models.ai_usage import AIUsageLedger
 from app.models.application import Application
 from app.models.material import (
     ApplicationMaterial,
@@ -84,6 +85,10 @@ from app.services.materials.resume_composer import (
     render_material_markdown,
     render_material_plain_text,
 )
+from app.services.materials.ai._db_locks import (
+    acquire_material_exclusivity_lock,
+    run_atomic_with_sqlite_retry,
+)
 from app.services.materials.writing_common import determine_compatible_material_types
 from app.services.opportunities.sanitization import sanitize_plain_text
 
@@ -118,6 +123,12 @@ def _get_user_material(
     *,
     for_update: bool = False,
 ) -> ApplicationMaterial:
+    if for_update:
+        acquire_material_exclusivity_lock(
+            db,
+            user_id=user.id,
+            material_id=material_id,
+        )
     stmt = (
         select(ApplicationMaterial)
         .options(*_material_load_options())
@@ -127,7 +138,7 @@ def _get_user_material(
         )
     )
     if for_update:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     material = db.scalar(stmt)
     if material is None:
         raise MaterialNotFoundError("Material não encontrado.")
@@ -393,7 +404,7 @@ def _serialize_version(
     version: ApplicationMaterialVersion,
     *,
     material_type: str,
-    max_version_number: int,
+    max_active_version_number: int,
     linked_version_ids: set[uuid.UUID],
     target_language: TargetLanguage,
 ) -> MaterialVersionResponse:
@@ -401,10 +412,13 @@ def _serialize_version(
     markdown, plain_text = _render_by_type(material_type, structured, target_language)
     pending_count = _count_blocking_pending_fields(structured)
     is_linked = version.id in linked_version_ids
+    is_rejected = bool(getattr(version, "is_rejected", False))
     is_mutable = (
         not version.is_approved
+        and not is_rejected
+        and version.origin != MaterialVersionOrigin.AI_ASSISTED.value
         and not is_linked
-        and version.version_number == max_version_number
+        and version.version_number == max_active_version_number
     )
     warnings = [
         UnconfirmedWarningItem.model_validate(item)
@@ -432,6 +446,8 @@ def _serialize_version(
         pending_requirements_count=pending_count,
         is_approved=version.is_approved,
         approved_at=version.approved_at,
+        is_rejected=is_rejected,
+        rejected_at=getattr(version, "rejected_at", None),
         is_linked_to_any_application=is_linked,
         is_mutable=is_mutable,
         created_at=version.created_at,
@@ -440,8 +456,20 @@ def _serialize_version(
 
 
 def _serialize_material(material: ApplicationMaterial) -> MaterialResponse:
-    versions_sorted = sorted(material.versions, key=lambda v: v.version_number, reverse=True)
-    max_ver = versions_sorted[0].version_number if versions_sorted else 0
+    active_versions = sorted(
+        (v for v in material.versions if not getattr(v, "is_rejected", False)),
+        key=lambda v: v.version_number,
+        reverse=True,
+    )
+    rejected_versions = sorted(
+        (v for v in material.versions if getattr(v, "is_rejected", False)),
+        key=lambda v: v.version_number,
+        reverse=True,
+    )
+    versions_sorted = active_versions + rejected_versions
+    max_ver = max((v.version_number for v in material.versions), default=0)
+    latest_active = active_versions[0] if active_versions else None
+    max_active_ver = latest_active.version_number if latest_active is not None else 0
     linked_version_ids = {link.version_id for link in material.links}
     lang: TargetLanguage = "en" if material.target_language == "en" else "pt-BR"
 
@@ -449,7 +477,7 @@ def _serialize_material(material: ApplicationMaterial) -> MaterialResponse:
         _serialize_version(
             ver,
             material_type=material.material_type,
-            max_version_number=max_ver,
+            max_active_version_number=max_active_ver,
             linked_version_ids=linked_version_ids,
             target_language=lang,
         )
@@ -481,7 +509,11 @@ def _serialize_material(material: ApplicationMaterial) -> MaterialResponse:
         title=material.title,
         target_language=material.target_language,
         latest_version_number=max_ver,
-        has_approved_version=any(v.is_approved for v in versions_sorted),
+        latest_active_version_number=max_active_ver,
+        latest_active_version_id=latest_active.id if latest_active else None,
+        has_approved_version=any(
+            v.is_approved and not getattr(v, "is_rejected", False) for v in versions_sorted
+        ),
         versions=version_responses,
         links=link_responses,
         created_at=material.created_at,
@@ -496,6 +528,8 @@ def _serialize_summary(
 ) -> MaterialSummaryResponse:
     versions_sorted = sorted(material.versions, key=lambda v: v.version_number, reverse=True)
     latest = versions_sorted[0] if versions_sorted else None
+    active_versions = [v for v in versions_sorted if not getattr(v, "is_rejected", False)]
+    latest_active = active_versions[0] if active_versions else None
     active_links = sum(1 for lk in material.links if lk.unlinked_at is None)
 
     linked_ver_id: uuid.UUID | None = None
@@ -523,10 +557,15 @@ def _serialize_summary(
         latest_version_number=latest.version_number if latest else 0,
         latest_version_id=latest.id if latest else None,
         latest_is_approved=latest.is_approved if latest else False,
+        latest_active_version_number=latest_active.version_number if latest_active else 0,
+        latest_active_version_id=latest_active.id if latest_active else None,
+        latest_active_is_approved=latest_active.is_approved if latest_active else False,
         linked_version_id=linked_ver_id,
         linked_version_number=linked_ver_num,
         linked_version_is_approved=linked_ver_approved,
-        has_approved_version=any(v.is_approved for v in versions_sorted),
+        has_approved_version=any(
+            v.is_approved and not getattr(v, "is_rejected", False) for v in versions_sorted
+        ),
         active_links_count=active_links,
         created_at=material.created_at,
         updated_at=material.updated_at,
@@ -713,33 +752,37 @@ def _create_next_version_with_lock(
     *,
     build_version_kwargs: Any,
 ) -> ApplicationMaterial:
-    """Aloca próximo número de versão sob lock FOR UPDATE e retry controlado em IntegrityError."""
-    attempts = 0
-    while True:
-        attempts += 1
-        material = _get_user_material(db, user, material_id, for_update=True)
-        current_max = db.scalar(
-            select(func.coalesce(func.max(ApplicationMaterialVersion.version_number), 0)).where(
-                ApplicationMaterialVersion.material_id == material.id
+    """Aloca próximo número de versão sob lock FOR UPDATE e retry controlado em IntegrityError/OperationalError."""
+
+    def _tx() -> ApplicationMaterial:
+        attempts = 0
+        while True:
+            attempts += 1
+            material = _get_user_material(db, user, material_id, for_update=True)
+            current_max = db.scalar(
+                select(func.coalesce(func.max(ApplicationMaterialVersion.version_number), 0)).where(
+                    ApplicationMaterialVersion.material_id == material.id
+                )
             )
-        )
-        next_number = int(current_max or 0) + 1
-        kwargs = build_version_kwargs(material, next_number)
-        new_version = ApplicationMaterialVersion(
-            material_id=material.id,
-            version_number=next_number,
-            **kwargs,
-        )
-        material.updated_at = utc_now()
-        db.add(new_version)
-        try:
-            db.commit()
-            db.expire_all()
-            return _get_user_material(db, user, material.id)
-        except IntegrityError:
-            db.rollback()
-            if attempts >= 4:
-                raise
+            next_number = int(current_max or 0) + 1
+            kwargs = build_version_kwargs(material, next_number)
+            new_version = ApplicationMaterialVersion(
+                material_id=material.id,
+                version_number=next_number,
+                **kwargs,
+            )
+            material.updated_at = utc_now()
+            db.add(new_version)
+            try:
+                db.commit()
+                db.expire_all()
+                return _get_user_material(db, user, material.id)
+            except IntegrityError:
+                db.rollback()
+                if attempts >= 4:
+                    raise
+
+    return run_atomic_with_sqlite_retry(db, _tx)
 
 
 def update_material_version(
@@ -749,45 +792,59 @@ def update_material_version(
     version_id: uuid.UUID,
     payload: MaterialVersionUpdateRequest,
 ) -> MaterialResponse:
-    material = _get_user_material(db, user, material_id, for_update=True)
-    version = next((v for v in material.versions if v.id == version_id), None)
-    if version is None:
-        raise MaterialNotFoundError("Versão de material não encontrada.")
+    def _tx() -> MaterialResponse:
+        material = _get_user_material(db, user, material_id, for_update=True)
+        version = next((v for v in material.versions if v.id == version_id), None)
+        if version is None:
+            raise MaterialNotFoundError("Versão de material não encontrada.")
 
-    max_ver = max((v.version_number for v in material.versions), default=0)
-    is_linked = any(link.version_id == version.id for link in material.links)
-
-    if version.is_approved:
-        raise MaterialImmutableError(
-            "Versão já aprovada é imutável. Crie uma versão derivada para continuar editando."
+        max_active_ver = max(
+            (v.version_number for v in material.versions if not getattr(v, "is_rejected", False)),
+            default=0,
         )
-    if is_linked:
-        raise MaterialImmutableError(
-            "Versão vinculada a candidatura é imutável para preservar rastreabilidade. Derive uma nova versão."
+        is_linked = any(link.version_id == version.id for link in material.links)
+
+        if getattr(version, "is_rejected", False):
+            raise MaterialImmutableError(
+                "Versão rejeitada é imutável e permanece apenas para auditoria histórica."
+            )
+        if version.origin == MaterialVersionOrigin.AI_ASSISTED.value:
+            raise MaterialImmutableError(
+                "Versão gerada por IA assistida é imutável. Aprove, rejeite ou derive uma nova versão para editar."
+            )
+        if version.is_approved:
+            raise MaterialImmutableError(
+                "Versão já aprovada é imutável. Crie uma versão derivada para continuar editando."
+            )
+        if is_linked:
+            raise MaterialImmutableError(
+                "Versão vinculada a candidatura é imutável para preservar rastreabilidade. Derive uma nova versão."
+            )
+        if version.version_number != max_active_ver:
+            raise MaterialImmutableError(
+                "Apenas o rascunho da versão mais recente pode ser editado diretamente. Derive uma nova versão."
+            )
+
+        previous = _parse_structured_for_type(material.material_type, version.structured_content)
+        edited = _parse_structured_for_type(material.material_type, payload.structured_content)
+        reconciled = _reconcile_by_type(
+            material.material_type,
+            previous,
+            edited,
+            version.source_facts_snapshot,
         )
-    if version.version_number != max_ver:
-        raise MaterialImmutableError(
-            "Apenas o rascunho da versão mais recente pode ser editado diretamente. Derive uma nova versão."
-        )
 
-    previous = _parse_structured_for_type(material.material_type, version.structured_content)
-    edited = _parse_structured_for_type(material.material_type, payload.structured_content)
-    reconciled = _reconcile_by_type(
-        material.material_type,
-        previous,
-        edited,
-        version.source_facts_snapshot,
-    )
+        version.structured_content = reconciled.model_dump(mode="json")
+        version.origin = MaterialVersionOrigin.MANUAL_EDIT.value
+        if payload.user_instructions is not None:
+            version.user_instructions = payload.user_instructions
+        material.updated_at = utc_now()
+        db.commit()
+        db.expire_all()
 
-    version.structured_content = reconciled.model_dump(mode="json")
-    version.origin = MaterialVersionOrigin.MANUAL_EDIT.value
-    if payload.user_instructions is not None:
-        version.user_instructions = payload.user_instructions
-    material.updated_at = utc_now()
-    db.commit()
-    db.expire_all()
+        return _serialize_material(_get_user_material(db, user, material.id))
 
-    return _serialize_material(_get_user_material(db, user, material.id))
+    return run_atomic_with_sqlite_retry(db, _tx)
 
 
 def derive_material_version(
@@ -802,6 +859,10 @@ def derive_material_version(
     parent = next((v for v in initial_mat.versions if v.id == version_id), None)
     if parent is None:
         raise MaterialNotFoundError("Versão-base não encontrada.")
+    if getattr(parent, "is_rejected", False):
+        raise MaterialImmutableError(
+            "Não é permitido derivar uma nova versão a partir de uma versão rejeitada."
+        )
 
     parent_structured = _parse_structured_for_type(
         initial_mat.material_type, parent.structured_content
@@ -820,18 +881,27 @@ def derive_material_version(
         next_structured = parent_structured
 
     def _build_kwargs(mat: ApplicationMaterial, _next_num: int) -> dict[str, Any]:
+        locked_parent = next((v for v in mat.versions if v.id == version_id), None)
+        if locked_parent is None:
+            raise MaterialNotFoundError("Versão-base não encontrada.")
+        if getattr(locked_parent, "is_rejected", False):
+            raise MaterialImmutableError(
+                "Não é permitido derivar uma nova versão a partir de uma versão rejeitada."
+            )
+        derived_snapshot = dict(locked_parent.source_facts_snapshot or {})
+        derived_snapshot.pop("ai_overlay", None)
         return {
             "origin": MaterialVersionOrigin.DERIVED.value,
-            "parent_version_id": parent.id,
+            "parent_version_id": locked_parent.id,
             "user_instructions": (
                 payload.user_instructions
                 if payload.user_instructions is not None
-                else parent.user_instructions
+                else locked_parent.user_instructions
             ),
             "structured_content": next_structured.model_dump(mode="json"),
-            "source_facts_snapshot": dict(parent.source_facts_snapshot or {}),
-            "unconfirmed_warnings": list(parent.unconfirmed_warnings or []),
-            "missing_requirements": list(parent.missing_requirements or []),
+            "source_facts_snapshot": derived_snapshot,
+            "unconfirmed_warnings": list(locked_parent.unconfirmed_warnings or []),
+            "missing_requirements": list(locked_parent.missing_requirements or []),
             "is_approved": False,
             "approved_at": None,
         }
@@ -881,7 +951,11 @@ def _preserve_writing_options_on_regenerate(
     material: ApplicationMaterial,
     explicit_options: WritingGenerationOptions | None,
 ) -> WritingGenerationOptions:
-    latest = max(material.versions, key=lambda v: v.version_number, default=None)
+    latest = max(
+        (v for v in material.versions if not getattr(v, "is_rejected", False)),
+        key=lambda v: v.version_number,
+        default=None,
+    )
     preserved_channel: str = "linkedin"
     preserved_contact_name: str | None = None
     preserved_contact_context: str | None = None
@@ -1031,7 +1105,11 @@ def regenerate_material_version(
         }
 
     def _build_kwargs(mat: ApplicationMaterial, _next_num: int) -> dict[str, Any]:
-        latest = max(mat.versions, key=lambda v: v.version_number, default=None)
+        latest = max(
+            (v for v in mat.versions if not getattr(v, "is_rejected", False)),
+            key=lambda v: v.version_number,
+            default=None,
+        )
         mat.target_language = effective_lang
         return {
             "origin": MaterialVersionOrigin.REGENERATED.value,
@@ -1064,27 +1142,33 @@ def approve_material_version(
     material_id: uuid.UUID,
     version_id: uuid.UUID,
 ) -> MaterialResponse:
-    material = _get_user_material(db, user, material_id, for_update=True)
-    version = next((v for v in material.versions if v.id == version_id), None)
-    if version is None:
-        raise MaterialNotFoundError("Versão de material não encontrada.")
+    def _tx() -> MaterialResponse:
+        material = _get_user_material(db, user, material_id, for_update=True)
+        version = next((v for v in material.versions if v.id == version_id), None)
+        if version is None:
+            raise MaterialNotFoundError("Versão de material não encontrada.")
 
-    structured = _parse_structured_for_type(material.material_type, version.structured_content)
-    blocking_count = _count_blocking_pending_fields(structured)
-    if blocking_count > 0:
-        raise MaterialPreconditionError(
-            f"Há {blocking_count} informação(ões) obrigatória(s) pendente(s) antes de aprovar esta versão."
-        )
+        if getattr(version, "is_rejected", False):
+            raise MaterialImmutableError("Versão rejeitada não pode ser aprovada.")
 
-    now = utc_now()
-    if not version.is_approved:
-        version.is_approved = True
-        version.approved_at = now
-        material.updated_at = now
-        db.commit()
-        db.expire_all()
+        structured = _parse_structured_for_type(material.material_type, version.structured_content)
+        blocking_count = _count_blocking_pending_fields(structured)
+        if blocking_count > 0:
+            raise MaterialPreconditionError(
+                f"Há {blocking_count} informação(ões) obrigatória(s) pendente(s) antes de aprovar esta versão."
+            )
 
-    return _serialize_material(_get_user_material(db, user, material.id))
+        now = utc_now()
+        if not version.is_approved:
+            version.is_approved = True
+            version.approved_at = now
+            material.updated_at = now
+            db.commit()
+            db.expire_all()
+
+        return _serialize_material(_get_user_material(db, user, material.id))
+
+    return run_atomic_with_sqlite_retry(db, _tx)
 
 
 def export_material_version(
@@ -1098,6 +1182,9 @@ def export_material_version(
     version = next((v for v in material.versions if v.id == version_id), None)
     if version is None:
         raise MaterialNotFoundError("Versão de material não encontrada.")
+
+    if getattr(version, "is_rejected", False):
+        raise MaterialPreconditionError("Versão rejeitada não pode ser exportada.")
 
     structured = _parse_structured_for_type(material.material_type, version.structured_content)
     lang: TargetLanguage = "en" if structured.language == "en" else "pt-BR"
@@ -1129,43 +1216,50 @@ def link_material_version(
     material_id: uuid.UUID,
     payload: MaterialLinkRequest,
 ) -> MaterialResponse:
-    material = _get_user_material(db, user, material_id, for_update=True)
-    application = _get_user_application(db, user, payload.application_id)
+    def _tx() -> MaterialResponse:
+        material = _get_user_material(db, user, material_id, for_update=True)
+        application = _get_user_application(db, user, payload.application_id)
 
-    version = next((v for v in material.versions if v.id == payload.version_id), None)
-    if version is None:
-        raise MaterialNotFoundError("A versão informada não pertence a este material.")
+        version = next((v for v in material.versions if v.id == payload.version_id), None)
+        if version is None:
+            raise MaterialNotFoundError("A versão informada não pertence a este material.")
 
-    if not version.is_approved:
-        raise MaterialPreconditionError(
-            "Apenas versões aprovadas podem ser vinculadas a uma candidatura."
+        if getattr(version, "is_rejected", False):
+            raise MaterialPreconditionError(
+                "Versão rejeitada não pode ser vinculada a uma candidatura."
+            )
+        if not version.is_approved:
+            raise MaterialPreconditionError(
+                "Apenas versões aprovadas podem ser vinculadas a uma candidatura."
+            )
+
+        now = utc_now()
+        active_links = [
+            lk
+            for lk in material.links
+            if lk.application_id == application.id and lk.unlinked_at is None
+        ]
+        for existing in active_links:
+            existing.unlinked_at = now
+        if active_links:
+            db.flush()
+
+        new_link = ApplicationMaterialLink(
+            user_id=user.id,
+            application_id=application.id,
+            material_id=material.id,
+            version_id=version.id,
+            linked_at=now,
+            unlinked_at=None,
         )
+        db.add(new_link)
+        material.updated_at = now
+        db.commit()
+        db.expire_all()
 
-    now = utc_now()
-    active_links = [
-        lk
-        for lk in material.links
-        if lk.application_id == application.id and lk.unlinked_at is None
-    ]
-    for existing in active_links:
-        existing.unlinked_at = now
-    if active_links:
-        db.flush()
+        return _serialize_material(_get_user_material(db, user, material.id))
 
-    new_link = ApplicationMaterialLink(
-        user_id=user.id,
-        application_id=application.id,
-        material_id=material.id,
-        version_id=version.id,
-        linked_at=now,
-        unlinked_at=None,
-    )
-    db.add(new_link)
-    material.updated_at = now
-    db.commit()
-    db.expire_all()
-
-    return _serialize_material(_get_user_material(db, user, material.id))
+    return run_atomic_with_sqlite_retry(db, _tx)
 
 
 def unlink_material(
@@ -1174,27 +1268,30 @@ def unlink_material(
     material_id: uuid.UUID,
     payload: MaterialUnlinkRequest,
 ) -> MaterialResponse:
-    material = _get_user_material(db, user, material_id, for_update=True)
-    _get_user_application(db, user, payload.application_id)
+    def _tx() -> MaterialResponse:
+        material = _get_user_material(db, user, material_id, for_update=True)
+        _get_user_application(db, user, payload.application_id)
 
-    active_link = next(
-        (
-            lk
-            for lk in material.links
-            if lk.application_id == payload.application_id and lk.unlinked_at is None
-        ),
-        None,
-    )
-    if active_link is None:
-        raise MaterialNotFoundError("Nenhum vínculo ativo encontrado para esta candidatura.")
+        active_link = next(
+            (
+                lk
+                for lk in material.links
+                if lk.application_id == payload.application_id and lk.unlinked_at is None
+            ),
+            None,
+        )
+        if active_link is None:
+            raise MaterialNotFoundError("Nenhum vínculo ativo encontrado para esta candidatura.")
 
-    now = utc_now()
-    active_link.unlinked_at = now
-    material.updated_at = now
-    db.commit()
-    db.expire_all()
+        now = utc_now()
+        active_link.unlinked_at = now
+        material.updated_at = now
+        db.commit()
+        db.expire_all()
 
-    return _serialize_material(_get_user_material(db, user, material.id))
+        return _serialize_material(_get_user_material(db, user, material.id))
+
+    return run_atomic_with_sqlite_retry(db, _tx)
 
 
 def delete_material(
@@ -1202,6 +1299,18 @@ def delete_material(
     user: User,
     material_id: uuid.UUID,
 ) -> None:
-    material = _get_user_material(db, user, material_id)
-    db.delete(material)
-    db.commit()
+    def _tx() -> None:
+        material = _get_user_material(db, user, material_id, for_update=True)
+        # Garante SET NULL explícito em ai_usage_ledger inclusive no SQLite quando foreign_keys pragma não estiver ativo
+        db.execute(
+            update(AIUsageLedger)
+            .where(
+                AIUsageLedger.user_id == user.id,
+                AIUsageLedger.material_id == material.id,
+            )
+            .values(material_id=None, version_id=None)
+        )
+        db.delete(material)
+        db.commit()
+
+    run_atomic_with_sqlite_retry(db, _tx)

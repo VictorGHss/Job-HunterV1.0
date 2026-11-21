@@ -3,12 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Generic, TypeVar
+import logging
+from typing import Any, Generic, TypeVar
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.models.ai_usage import AIUsageLedger, AIUsageStatus
+from app.models.material import ApplicationMaterialVersion
+from app.services.materials.ai._db_locks import run_atomic_with_sqlite_retry
 from app.services.materials.ai.circuit_breaker import (
     check_and_acquire_circuit_execution,
     record_circuit_failure,
@@ -17,6 +22,10 @@ from app.services.materials.ai.circuit_breaker import (
 from app.services.materials.ai.contracts import (
     AICircuitOpenError,
     AIDisabledError,
+    AIGroundingRejectedError,
+    AIOverlayConflictError,
+    AIReviewStateError,
+    AIStaleSourceVersionError,
     LLMMalformedOutputError,
     LLMProvider,
     LLMProviderError,
@@ -28,11 +37,14 @@ from app.services.materials.ai.contracts import (
 from app.services.materials.ai.providers import resolve_llm_provider
 from app.services.materials.ai.quota_service import (
     LedgerEntrySnapshot,
+    _to_entry_snapshot,
     confirm_ai_quota_usage,
     fail_ai_quota_usage,
     release_ai_quota_reservation,
     reserve_ai_quota,
 )
+
+logger = logging.getLogger("job_hunter.materials.ai.guard")
 
 T = TypeVar("T")
 
@@ -42,6 +54,15 @@ class GuardedAIExecutionResult(Generic[T]):
     response: LLMStructuredResponse
     validated_output: T
     ledger_entry: LedgerEntrySnapshot
+    persisted_artifact: Any = None
+
+
+_DOMAIN_PRE_COMMIT_EXCEPTIONS = (
+    AIStaleSourceVersionError,
+    AIOverlayConflictError,
+    AIGroundingRejectedError,
+    AIReviewStateError,
+)
 
 
 def execute_guarded_ai_call(
@@ -53,6 +74,14 @@ def execute_guarded_ai_call(
     material_id: uuid.UUID | None = None,
     version_id: uuid.UUID | None = None,
     response_validator: Callable[[LLMStructuredResponse], T] | None = None,
+    post_transaction_persister: (
+        Callable[
+            [Session, LedgerEntrySnapshot, LLMStructuredResponse, T],
+            tuple[Any, uuid.UUID | None],
+        ]
+        | None
+    ) = None,
+    after_commit_loader: Callable[[Session, uuid.UUID | None], Any] | None = None,
     injected_provider: LLMProvider | None = None,
     settings_override: Settings | None = None,
     now_fn: Callable[[], datetime] | None = None,
@@ -62,7 +91,9 @@ def execute_guarded_ai_call(
     1-5. Abre sessão curta #1 -> resolve provider -> reserva cota -> valida circuit breaker
          (liberando a reserva caso o circuito esteja aberto) -> fecha sessão #1.
     6-7. Executa ``provider.generate_structured`` e ``response_validator`` fora do banco.
-    8.   Abre sessão curta #2 -> atualiza circuit breaker e finaliza registro no ledger -> fecha sessão #2.
+    8.   Abre sessão curta #2 -> opcionalmente persiste nova versão sob lock exclusivo,
+         atualiza circuit breaker e finaliza registro no ledger em UM ÚNICO commit atômico
+         -> fecha sessão #2.
     """
     cfg = settings_override or get_settings()
     provider = resolve_llm_provider(
@@ -140,14 +171,18 @@ def execute_guarded_ai_call(
         trip_circuit = True
     except Exception as exc:
         caught_exc = exc
-        failure_code = "validation_rejected" if response is not None else "execution_failed"
+        custom_code = getattr(exc, "error_code", None)
+        if isinstance(custom_code, str) and custom_code:
+            failure_code = custom_code
+        else:
+            failure_code = "validation_rejected" if response is not None else "execution_failed"
         trip_circuit = False
 
-    # Fase 3: Nova transação curta pós-chamada para reconciliar ledger e circuit breaker
+    # Fase 3: Nova transação curta pós-chamada para reconciliar versão, circuit breaker e ledger
     t_after = now_fn() if now_fn is not None else None
-    db_post = session_factory()
-    try:
-        if caught_exc is not None:
+    if caught_exc is not None:
+        db_post = session_factory()
+        try:
             if trip_circuit:
                 record_circuit_failure(
                     db_post,
@@ -176,31 +211,220 @@ def execute_guarded_ai_call(
                 now=t_after,
             )
             raise caught_exc
+        except Exception:
+            db_post.rollback()
+            raise
+        finally:
+            db_post.close()
 
-        assert response is not None
-        record_circuit_success(
+    assert response is not None
+
+    if post_transaction_persister is None:
+        db_post = session_factory()
+        try:
+            record_circuit_success(
+                db_post,
+                provider_key=provider_key,
+                now=t_after,
+                settings_override=cfg,
+            )
+            final_entry = confirm_ai_quota_usage(
+                db_post,
+                reservation_id=reservation.id,
+                user_id=user_id,
+                provider_name=response.provider_name,
+                model_name=response.model_name,
+                token_usage=response.token_usage,
+                latency_ms=response.latency_ms,
+                now=t_after,
+            )
+            return GuardedAIExecutionResult(
+                response=response,
+                validated_output=validated,
+                ledger_entry=final_entry,
+                persisted_artifact=None,
+            )
+        except Exception:
+            db_post.rollback()
+            raise
+        finally:
+            db_post.close()
+
+    # Caminho com persistência atômica pós-transação (Versão + Circuit Breaker + Ledger em 1 commit)
+    db_post = session_factory()
+    candidate_version_id: uuid.UUID | None = None
+    persisted_artifact: Any = None
+    try:
+        def _atomic_post_tx() -> tuple[LedgerEntrySnapshot, Any, uuid.UUID | None]:
+            nonlocal candidate_version_id, persisted_artifact
+            db_post.info["_in_composite_tx"] = True
+            try:
+                persisted_artifact, candidate_version_id = post_transaction_persister(
+                    db_post,
+                    reservation,
+                    response,
+                    validated,
+                )
+                record_circuit_success(
+                    db_post,
+                    provider_key=provider_key,
+                    now=t_after,
+                    settings_override=cfg,
+                    commit=False,
+                )
+                entry_snap = confirm_ai_quota_usage(
+                    db_post,
+                    reservation_id=reservation.id,
+                    user_id=user_id,
+                    provider_name=response.provider_name,
+                    model_name=response.model_name,
+                    token_usage=response.token_usage,
+                    latency_ms=response.latency_ms,
+                    resolved_version_id=candidate_version_id,
+                    now=t_after,
+                    commit=False,
+                )
+                db_post.commit()
+                return entry_snap, persisted_artifact, candidate_version_id
+            finally:
+                db_post.info.pop("_in_composite_tx", None)
+
+        final_entry, persisted_artifact, candidate_version_id = run_atomic_with_sqlite_retry(
             db_post,
-            provider_key=provider_key,
-            now=t_after,
-            settings_override=cfg,
+            _atomic_post_tx,
         )
-        final_entry = confirm_ai_quota_usage(
-            db_post,
-            reservation_id=reservation.id,
-            user_id=user_id,
-            provider_name=response.provider_name,
-            model_name=response.model_name,
-            token_usage=response.token_usage,
-            latency_ms=response.latency_ms,
-            now=t_after,
-        )
+        if after_commit_loader is not None:
+            db_post.expire_all()
+            persisted_artifact = after_commit_loader(db_post, candidate_version_id)
         return GuardedAIExecutionResult(
             response=response,
             validated_output=validated,
             ledger_entry=final_entry,
+            persisted_artifact=persisted_artifact,
         )
-    except Exception:
+    except Exception as persist_exc:
         db_post.rollback()
-        raise
+        return _reconcile_post_commit_failure(
+            session_factory=session_factory,
+            reservation=reservation,
+            user_id=user_id,
+            provider_key=provider_key,
+            response=response,
+            validated=validated,
+            candidate_version_id=candidate_version_id,
+            after_commit_loader=after_commit_loader,
+            persist_exc=persist_exc,
+            now=t_after,
+            cfg=cfg,
+        )
     finally:
         db_post.close()
+
+
+def _reconcile_post_commit_failure(
+    *,
+    session_factory: Callable[[], Session],
+    reservation: LedgerEntrySnapshot,
+    user_id: uuid.UUID,
+    provider_key: str,
+    response: LLMStructuredResponse,
+    validated: T,
+    candidate_version_id: uuid.UUID | None,
+    after_commit_loader: Callable[[Session, uuid.UUID | None], Any] | None,
+    persist_exc: Exception,
+    now: datetime | None,
+    cfg: Settings,
+) -> GuardedAIExecutionResult[T]:
+    """Reconcilia falhas pré-commit ou commits ambíguos em sessão curta de contingência."""
+    db_contingency: Session | None = None
+    try:
+        db_contingency = session_factory()
+        ledger_row = db_contingency.scalar(
+            select(AIUsageLedger).where(
+                AIUsageLedger.id == reservation.id,
+                AIUsageLedger.user_id == user_id,
+            )
+        )
+        version_exists = False
+        if candidate_version_id is not None:
+            version_exists = (
+                db_contingency.scalar(
+                    select(ApplicationMaterialVersion.id).where(
+                        ApplicationMaterialVersion.id == candidate_version_id
+                    )
+                )
+                is not None
+            )
+
+        # Caso 1: Commit ambíguo que efetivamente foi persistido pelo banco
+        if (
+            ledger_row is not None
+            and ledger_row.status == AIUsageStatus.COMPLETED.value
+            and (candidate_version_id is None or version_exists)
+        ):
+            logger.info(
+                "Commit ambíguo reconciliado como concluído reservation_id=%s version_id=%s",
+                str(reservation.id),
+                str(candidate_version_id),
+            )
+            artifact = (
+                after_commit_loader(db_contingency, candidate_version_id)
+                if after_commit_loader is not None
+                else None
+            )
+            return GuardedAIExecutionResult(
+                response=response,
+                validated_output=validated,
+                ledger_entry=_to_entry_snapshot(ledger_row),
+                persisted_artifact=artifact,
+            )
+
+        # Caso 2: Transação não comitou; registra sucesso de transporte no breaker e falha técnica no ledger
+        if ledger_row is not None and ledger_row.status in (
+            AIUsageStatus.RESERVED.value,
+            AIUsageStatus.EXPIRED.value,
+        ):
+            raw_code = getattr(persist_exc, "error_code", None)
+            if isinstance(raw_code, str) and raw_code:
+                err_code = raw_code
+            elif isinstance(persist_exc, _DOMAIN_PRE_COMMIT_EXCEPTIONS):
+                err_code = "stale_source_version"
+            else:
+                err_code = "persistence_failed"
+
+            record_circuit_success(
+                db_contingency,
+                provider_key=provider_key,
+                now=now,
+                settings_override=cfg,
+            )
+            fail_ai_quota_usage(
+                db_contingency,
+                reservation_id=reservation.id,
+                user_id=user_id,
+                error_code=err_code,
+                provider_name=response.provider_name,
+                model_name=response.model_name,
+                token_usage=response.token_usage,
+                latency_ms=response.latency_ms,
+                now=now,
+            )
+    except Exception as contingency_exc:
+        if db_contingency is not None:
+            try:
+                db_contingency.rollback()
+            except Exception:
+                pass
+        logger.warning(
+            "Sessão de contingência indisponível para reconciliar reserva reservation_id=%s error_class=%s",
+            str(reservation.id),
+            contingency_exc.__class__.__name__,
+        )
+    finally:
+        if db_contingency is not None:
+            try:
+                db_contingency.close()
+            except Exception:
+                pass
+
+    raise persist_exc

@@ -6,6 +6,35 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.3] - 2026-11-21 — Subfase 04.4.3: Orquestração e Versionamento da IA Assistida
+
+### Adicionado e Endurecido
+
+- **Migration e Estado Persistido de Rejeição (`backend/alembic/versions/0012_ai_version_rejection_state.py`, `backend/app/models/material.py`, `backend/app/schemas/material.py`):**
+  - Adicionado `MaterialVersionOrigin.AI_ASSISTED = "ai_assisted"`.
+  - Migration `0012_ai_version_rejection_state` adicionando `is_rejected` (`Boolean`, `server_default=false`, `nullable=False`), `rejected_at` (`DateTime(timezone=True)`, `nullable=True`), `CheckConstraint` `rejection_state_consistent` (`(NOT is_rejected AND rejected_at IS NULL) OR (is_rejected AND rejected_at IS NOT NULL AND NOT is_approved)`) e índice composto `ix_material_versions_mat_rejected_ver` (`material_id`, `is_rejected`, `version_number`) em `application_material_versions`.
+  - Schemas atualizados de forma retrocompatível com `MaterialAIEnhanceRequest`, `is_rejected` e `rejected_at` em `MaterialVersionResponse`, e campos aditivos `latest_active_version_number`, `latest_active_version_id` e `latest_active_is_approved` em `MaterialResponse` e `MaterialSummaryResponse` (preservando `latest_version_number` histórico e `BlockProvenance` estrito em `Literal["confirmed_fact", "manual_edit", "user_authored"]`).
+- **`ControlledOverlayMerger` Determinístico para os 5 Materiais (`backend/app/services/materials/ai/overlay_merger.py`, `ai_schemas.py`):**
+  - Resolução de elegibilidade e aplicação All-or-Nothing sobre cópia profunda (`model_copy(deep=True)`) cobrindo `resume`, `cover_letter`, `recruiter_message`, `freelance_proposal` e `application_answers`.
+  - Proteção absoluta de blocos `user_authored`, `pending_fields` e seções factuais/estruturais (`header`, `education`, `skills`, `languages`, `manual_notes`), recálculo determinístico de `has_unverified_manual_edits` (`AUD-443-09C`) e recálculo de `character_count` em `recruiter_message` **após** a validação e normalização Pydantic (`AUD-443-06`).
+  - Rejeição estrita de caracteres de controle C0/C1, strings vazias pós-sanitização (`&nbsp;`, espaços Unicode e caracteres invisíveis `Cf`/`\u200b`, `AUD-443-03`), citações cruzadas entre entidades (`cross_entity_citation`, `AUD-443-09B`) e textos que excedam o limite do slot sem truncamento silencioso (`AUD-443-09A`).
+  - Implementação da **Política 2 para `manual_edit`**: preservado automaticamente quando `target_slot_ids=None` e elegível apenas quando explicitamente listado em `target_slot_ids` (exceto em `application_answers`, onde apenas respostas `answered_from_facts` + `confirmed_fact` são elegíveis).
+- **Orquestração, Orçamento Global de 24.000 Bytes, Contrato `commit=False`, Persistência Atômica e TOCTOU (`backend/app/services/materials/ai/orchestrator.py`, `execution_guard.py`, `_db_locks.py`, `circuit_breaker.py`, `quota_service.py`, `contracts.py`, `material_service.py`, `export_service.py`):**
+  - `enhance_material_version_with_ai`: orçamento global real medido em bytes UTF-8 sobre o `structured_input` completo (`len(serialize_canonical_provider_payload(structured_input)) <= 24.000`, `AUD-443-01`), reservando prioritariamente até 75% (`18.000` bytes) para `candidate_confirmed_facts` e `target_opportunity_context` e ajustando dinamicamente `reference_draft_slots_untrusted_for_facts` e `user_writing_preferences` via busca binária em bytes UTF-8.
+  - Contrato explícito `commit=False` (`allow_transaction_reset=False`, `AUD-443-02`) em `prepare_atomic_write_transaction`, `acquire_quota_scope_locks`, `_lock_or_create_breaker_row`, `record_circuit_success`, `record_circuit_failure`, `confirm_ai_quota_usage` e `fail_ai_quota_usage`, garantindo que nenhuma primitiva execute `db.commit()` implícito após `db.flush()`.
+  - `acquire_material_exclusivity_lock` e `run_atomic_with_sqlite_retry` aplicados em todas as mutações de `material_service.py`, incluindo `delete_material` com `for_update=True` e `SET NULL` explícito no ledger (`AUD-443-07`).
+  - Fingerprint TOCTOU completo cobrindo conteúdo, status, versões e **todos os vínculos ativos e históricos** em `application_material_links` (`AUD-443-10`), e persistência em **um único commit atômico** na Sessão #2 acompanhada de sessão curta de contingência protegida desde `session_factory()` (`AUD-443-08`).
+  - `reject_ai_assisted_version`: rejeição persistida sem exclusão física (`DELETE`), preservando a versão rejeitada para auditoria e o vínculo em `ai_usage_ledger.version_id`, restaurando a versão ativa anterior ao topo de `versions` (`versions[0]`) e sua mutabilidade (`is_mutable=True`), e bloqueando edição, derivação, aprovação, vínculo e exportação/download de versões rejeitadas.
+- **Rotas FastAPI, CORS e Sanitização de Erros HTTP (`backend/app/api/routes/materials.py`, `backend/app/main.py`):**
+  - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), com mapeamento completo dos 24 códigos canônicos de `StructuredGroundingValidator` (`CANONICAL_GROUNDING_CODES`, `AUD-443-05`), substituição de qualquer `slot_id` não pertencente à versão de origem por `"unrecognized_slot"` (`AUD-443-04`) e exposição CORS de `Content-Disposition`, `X-AI-Error-Code` e `Retry-After` (`AUD-443-12`).
+
+### Testes
+- `tests/test_ai_orchestration_phase0443.py`: 55 itens executados (`TC-443-01` a `TC-443-18` + suíte dedicada `AUD-443-01` a `AUD-443-12`, incluindo 26 variações parametrizadas de `CANONICAL_GROUNDING_CODES`).
+- Suíte completa do backend: **287/287 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+- Suíte do frontend: **15/15 testes passando** no Vitest, `tsc --noEmit`, `eslint .` e `vite build` sem erros.
+
+---
+
 ## [0.4.4.2] - 2026-11-19 — Subfase 04.4.2: Contexto Autorizado e Grounding Estruturado
 
 ### Adicionado e Endurecido

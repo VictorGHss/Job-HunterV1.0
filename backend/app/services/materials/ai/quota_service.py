@@ -535,6 +535,7 @@ def _load_owned_entry_for_transition(
     reservation_id: uuid.UUID,
     user_id: uuid.UUID,
     current_time: datetime,
+    allow_transaction_reset: bool = True,
 ) -> AIUsageLedger:
     _, _, day_key = _utc_day_bounds(current_time)
     acquire_quota_scope_locks(
@@ -544,6 +545,7 @@ def _load_owned_entry_for_transition(
             (f"user:{user_id}", "user"),
         ],
         current_time,
+        allow_transaction_reset=allow_transaction_reset,
     )
     stmt = select(AIUsageLedger).where(
         AIUsageLedger.id == reservation_id,
@@ -554,7 +556,8 @@ def _load_owned_entry_for_transition(
 
     entry = db.scalar(stmt)
     if entry is None:
-        db.rollback()
+        if allow_transaction_reset:
+            db.rollback()
         raise AIReservationNotFoundError("Reserva de IA não encontrada.")
     return entry
 
@@ -568,7 +571,9 @@ def confirm_ai_quota_usage(
     model_name: str,
     token_usage: LLMTokenUsage | None = None,
     latency_ms: int | None = None,
+    resolved_version_id: uuid.UUID | None = None,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> LedgerEntrySnapshot:
     """Confirma conclusão de operação de IA em transação curta pós-chamada externa.
 
@@ -597,15 +602,38 @@ def confirm_ai_quota_usage(
             reservation_id=reservation_id,
             user_id=user_id,
             current_time=current_time,
+            allow_transaction_reset=commit,
         )
         if entry.status not in (
             AIUsageStatus.RESERVED.value,
             AIUsageStatus.EXPIRED.value,
         ):
-            db.rollback()
+            if commit:
+                db.rollback()
             raise AIReservationStateError(
                 f"Não é possível confirmar reserva no estado '{entry.status}'."
             )
+
+        if resolved_version_id is not None:
+            if entry.material_id is None:
+                if commit:
+                    db.rollback()
+                raise AIReservationStateError(
+                    "Não é possível vincular version_id a uma reserva sem material_id."
+                )
+            ver_exists = db.scalar(
+                select(ApplicationMaterialVersion.id).where(
+                    ApplicationMaterialVersion.id == resolved_version_id,
+                    ApplicationMaterialVersion.material_id == entry.material_id,
+                )
+            )
+            if ver_exists is None:
+                if commit:
+                    db.rollback()
+                raise AIReservationNotFoundError(
+                    "Versão gerada informada para confirmação do ledger não pertence ao material."
+                )
+            entry.version_id = resolved_version_id
 
         entry.provider_name = clean_provider
         entry.model_name = clean_model
@@ -625,9 +653,14 @@ def confirm_ai_quota_usage(
 
         entry.completed_at = current_time
         entry.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_entry_snapshot(entry)
 
+    if not commit:
+        return _tx()
     snapshot = run_atomic_with_sqlite_retry(db, _tx)
     logger.info(
         "Reserva de IA confirmada reservation_id=%s provider=%s usage_reported=%s latency_ms=%s",
@@ -650,6 +683,7 @@ def fail_ai_quota_usage(
     token_usage: LLMTokenUsage | None = None,
     latency_ms: int | None = None,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> LedgerEntrySnapshot:
     """Registra falha de operação que chegou a iniciar execução externa.
 
@@ -684,12 +718,14 @@ def fail_ai_quota_usage(
             reservation_id=reservation_id,
             user_id=user_id,
             current_time=current_time,
+            allow_transaction_reset=commit,
         )
         if entry.status not in (
             AIUsageStatus.RESERVED.value,
             AIUsageStatus.EXPIRED.value,
         ):
-            db.rollback()
+            if commit:
+                db.rollback()
             raise AIReservationStateError(
                 f"Não é possível registrar falha para reserva no estado '{entry.status}'."
             )
@@ -714,9 +750,14 @@ def fail_ai_quota_usage(
 
         entry.completed_at = current_time
         entry.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_entry_snapshot(entry)
 
+    if not commit:
+        return _tx()
     snapshot = run_atomic_with_sqlite_retry(db, _tx)
     logger.warning(
         "Operação de IA encerrada com falha reservation_id=%s error_code=%s latency_ms=%s",
