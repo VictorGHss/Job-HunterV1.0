@@ -317,7 +317,7 @@ Integra a fundação de cotas/circuit breaker (04.4.1) e o contexto autorizado/g
   - Em Sessão #2 pós-provider, adquire lock exclusivo (`acquire_material_exclusivity_lock`: `UPDATE` imediato no SQLite e `SELECT ... FOR UPDATE` no PostgreSQL 16 em ordem canônica de 5 níveis, também aplicado em `delete_material` e nas demais mutações com `run_atomic_with_sqlite_retry`), compara impressão digital completa (fingerprint TOCTOU cobrindo conteúdo, status, versão ativa máxima e **todos os vínculos ativos e históricos** em `application_material_links`) e executa persistência da nova versão, atualização do circuit breaker e confirmação do ledger (`version_id=new_version.id`) com `commit=False` explícito (`allow_transaction_reset=False`, nunca comitando implicitamente após `flush()`) em **um único commit atômico** (com sessão curta de contingência protegida desde `session_factory()` para reconciliar commits ambíguos sem mascarar a exceção primária).
 - **Endpoints FastAPI, CORS e Sanitização de Erros (`api/routes/materials.py`, `main.py`):**
   - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), protegidos por autenticação HttpOnly, CSRF e isolamento por `user_id` (`404` uniforme).
-  - Respostas de erro (`422` grounding/overlay, `409` TOCTOU/estado, `429` quota com `Retry-After`, `502` malformed/provider error, `503` disabled/circuit open com `Retry-After`, `504` timeout) retornam códigos estáticos sanitizados (`X-AI-Error-Code`, exposto junto com `Retry-After` e `Content-Disposition` no `CORSMiddleware`) e `detail: str` alinhado aos 24 códigos canônicos de `StructuredGroundingValidator`, sem jamais ecoar trechos brutos ou `slot_id` não reconhecido da saída do provider.
+  - Respostas de erro (`422` grounding/overlay, `409` TOCTOU/estado, `429` quota com `Retry-After`, `502` malformed/provider error, `503` disabled/circuit open com `Retry-After`, `504` timeout) retornam códigos estáticos sanitizados (`X-AI-Error-Code`, exposto junto com `Retry-After` e `Content-Disposition` no `CORSMiddleware`) e `detail: str` alinhado aos 26 códigos canônicos de `StructuredGroundingValidator`, sem jamais ecoar trechos brutos ou `slot_id` não reconhecido da saída do provider.
 - **Fora de escopo nesta subfase:** provedores HTTP externos reais (Gemini, OpenAI, Anthropic, Ollama, OpenRouter) e interface visual da IA no frontend (Subfase 04.4.4).
 
 ### 4.13. Encerrando o Ambiente
@@ -363,3 +363,8 @@ npm run build
 - [DEPLOY.md](DEPLOY.md): Instruções detalhadas de execução local, portas e preparação para publicação segura via Cloudflare Tunnel (`https://jobhunter.ctrls.dev.br`).
 - [SECURITY.md](SECURITY.md): Arquitetura de segurança, isolamento multiusuário (`user_id`), Argon2id, sessões HttpOnly, proteção CSRF e controles aplicados.
 - [CHANGELOG.md](CHANGELOG.md): Histórico de entregas do projeto.
+
+### Subfase 04.4.4 — AI Studio (frontend)
+
+O modal de materiais possui a aba **AI Studio & Comparação**: solicitar aprimoramento por IA (todos os 5 tipos), comparar estruturadamente a sugestão com a versão de origem, ver proveniência e fatos citados, e decidir (aprovar, editar como versão derivada ou rejeitar). Sugestões nunca são aprovadas automaticamente. A UI depende de `AI_ASSISTED_ENABLED` e do provider configurados no backend; erros são exibidos com base em `X-AI-Error-Code`/`Retry-After`.
+

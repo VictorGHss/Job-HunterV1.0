@@ -6,6 +6,23 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.4] - 2026-11-21 — Subfase 04.4.4: AI Studio (Frontend)
+
+### Adicionado
+
+- **AI Studio** (`MaterialAIStudioPanel.tsx`, `aiStudioUtils.ts`) integrado ao `MaterialWorkspaceModal`: solicitação de aprimoramento (`ai-enhance`) com seleção automática ou manual de slots (Política 2 para `manual_edit`; `user_authored` e `pending_fields` bloqueados), instruções opcionais (≤ 1500 caracteres) e prevenção de envio duplicado.
+- **Comparação estruturada slot a slot** entre versão pai e sugestão `ai_assisted`, com proveniência (`confirmed_fact`, `manual_edit`, `user_authored`) e fatos citados resolvidos apenas a partir de `source_facts_snapshot` (nenhuma citação inventada).
+- **Decisão humana:** Aprovar sugestão, Editar como versão derivada (`/derive`, nunca `PUT` em versão imutável) e Rejeitar sugestão (`/reject-ai`); versões rejeitadas exibem selo e têm aprovação, edição, exportação, download e novo aprimoramento bloqueados.
+- **Erros categorizados:** `ApiError` agora expõe `errorCode` (`X-AI-Error-Code`) e `retryAfterSeconds` (`Retry-After`); mensagens para quota, IA desabilitada, circuit breaker, versão desatualizada (com "Recarregar material"), conflito de estado, grounding/overlay, timeout e falha de provider.
+- Tipos: `ai_assisted`, `is_rejected`, `rejected_at`, `latest_active_version_*`, `MaterialAIEnhancePayload`, `MaterialAIOverlayMetadata`.
+- 5 novos testes Vitest (20/20 no total).
+
+### Segurança
+
+- Nenhum SDK de IA nem chamada externa no navegador; nenhuma aprovação automática de sugestões.
+
+---
+
 ## [0.4.4.3] - 2026-11-21 — Subfase 04.4.3: Orquestração e Versionamento da IA Assistida
 
 ### Adicionado e Endurecido
@@ -26,7 +43,7 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
   - Fingerprint TOCTOU completo cobrindo conteúdo, status, versões e **todos os vínculos ativos e históricos** em `application_material_links` (`AUD-443-10`), e persistência em **um único commit atômico** na Sessão #2 acompanhada de sessão curta de contingência protegida desde `session_factory()` (`AUD-443-08`).
   - `reject_ai_assisted_version`: rejeição persistida sem exclusão física (`DELETE`), preservando a versão rejeitada para auditoria e o vínculo em `ai_usage_ledger.version_id`, restaurando a versão ativa anterior ao topo de `versions` (`versions[0]`) e sua mutabilidade (`is_mutable=True`), e bloqueando edição, derivação, aprovação, vínculo e exportação/download de versões rejeitadas.
 - **Rotas FastAPI, CORS e Sanitização de Erros HTTP (`backend/app/api/routes/materials.py`, `backend/app/main.py`):**
-  - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), com mapeamento completo dos 24 códigos canônicos de `StructuredGroundingValidator` (`CANONICAL_GROUNDING_CODES`, `AUD-443-05`), substituição de qualquer `slot_id` não pertencente à versão de origem por `"unrecognized_slot"` (`AUD-443-04`) e exposição CORS de `Content-Disposition`, `X-AI-Error-Code` e `Retry-After` (`AUD-443-12`).
+  - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), com mapeamento completo dos 26 códigos canônicos de `StructuredGroundingValidator` (`CANONICAL_GROUNDING_CODES`, `AUD-443-05`), substituição de qualquer `slot_id` não pertencente à versão de origem por `"unrecognized_slot"` (`AUD-443-04`) e exposição CORS de `Content-Disposition`, `X-AI-Error-Code` e `Retry-After` (`AUD-443-12`).
 
 ### Testes
 - `tests/test_ai_orchestration_phase0443.py`: 55 itens executados (`TC-443-01` a `TC-443-18` + suíte dedicada `AUD-443-01` a `AUD-443-12`, incluindo 26 variações parametrizadas de `CANONICAL_GROUNDING_CODES`).

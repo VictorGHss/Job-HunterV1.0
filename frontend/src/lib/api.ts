@@ -27,6 +27,7 @@ import type {
   DocumentDownloadFormat,
   DocumentTemplateId,
   ManualOpportunityCreatePayload,
+  MaterialAIEnhancePayload,
   MaterialCreatePayload,
   MaterialDetailResponse,
   MaterialDownloadResult,
@@ -77,11 +78,41 @@ export function getActiveCsrfToken(): string | null {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  errorCode: string | null;
+  retryAfterSeconds: number | null;
+
+  constructor(
+    message: string,
+    status: number,
+    errorCode: string | null = null,
+    retryAfterSeconds: number | null = null
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.errorCode = errorCode;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+function extractErrorHeaders(response: Response): {
+  errorCode: string | null;
+  retryAfterSeconds: number | null;
+} {
+  if (!response?.headers || typeof response.headers.get !== "function") {
+    return { errorCode: null, retryAfterSeconds: null };
+  }
+  const rawCode = response.headers.get("X-AI-Error-Code");
+  const errorCode = rawCode && rawCode.trim() ? rawCode.trim() : null;
+  const rawRetryAfter = response.headers.get("Retry-After");
+  let retryAfterSeconds: number | null = null;
+  if (rawRetryAfter && /^\d+$/.test(rawRetryAfter.trim())) {
+    const parsed = Number(rawRetryAfter.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      retryAfterSeconds = parsed;
+    }
+  }
+  return { errorCode, retryAfterSeconds };
 }
 
 async function request<T>(
@@ -136,7 +167,8 @@ async function request<T>(
           : first.msg || "Dados inválidos.";
       }
     }
-    throw new ApiError(message, response.status);
+    const { errorCode, retryAfterSeconds } = extractErrorHeaders(response);
+    throw new ApiError(message, response.status, errorCode, retryAfterSeconds);
   }
 
   return data as T;
@@ -224,7 +256,8 @@ async function requestBlob(
         // usa fallback seguro
       }
     }
-    throw new ApiError(message, response.status);
+    const { errorCode, retryAfterSeconds } = extractErrorHeaders(response);
+    throw new ApiError(message, response.status, errorCode, retryAfterSeconds);
   }
 
   const blob = await response.blob();
@@ -733,6 +766,28 @@ export const api = {
     ): Promise<MaterialDetailResponse> {
       return request<MaterialDetailResponse>(
         `/materials/${materialId}/versions/${versionId}/approve`,
+        { method: "POST" }
+      );
+    },
+    aiEnhanceVersion(
+      materialId: string,
+      versionId: string,
+      payload?: MaterialAIEnhancePayload
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(
+        `/materials/${materialId}/versions/${versionId}/ai-enhance`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload ?? {}),
+        }
+      );
+    },
+    rejectAiVersion(
+      materialId: string,
+      versionId: string
+    ): Promise<MaterialDetailResponse> {
+      return request<MaterialDetailResponse>(
+        `/materials/${materialId}/versions/${versionId}/reject-ai`,
         { method: "POST" }
       );
     },

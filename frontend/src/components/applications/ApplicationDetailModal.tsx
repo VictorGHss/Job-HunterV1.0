@@ -1958,12 +1958,16 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                   ) : (
                     linkedMaterials.map((mat) => {
                       const linkedVersionId =
-                        mat.linked_version_id || mat.latest_version_id;
+                        mat.linked_version_id ||
+                        mat.latest_active_version_id ||
+                        mat.latest_version_id;
                       const linkedVersionNumber =
-                        mat.linked_version_number ?? mat.latest_version_number;
+                        mat.linked_version_number ??
+                        mat.latest_active_version_number ??
+                        mat.latest_version_number;
                       const isLinkedVersionApproved = mat.linked_version_id
                         ? Boolean(mat.linked_version_is_approved)
-                        : mat.has_approved_version;
+                        : (mat.latest_active_is_approved ?? mat.has_approved_version);
 
                       return (
                         <div
@@ -2122,7 +2126,11 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                     <h4 className="text-xs font-semibold text-foreground">
                       Outros materiais seus disponíveis ({availableMaterials.length})
                     </h4>
-                    {availableMaterials.map((mat) => (
+                    {availableMaterials.map((mat) => {
+                      const activeVersionNumber =
+                        mat.latest_active_version_number ??
+                        mat.latest_version_number;
+                      return (
                       <div
                         key={mat.id}
                         className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 p-3 text-xs"
@@ -2136,7 +2144,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                               {mat.material_type}
                             </Badge>
                             <Badge variant="outline">
-                              v{mat.latest_version_number}
+                              v{activeVersionNumber}
                             </Badge>
                             {mat.has_approved_version ? (
                               <Badge variant="secondary">Aprovado</Badge>
@@ -2160,7 +2168,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                           </Button>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>
