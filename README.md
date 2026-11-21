@@ -300,9 +300,26 @@ Constrói a camada de autorização factual, minimização de privacidade e vali
   - *Tecnologias, Empresas, Cargos e Liderança:* matcher dedicado de tecnologias com fronteiras de token (`Java != JavaScript`) e proteção contra falsos positivos em inglês (`go`, `rest`, `spring`, `redis`, `react`, `node`), validando exclusivamente contra fatos confirmados citados (sem vazamento cross-entity nem autorização pela vaga); bloqueia empresas inventadas/trocadas, promoção de cargos/senioridade, verbos de liderança não sustentados e afirmações qualitativas exageradas (ex.: redução de custos ou transformação sistêmica sem evidência).
   - *Segurança de Saída:* rejeita URLs com/sem protocolo, links Markdown (inclusive multilinha), e-mails diretos e ofuscados (`[at]`/`[dot]`/` at `/` dot `), telefones BR/internacionais (incluindo DDD 19/20), HTML, SVG, atributos `on*` e esquemas ativos (`javascript:`, `vbscript:`, `data:`).
   - *Limitações Epistemológicas e Revisão Humana Obrigatória:* o validador é estrutural, heurístico e conservador — não realiza compreensão semântica absoluta; paráfrases sutis ou distorções de contexto sem marcadores detectáveis continuam exigindo revisão e aprovação humana obrigatória.
-- **Fora de escopo na subfase:** provedores HTTP externos reais (Gemini, OpenAI, Anthropic, Ollama, OpenRouter), chamadas a APIs pagas, rotas/endpoints de aprimoramento, persistência/overlay de versões `ai_assisted` e interface gráfica no frontend.
 
-### 4.12. Encerrando o Ambiente
+### 4.12. Orquestração e Versionamento da IA Assistida (Subfase 04.4.3)
+Integra a fundação de cotas/circuit breaker (04.4.1) e o contexto autorizado/grounding (04.4.2) ao ciclo de vida real dos cinco materiais de candidatura:
+- **Versionamento Imutável e Estado Persistido de Rejeição (`0012_ai_version_rejection_state`, `models/material.py`):**
+  - Versões geradas pela IA recebem `origin="ai_assisted"`, `parent_version_id=source_version.id`, `is_approved=False`, `is_rejected=False` e `is_mutable=False` (toda sugestão de IA nasce imutável, exigindo aprovação humana, derivação `/derive` para edição manual ou rejeição explícita `/reject-ai`).
+  - Migration `0012_ai_version_rejection_state` adiciona `is_rejected` (`Boolean`, default `false`) e `rejected_at` (`DateTime(timezone=True)`), com `CheckConstraint` `rejection_state_consistent` (`(NOT is_rejected AND rejected_at IS NULL) OR (is_rejected AND rejected_at IS NOT NULL AND NOT is_approved)`) e índice composto `ix_material_versions_mat_rejected_ver`.
+  - **Proibição de exclusão física em rejeição:** `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` marca `is_rejected=True` e `rejected_at=utc_now()` sem executar `DELETE`, preservando integralmente o registro histórico em `application_material_versions` e o vínculo em `ai_usage_ledger.version_id`. Versões ativas (`not is_rejected`) permanecem ordenadas no topo de `versions` (`versions[0]` é sempre a versão ativa mais recente, restaurando `is_mutable=True` para o rascunho anterior), enquanto números de versão seguem estritamente monotônicos (`v1 -> v2 (rejeitada) -> v3`).
+- **`ControlledOverlayMerger` Determinístico e Política 2 para `manual_edit` (`overlay_merger.py`):**
+  - Opera sobre cópia profunda (`model_copy(deep=True)`) nos cinco materiais (`resume`, `cover_letter`, `recruiter_message`, `freelance_proposal`, `application_answers`), preservando `BlockProvenance` estritamente em `Literal["confirmed_fact", "manual_edit", "user_authored"]` (compatível com o frontend sem quebrar `PROVENANCE_META`).
+  - Protege de forma absoluta blocos `user_authored`, `pending_fields` e metadados estruturais (`header`, `education`, `skills`, `languages`, `manual_notes`); recalcula `character_count` em `recruiter_message`.
+  - **Política 2 para `manual_edit`:** em modo automático (`target_slot_ids=None`), blocos `manual_edit` são preservados; em modo explícito (`target_slot_ids=[...]`), blocos `manual_edit` listados são elegíveis (exceto em `application_answers`, onde apenas itens `answered_from_facts` com `provenance="confirmed_fact"` são elegíveis).
+- **Segregação de Conteúdo Não Confiável, Persistência Atômica e Proteção TOCTOU (`orchestrator.py`, `execution_guard.py`, `_db_locks.py`):**
+  - Enriquecimento controlado de `LLMStructuredRequest.structured_input` com `reference_draft_slots_untrusted_for_facts` (`trust_level="untrusted_draft_style_only"`) e `user_writing_preferences` (`trust_level="style_and_emphasis_only_not_factual_evidence"`), redigidos contra PII e estritamente separados de `candidate_confirmed_facts`, respeitando o orçamento de `<= 24.000` bytes UTF-8.
+  - Em Sessão #2 pós-provider, adquire lock exclusivo (`acquire_material_exclusivity_lock`: `UPDATE` imediato no SQLite e `SELECT ... FOR UPDATE` no PostgreSQL 16 em ordem canônica de 5 níveis), compara impressão digital completa (fingerprint TOCTOU cobrindo conteúdo, status, versão ativa máxima e vínculos ativos) e executa persistência da nova versão, atualização do circuit breaker e confirmação do ledger (`version_id=new_version.id`) em **um único commit atômico** (com sessão curta de contingência para reconciliar commits ambíguos).
+- **Endpoints FastAPI e Sanitização de Erros (`api/routes/materials.py`):**
+  - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), protegidos por autenticação HttpOnly, CSRF e isolamento por `user_id` (`404` uniforme).
+  - Respostas de erro (`422` grounding/overlay, `409` TOCTOU/estado, `429` quota com `Retry-After`, `502` malformed/provider error, `503` disabled/circuit open com `Retry-After`, `504` timeout) retornam códigos estáticos sanitizados (`X-AI-Error-Code`) e `detail: str` sem jamais ecoar trechos brutos da saída do provider.
+- **Fora de escopo nesta subfase:** provedores HTTP externos reais (Gemini, OpenAI, Anthropic, Ollama, OpenRouter) e interface visual da IA no frontend (Subfase 04.4.4).
+
+### 4.13. Encerrando o Ambiente
 
 Para parar os containers sem perder os dados do banco:
 
@@ -315,11 +332,11 @@ docker compose --env-file .env -f infra/compose.yaml down
 ## 5. Desenvolvimento e Execução de Testes Localmente
 
 ### Backend (Pytest + Alembic)
-Execução rápida local (SQLite — suíte completa ou apenas Subfases 04.4.1 / 04.4.2):
+Execução rápida local (SQLite — suíte completa ou Subfases 04.4.1 / 04.4.2 / 04.4.3):
 ```powershell
 cd backend
 .\.venv\Scripts\pytest.exe
-.\.venv\Scripts\pytest.exe tests\test_ai_foundation_phase0441.py tests\test_ai_grounding_phase0442.py -v
+.\.venv\Scripts\pytest.exe tests\test_ai_foundation_phase0441.py tests\test_ai_grounding_phase0442.py tests\test_ai_orchestration_phase0443.py -v
 ```
 
 Validação completa contra **PostgreSQL 16 real** via Docker Compose (usando banco isolado `jobhunter_test`):

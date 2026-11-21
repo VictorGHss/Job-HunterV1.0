@@ -203,7 +203,8 @@ def test_tc441_02_migration_0011_upgrade_downgrade_and_head_startup(tmp_path: Pa
     alembic_cfg.set_main_option("sqlalchemy.url", mig_url)
 
     script_dir = ScriptDirectory.from_config(alembic_cfg)
-    assert script_dir.get_heads() == ["0011_ai_usage_ledger"]
+    assert len(script_dir.get_heads()) == 1
+    assert script_dir.get_revision("0011_ai_usage_ledger") is not None
 
     user_id = uuid.uuid4()
     mat_id = uuid.uuid4()

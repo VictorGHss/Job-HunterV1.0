@@ -1,4 +1,4 @@
-"""Fundação e infraestrutura de IA assistida opcional (Subfases 04.4.1 e 04.4.2).
+"""Fundação, contexto autorizado, validação de grounding e orquestração de IA assistida (Fase 04.4).
 
 Mantém separação estrita entre:
 1. Contrato agnóstico de provider (``LLMProvider``, ``DisabledLLMProvider``, ``MockLLMProvider``).
@@ -7,7 +7,10 @@ Mantém separação estrita entre:
 4. Contexto autorizado, autorização de Application/Opportunity e minimização/redação de PII (``context_builder``, ``safety``).
 5. Schemas estruturados de sugestão Pydantic v2 com allowlist estrita de slots (``ai_schemas``).
 6. Validação conservadora e all-or-nothing de grounding (``grounding_validator``).
+7. Merger determinístico de overlay e proteção de proveniência (``overlay_merger``).
+8. Orquestração de aprimoramento e rejeição persistida de versões ``ai_assisted`` (``orchestrator``).
 """
+from app.services.materials.ai._db_locks import acquire_material_exclusivity_lock
 from app.services.materials.ai.ai_schemas import (
     AI_SUPPORTED_MATERIAL_TYPES,
     AIMaterialEnhanceOutput,
@@ -41,9 +44,13 @@ from app.services.materials.ai.contracts import (
     AIContextAuthorizationError,
     AIDisabledError,
     AIFoundationError,
+    AIGroundingRejectedError,
+    AIOverlayConflictError,
     AIQuotaExceededError,
     AIReservationNotFoundError,
     AIReservationStateError,
+    AIReviewStateError,
+    AIStaleSourceVersionError,
     LLMMalformedOutputError,
     LLMProvider,
     LLMProviderError,
@@ -65,6 +72,21 @@ from app.services.materials.ai.grounding_validator import (
     StructuredGroundingValidator,
     extract_mentioned_technologies,
     extract_quantitative_claims,
+)
+from app.services.materials.ai.orchestrator import (
+    AI_ENHANCE_OPERATION_TYPE,
+    AI_ENHANCE_SCHEMA_NAME,
+    DEFAULT_ENHANCE_MAX_OUTPUT_TOKENS,
+    DEFAULT_RESERVED_TOKENS,
+    build_sanitized_grounding_error,
+    enhance_material_version_with_ai,
+    reject_ai_assisted_version,
+)
+from app.services.materials.ai.overlay_merger import (
+    ControlledOverlayMerger,
+    EligibleSlotInfo,
+    OverlayMergeResult,
+    SlotEligibilityResolution,
 )
 from app.services.materials.ai.providers import (
     DisabledLLMProvider,
@@ -99,20 +121,30 @@ __all__ = [
     "AIContextAuthorizationError",
     "AIDisabledError",
     "AIFoundationError",
+    "AIGroundingRejectedError",
     "AIMaterialEnhanceOutput",
     "AIMaterialTypeLiteral",
+    "AIOverlayConflictError",
     "AIQuotaExceededError",
     "AIReservationNotFoundError",
     "AIReservationStateError",
+    "AIReviewStateError",
+    "AIStaleSourceVersionError",
     "AISuggestionItem",
+    "AI_ENHANCE_OPERATION_TYPE",
+    "AI_ENHANCE_SCHEMA_NAME",
     "AI_SUPPORTED_MATERIAL_TYPES",
     "AuthorizedAIContext",
     "AuthorizedFactItem",
     "CircuitBreakerSnapshot",
     "ContextTruncationMetadata",
+    "ControlledOverlayMerger",
+    "DEFAULT_ENHANCE_MAX_OUTPUT_TOKENS",
     "DEFAULT_MAX_FACTS",
     "DEFAULT_MAX_PAYLOAD_BYTES",
+    "DEFAULT_RESERVED_TOKENS",
     "DisabledLLMProvider",
+    "EligibleSlotInfo",
     "GroundingValidationResult",
     "GuardedAIExecutionResult",
     "LLMMalformedOutputError",
@@ -126,6 +158,7 @@ __all__ = [
     "LedgerEntrySnapshot",
     "MockLLMProvider",
     "MockScenario",
+    "OverlayMergeResult",
     "PARAMETERIZED_SLOT_PATTERNS_BY_MATERIAL",
     "ParsedSlotTarget",
     "QuantitativeClaim",
@@ -134,10 +167,14 @@ __all__ = [
     "REDACTED_TOKEN",
     "STATIC_ALLOWED_SLOTS_BY_MATERIAL",
     "SanitizedOpportunityContext",
+    "SlotEligibilityResolution",
     "StructuredGroundingValidator",
+    "acquire_material_exclusivity_lock",
     "build_authorized_ai_context",
+    "build_sanitized_grounding_error",
     "check_and_acquire_circuit_execution",
     "confirm_ai_quota_usage",
+    "enhance_material_version_with_ai",
     "execute_guarded_ai_call",
     "expire_abandoned_reservations",
     "extract_mentioned_technologies",
@@ -155,6 +192,7 @@ __all__ = [
     "record_circuit_failure",
     "record_circuit_success",
     "redact_free_text_pii",
+    "reject_ai_assisted_version",
     "release_ai_quota_reservation",
     "reserve_ai_quota",
     "resolve_llm_provider",

@@ -6,6 +6,33 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [0.4.4.3] - 2026-11-21 — Subfase 04.4.3: Orquestração e Versionamento da IA Assistida
+
+### Adicionado e Endurecido
+
+- **Migration e Estado Persistido de Rejeição (`backend/alembic/versions/0012_ai_version_rejection_state.py`, `backend/app/models/material.py`, `backend/app/schemas/material.py`):**
+  - Adicionado `MaterialVersionOrigin.AI_ASSISTED = "ai_assisted"`.
+  - Migration `0012_ai_version_rejection_state` adicionando `is_rejected` (`Boolean`, `server_default=false`, `nullable=False`), `rejected_at` (`DateTime(timezone=True)`, `nullable=True`), `CheckConstraint` `rejection_state_consistent` (`(NOT is_rejected AND rejected_at IS NULL) OR (is_rejected AND rejected_at IS NOT NULL AND NOT is_approved)`) e índice composto `ix_material_versions_mat_rejected_ver` (`material_id`, `is_rejected`, `version_number`) em `application_material_versions`.
+  - Schemas atualizados de forma retrocompatível com `MaterialAIEnhanceRequest`, `is_rejected` e `rejected_at` em `MaterialVersionResponse`, e campos aditivos `latest_active_version_number`, `latest_active_version_id` e `latest_active_is_approved` em `MaterialResponse` e `MaterialSummaryResponse` (preservando `latest_version_number` histórico e `BlockProvenance` estrito em `Literal["confirmed_fact", "manual_edit", "user_authored"]`).
+- **`ControlledOverlayMerger` Determinístico para os 5 Materiais (`backend/app/services/materials/ai/overlay_merger.py`):**
+  - Resolução de elegibilidade e aplicação All-or-Nothing sobre cópia profunda (`model_copy(deep=True)`) cobrindo `resume`, `cover_letter`, `recruiter_message`, `freelance_proposal` e `application_answers`.
+  - Proteção absoluta de blocos `user_authored`, `pending_fields` e seções factuais/estruturais (`header`, `education`, `skills`, `languages`, `manual_notes`), além de recálculo determinístico de `character_count` em `recruiter_message`.
+  - Implementação da **Política 2 para `manual_edit`**: preservado automaticamente quando `target_slot_ids=None` e elegível apenas quando explicitamente listado em `target_slot_ids` (exceto em `application_answers`, onde apenas respostas `answered_from_facts` + `confirmed_fact` são elegíveis).
+- **Orquestração, Persistência Atômica, Concorrência TOCTOU e Rejeição (`backend/app/services/materials/ai/orchestrator.py`, `execution_guard.py`, `_db_locks.py`, `circuit_breaker.py`, `quota_service.py`, `contracts.py`, `material_service.py`, `export_service.py`):**
+  - `enhance_material_version_with_ai`: enriquecimento segregado de `LLMStructuredRequest.structured_input` com `reference_draft_slots_untrusted_for_facts` e `user_writing_preferences` redigidos contra PII e isolados de `candidate_confirmed_facts` dentro do orçamento de `<= 24.000` bytes UTF-8.
+  - `acquire_material_exclusivity_lock`: lock exclusivo multi-banco (`UPDATE` imediato no SQLite e `SELECT ... FOR UPDATE` no PostgreSQL 16) respeitando ordem canônica de 5 níveis (`ApplicationMaterial` -> `ApplicationMaterialVersion` -> `AICircuitBreakerRecord` -> `AIQuotaScopeLock` -> `AIUsageLedger`).
+  - Verificação de fingerprint TOCTOU pós-provider e persistência em **um único commit atômico** na Sessão #2 (nova versão `origin="ai_assisted"` + circuit breaker + confirmação do ledger com `version_id=new_version.id`), acompanhada de sessão curta de contingência para reconciliar commits ambíguos.
+  - `reject_ai_assisted_version`: rejeição persistida sem exclusão física (`DELETE`), preservando a versão rejeitada para auditoria e o vínculo em `ai_usage_ledger.version_id`, restaurando a versão ativa anterior ao topo de `versions` (`versions[0]`) e sua mutabilidade (`is_mutable=True`), e bloqueando edição, derivação, aprovação, vínculo e exportação/download de versões rejeitadas.
+- **Rotas FastAPI e Sanitização de Erros HTTP (`backend/app/api/routes/materials.py`):**
+  - `POST /api/v1/materials/{material_id}/versions/{version_id}/ai-enhance` (`201 Created`) e `POST /api/v1/materials/{material_id}/versions/{version_id}/reject-ai` (`200 OK`), com códigos de erro sanitizados (`X-AI-Error-Code`, `Retry-After` em `429`/`503`) e sem jamais ecoar trechos brutos da saída do provider.
+
+### Testes
+- `tests/test_ai_orchestration_phase0443.py`: 18 testes (`TC-443-01` a `TC-443-18`) cobrindo migration `0011 <-> 0012` e `CheckConstraint`, E2E nos 5 tipos de materiais, Política 2 de `manual_edit`, proteção de `user_authored` e `pending_fields`, segregação de `user_instructions`, sanitização `422` de grounding sem vazamento, erros de provider (`502`/`504`), circuit breaker (`503`), kill switch (`503`), quotas (`429`), ciclo completo de rejeição persistida, imutabilidade/derivação/aprovação, proteção TOCTOU concorrente, corrida paralela com `threading.Barrier`, rollback atômico + contingência de commit ambíguo, isolamento multi-tenant (`404`) e CSRF (`403`).
+- Suíte completa do backend: **250/250 testes passando** em SQLite local e em PostgreSQL 16 (`backend-test` / `jobhunter_test`).
+- Suíte do frontend: **15/15 testes passando** no Vitest, `tsc --noEmit`, `eslint .` e `vite build` sem erros.
+
+---
+
 ## [0.4.4.2] - 2026-11-19 — Subfase 04.4.2: Contexto Autorizado e Grounding Estruturado
 
 ### Adicionado e Endurecido

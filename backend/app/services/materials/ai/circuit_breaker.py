@@ -317,6 +317,7 @@ def record_circuit_success(
     provider_key: str = "default",
     now: datetime | None = None,
     settings_override: Settings | None = None,
+    commit: bool = True,
 ) -> CircuitBreakerSnapshot:
     """Registra sucesso na comunicação com o provider e fecha/restaura o circuito."""
     cfg = settings_override or get_settings()
@@ -333,13 +334,18 @@ def record_circuit_success(
         row.half_open_probe_started_at = None
         row.last_success_at = current_time
         row.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_snapshot(
             row,
             now=current_time,
             probe_ttl_seconds=cfg.ai_reservation_ttl_seconds,
         )
 
+    if not commit:
+        return _tx()
     return run_atomic_with_sqlite_retry(db, _tx)
 
 
@@ -350,6 +356,7 @@ def record_circuit_failure(
     reason_code: str = "provider_error",
     now: datetime | None = None,
     settings_override: Settings | None = None,
+    commit: bool = True,
 ) -> CircuitBreakerSnapshot:
     """Registra falha técnica do provider e abre/reabre o circuito quando aplicável."""
     cfg = settings_override or get_settings()
@@ -383,11 +390,16 @@ def record_circuit_failure(
             row.retry_available_at = current_time + cooldown
 
         row.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_snapshot(
             row,
             now=current_time,
             probe_ttl_seconds=cfg.ai_reservation_ttl_seconds,
         )
 
+    if not commit:
+        return _tx()
     return run_atomic_with_sqlite_retry(db, _tx)

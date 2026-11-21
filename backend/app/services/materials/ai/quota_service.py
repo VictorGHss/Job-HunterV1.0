@@ -568,7 +568,9 @@ def confirm_ai_quota_usage(
     model_name: str,
     token_usage: LLMTokenUsage | None = None,
     latency_ms: int | None = None,
+    resolved_version_id: uuid.UUID | None = None,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> LedgerEntrySnapshot:
     """Confirma conclusão de operação de IA em transação curta pós-chamada externa.
 
@@ -607,6 +609,25 @@ def confirm_ai_quota_usage(
                 f"Não é possível confirmar reserva no estado '{entry.status}'."
             )
 
+        if resolved_version_id is not None:
+            if entry.material_id is None:
+                db.rollback()
+                raise AIReservationStateError(
+                    "Não é possível vincular version_id a uma reserva sem material_id."
+                )
+            ver_exists = db.scalar(
+                select(ApplicationMaterialVersion.id).where(
+                    ApplicationMaterialVersion.id == resolved_version_id,
+                    ApplicationMaterialVersion.material_id == entry.material_id,
+                )
+            )
+            if ver_exists is None:
+                db.rollback()
+                raise AIReservationNotFoundError(
+                    "Versão gerada informada para confirmação do ledger não pertence ao material."
+                )
+            entry.version_id = resolved_version_id
+
         entry.provider_name = clean_provider
         entry.model_name = clean_model
         entry.status = AIUsageStatus.COMPLETED.value
@@ -625,9 +646,14 @@ def confirm_ai_quota_usage(
 
         entry.completed_at = current_time
         entry.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_entry_snapshot(entry)
 
+    if not commit:
+        return _tx()
     snapshot = run_atomic_with_sqlite_retry(db, _tx)
     logger.info(
         "Reserva de IA confirmada reservation_id=%s provider=%s usage_reported=%s latency_ms=%s",
@@ -650,6 +676,7 @@ def fail_ai_quota_usage(
     token_usage: LLMTokenUsage | None = None,
     latency_ms: int | None = None,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> LedgerEntrySnapshot:
     """Registra falha de operação que chegou a iniciar execução externa.
 
@@ -714,9 +741,14 @@ def fail_ai_quota_usage(
 
         entry.completed_at = current_time
         entry.updated_at = current_time
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return _to_entry_snapshot(entry)
 
+    if not commit:
+        return _tx()
     snapshot = run_atomic_with_sqlite_retry(db, _tx)
     logger.warning(
         "Operação de IA encerrada com falha reservation_id=%s error_code=%s latency_ms=%s",
