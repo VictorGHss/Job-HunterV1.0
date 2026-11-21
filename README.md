@@ -3,7 +3,7 @@
 Plataforma de descoberta, análise e preparação supervisionada de candidaturas para oportunidades profissionais na área de tecnologia (**Estágios**, **Desenvolvedor Júnior / Posições de Entrada** e **Projetos Freelance** no Brasil e no exterior).
 
 - **Hostname planejado:** `https://jobhunter.ctrls.dev.br`
-- **Fase atual:** Subfase 04.4.2 — Contexto Autorizado e Grounding Estruturado
+- **Fase atual:** Subfase 04.4.5 — Hardening e Integração Final (MVP 1.0 consolidado)
 - **Arquitetura:** Monólito modular multiusuário desde a origem
 
 ---
@@ -57,7 +57,9 @@ job-hunter/
 │   │   │   ├── 0007_applications_pipeline.py
 │   │   │   ├── 0008_active_app_uniq.py
 │   │   │   ├── 0009_application_followup_and_interview_logs.py
-│   │   │   └── 0010_application_materials.py
+│   │   │   ├── 0010_application_materials.py
+│   │   │   ├── 0011_ai_usage_ledger.py
+│   │   │   └── 0012_ai_version_rejection_state.py
 │   │   ├── env.py
 │   │   └── script.py.mako
 │   ├── app/
@@ -77,6 +79,7 @@ job-hunter/
 │   │   │   ├── base.py
 │   │   │   └── session.py
 │   │   ├── models/
+│   │   │   ├── ai_usage.py
 │   │   │   ├── application.py
 │   │   │   ├── material.py
 │   │   │   ├── opportunity.py
@@ -90,6 +93,19 @@ job-hunter/
 │   │   │   └── profile.py
 │   │   ├── services/
 │   │   │   ├── materials/
+│   │   │   │   ├── ai/
+│   │   │   │   │   ├── _db_locks.py
+│   │   │   │   │   ├── ai_schemas.py
+│   │   │   │   │   ├── circuit_breaker.py
+│   │   │   │   │   ├── context_builder.py
+│   │   │   │   │   ├── contracts.py
+│   │   │   │   │   ├── execution_guard.py
+│   │   │   │   │   ├── grounding_validator.py
+│   │   │   │   │   ├── orchestrator.py
+│   │   │   │   │   ├── overlay_merger.py
+│   │   │   │   │   ├── providers.py
+│   │   │   │   │   ├── quota_service.py
+│   │   │   │   │   └── safety.py
 │   │   │   │   ├── export/
 │   │   │   │   │   ├── fonts/
 │   │   │   │   │   ├── document_templates.py
@@ -107,10 +123,12 @@ job-hunter/
 │   │   │   │   └── writing_common.py
 │   │   │   ├── opportunities/
 │   │   │   │   ├── connectors/
+│   │   │   │   ├── classification.py
 │   │   │   │   ├── matching.py
 │   │   │   │   ├── opportunity_service.py
 │   │   │   │   ├── sanitization.py
 │   │   │   │   └── sync_service.py
+│   │   │   ├── application_process_service.py
 │   │   │   ├── application_service.py
 │   │   │   ├── auth_service.py
 │   │   │   └── profile_service.py
@@ -118,9 +136,13 @@ job-hunter/
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
+│   │   ├── test_ai_foundation_phase0441.py
+│   │   ├── test_ai_grounding_phase0442.py
+│   │   ├── test_ai_orchestration_phase0443.py
 │   │   ├── test_applications_phase03.py
 │   │   ├── test_applications_phase032.py
 │   │   ├── test_foundation_phase01.py
+│   │   ├── test_integration_hardening_phase0445.py
 │   │   ├── test_materials_phase041.py
 │   │   ├── test_materials_phase042.py
 │   │   ├── test_materials_phase043.py
@@ -137,6 +159,19 @@ job-hunter/
 │   │   └── sw.js
 │   ├── src/
 │   │   ├── components/
+│   │   │   ├── applications/
+│   │   │   ├── auth/
+│   │   │   ├── dashboard/
+│   │   │   ├── layout/
+│   │   │   ├── materials/
+│   │   │   │   ├── aiStudioUtils.ts
+│   │   │   │   ├── DocumentPreviewCard.tsx
+│   │   │   │   ├── MaterialAIStudioPanel.tsx
+│   │   │   │   ├── MaterialTypeEditors.tsx
+│   │   │   │   └── MaterialWorkspaceModal.tsx
+│   │   │   ├── opportunities/
+│   │   │   ├── profile/
+│   │   │   └── ui/
 │   │   ├── context/
 │   │   ├── lib/
 │   │   ├── test/
