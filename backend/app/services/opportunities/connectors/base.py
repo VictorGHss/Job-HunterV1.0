@@ -155,7 +155,12 @@ class BaseOpportunityConnector(ABC):
         self.user_agent = user_agent or settings.sync_user_agent
         self.last_batch: CollectionBatch = CollectionBatch()
 
-    def fetch_json(self, url: str) -> Any:
+    def fetch_json_with_headers(
+        self,
+        url: str,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[Any, httpx.Headers]:
         timeout = httpx.Timeout(
             connect=self.connect_timeout,
             read=self.read_timeout,
@@ -166,6 +171,8 @@ class BaseOpportunityConnector(ABC):
             "Accept": "application/json",
             "User-Agent": self.user_agent,
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         last_error: str | None = None
         client_kwargs: dict[str, Any] = {
@@ -185,6 +192,22 @@ class BaseOpportunityConnector(ABC):
                                 response.headers.get("Retry-After")
                             )
                             last_error = f"HTTP 429 Too Many Requests (Retry-After={wait_seconds}s)"
+                            if attempt < self.max_retries:
+                                self.sleep_fn(float(wait_seconds))
+                                continue
+                            raise ConnectorFetchError(last_error)
+
+                        if response.status_code == 403 and (
+                            response.headers.get("Retry-After")
+                            or response.headers.get("X-RateLimit-Remaining") == "0"
+                        ):
+                            wait_seconds = parse_retry_after_seconds(
+                                response.headers.get("Retry-After"),
+                                default_seconds=10,
+                            )
+                            last_error = (
+                                f"HTTP 403 Rate Limit excedido (Retry-After={wait_seconds}s)"
+                            )
                             if attempt < self.max_retries:
                                 self.sleep_fn(float(wait_seconds))
                                 continue
@@ -218,7 +241,7 @@ class BaseOpportunityConnector(ABC):
                                 )
 
                         try:
-                            return json.loads(chunks.decode("utf-8"))
+                            return (json.loads(chunks.decode("utf-8")), response.headers)
                         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                             raise ConnectorPayloadError(
                                 "Resposta JSON malformada recebida da fonte."
@@ -232,6 +255,15 @@ class BaseOpportunityConnector(ABC):
                     raise ConnectorFetchError(last_error) from exc
 
         raise ConnectorFetchError(last_error or "Falha desconhecida ao consultar fonte.")
+
+    def fetch_json(
+        self,
+        url: str,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any:
+        data, _ = self.fetch_json_with_headers(url, extra_headers=extra_headers)
+        return data
 
     @abstractmethod
     def parse_payload(self, payload: Any) -> list[NormalizedOpportunityDraft]:
@@ -260,6 +292,14 @@ class BaseOpportunityConnector(ABC):
     ) -> SourceLifecycleSignal | None:
         del external_id, source_url, metadata
         return None
+
+    def check_publications_status_batch(
+        self,
+        items: list[tuple[str, str, dict[str, Any] | None]],
+    ) -> dict[str, SourceLifecycleSignal]:
+        """Revalidação em lote opcional para fontes que expõem endpoint de status em batch."""
+        del items
+        return {}
 
 
 def parse_iso_datetime(value: Any) -> datetime | None:

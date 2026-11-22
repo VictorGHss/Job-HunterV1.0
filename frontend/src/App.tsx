@@ -6,6 +6,7 @@ import {
   HomeDashboardView,
   InternshipsSectionView,
   JuniorDeveloperSectionView,
+  OtherPotentiallyCompatibleSectionView,
 } from "@/components/dashboard/DashboardViews";
 import {
   AppShell,
@@ -177,6 +178,15 @@ export function JobHunterApp() {
             onOpenApplications={handleOpenApplications}
           />
         )}
+        {activeSection === "potenciais" && (
+          <OtherPotentiallyCompatibleSectionView
+            bundle={bundle}
+            onNavigate={setActiveSection}
+            refreshTrigger={discoveryRefreshNonce}
+            onOpenManualModal={handleOpenManualModal}
+            onOpenApplications={handleOpenApplications}
+          />
+        )}
         {activeSection === "candidaturas" && (
           <ApplicationsSectionView
             bundle={bundle}
@@ -204,6 +214,7 @@ export function JobHunterApp() {
             setActiveSection("estagios");
           } else if (
             created.seniority_level === "junior" ||
+            created.seniority_level === "entry_level" ||
             created.opportunity_type === "junior"
           ) {
             setActiveSection("junior");

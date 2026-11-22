@@ -58,11 +58,14 @@ docker compose --env-file .env -f infra/compose.yaml logs -f backend frontend
 docker compose --env-file .env -f infra/compose.yaml down
 ```
 
-### Sincronização controlada de oportunidades (Fases 02 a 02.5)
+### Sincronização controlada de oportunidades (Fase 02 / DX-02.1 + DX-02.2)
 A coleta pública é acionada explicitamente via CLI para respeitar os limites dos provedores e o estado de conformidade de cada fonte (`remote_ok`, `jobicy`, `himalayas`, `github_backend_br` e `github_frontend_br`: ativas com intervalo `>= 3600s`; `remotive`: temporariamente desabilitada com `enabled=false` aguardando autorização escrita):
 
 ```powershell
-# Teste de conectividade, validação e métricas sem persistir no banco (apenas fontes habilitadas)
+# Inicialização explícita e idempotente das fontes padrão (também executada no startup da API)
+docker exec job-hunter-backend python -m app.cli init-sources
+
+# Teste de conectividade, validação e métricas estritamente SEM escrita no banco (requer fontes inicializadas)
 docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --dry-run
 
 # Sincronização normal de todas as fontes habilitadas (exibe métricas por fonte e consolidado)
@@ -71,6 +74,14 @@ docker exec job-hunter-backend python -m app.cli sync-opportunities
 # Sincronização pontual ignorando apenas o intervalo mínimo (--force nunca ativa fonte desabilitada)
 docker exec job-hunter-backend python -m app.cli sync-opportunities --source remote_ok --force
 ```
+
+As rotas `GET /api/v1/opportunities*` e o modo `sync-opportunities --dry-run` operam estritamente em modo somente leitura (não inicializam fontes automaticamente nem gravam `OpportunitySyncRun`). Caso `--dry-run` seja executado em um banco vazio, o comando orienta executar `python -m app.cli init-sources` antes.
+
+#### Credenciais opcionais e tetos de paginação (DX-02.2)
+Nenhuma chave externa é obrigatória para iniciar ou operar o Job Hunter. Opcionalmente, podem ser configuradas no `.env`:
+- `GITHUB_TOKEN`: Personal Access Token de escopo mínimo (somente leitura de repositórios públicos) enviado via `Authorization: Bearer` nas chamadas aos repositórios comunitários GitHub BR (`per_page=100` com paginação via `Link`), ampliando o limite de API sem nunca ser gravado em logs ou URLs.
+- `HIMALAYAS_API_KEY`: chave gratuita oficial da API Himalayas enviada via `Authorization: Bearer` nos endpoints `/jobs/api` e `/jobs/api/search`, mantendo operação funcional nos limites públicos quando vazia.
+- Limites conservadores de paginação/segmentação configuráveis via ambiente (`SYNC_JOBICY_MAX_PAGES=5`, `SYNC_HIMALAYAS_MAX_PAGES=5`, `SYNC_REMOTE_OK_MAX_QUERIES=7`, `SYNC_GITHUB_MAX_PAGES=5`), além de pausa mínima obrigatória de `1s` entre páginas na Jobicy.
 
 Na **Fase 02.5**, cada execução registra e exibe separadamente:
 - `recebidas` (`received_count`), `validas` (`valid_count`) e `rejeitadas` (`rejected_count`), garantindo `received_count == valid_count + rejected_count`;

@@ -518,11 +518,34 @@ export function JuniorDeveloperSectionView({
     <OpportunityDiscoveryPage
       category="junior"
       title="Desenvolvedor Júnior & Posições de Entrada"
-      subtitle="Filtragem contratual, geográfica e técnica aplicada no servidor para vagas júnior."
+      subtitle="Filtragem contratual, geográfica e técnica aplicada no servidor para vagas júnior e de início de carreira (entry-level)."
       refreshTrigger={refreshTrigger}
       onOpenManualModal={onOpenManualModal}
       onOpenApplications={onOpenApplications}
       preferencesSummary={preferencesCard}
+    />
+  );
+}
+
+export function OtherPotentiallyCompatibleSectionView({
+  refreshTrigger = 0,
+  onOpenManualModal = () => undefined,
+  onOpenApplications,
+}: {
+  bundle?: FullProfileBundle;
+  onNavigate?: (section: NavSection) => void;
+  refreshTrigger?: number;
+  onOpenManualModal?: (category: OpportunityType) => void;
+  onOpenApplications?: (applicationId?: string) => void;
+}) {
+  return (
+    <OpportunityDiscoveryPage
+      category="unknown_potential"
+      title="Outras potencialmente compatíveis"
+      subtitle="Oportunidades elegíveis cuja senioridade não foi informada pela fonte, mantidas em visão separada sem misturar na aba Júnior."
+      refreshTrigger={refreshTrigger}
+      onOpenManualModal={onOpenManualModal}
+      onOpenApplications={onOpenApplications}
     />
   );
 }

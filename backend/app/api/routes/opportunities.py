@@ -52,7 +52,7 @@ def search_opportunities(
     db: Annotated[Session, Depends(get_db)],
     q: Annotated[str | None, Query(max_length=120)] = None,
     type: Annotated[OpportunityType | None, Query()] = None,
-    seniority: Annotated[SeniorityLevel | None, Query()] = None,
+    seniority: Annotated[list[SeniorityLevel] | None, Query()] = None,
     compatibility: Annotated[Literal["compatible", "potential", "incompatible"] | None, Query()] = None,
     work_mode: Annotated[WorkMode | None, Query()] = None,
     employment_type: Annotated[EmploymentType | None, Query()] = None,
@@ -68,12 +68,13 @@ def search_opportunities(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=50)] = 20,
 ) -> OpportunityListResponse:
+    seniority_values = [item.value for item in seniority] if seniority else None
     return list_opportunities(
         db,
         current_user,
         q=q,
         opportunity_type=type.value if type else None,
-        seniority_level=seniority.value if seniority else None,
+        seniority_level=seniority_values,
         compatibility=compatibility,
         work_mode=work_mode.value if work_mode else None,
         employment_type=employment_type.value if employment_type else None,

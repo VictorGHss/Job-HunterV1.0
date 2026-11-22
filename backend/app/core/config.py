@@ -47,12 +47,20 @@ class Settings(BaseSettings):
     login_ip_max_attempts: int = 20
     login_cooldown_seconds: int = 300
 
-    # Coleta de oportunidades (Fase 02)
+    # Coleta de oportunidades (Fase 02 / DX-02.2)
     sync_http_connect_timeout_seconds: float = 10.0
     sync_http_read_timeout_seconds: float = 20.0
     sync_max_response_bytes: int = 5 * 1024 * 1024
     sync_max_retries: int = 2
     sync_user_agent: str = "JobHunter/0.2 (+https://jobhunter.ctrls.dev.br)"
+    # Credenciais opcionais para aumento de limite de taxa (nunca obrigatórias)
+    github_token: str = ""
+    himalayas_api_key: str = ""
+    # Limites conservadores de paginação/segmentação por execução
+    sync_jobicy_max_pages: int = 5
+    sync_himalayas_max_pages: int = 5
+    sync_remote_ok_max_queries: int = 7
+    sync_github_max_pages: int = 5
 
     # Infraestrutura de IA Assistida (Subfase 04.4.1 — desabilitada por padrão)
     # Semântica temporal:
@@ -149,6 +157,10 @@ class Settings(BaseSettings):
         "login_account_ip_max_attempts",
         "login_ip_max_attempts",
         "login_cooldown_seconds",
+        "sync_jobicy_max_pages",
+        "sync_himalayas_max_pages",
+        "sync_remote_ok_max_queries",
+        "sync_github_max_pages",
         "ai_rate_limit_window_seconds",
         "ai_user_window_max_requests",
         "ai_user_daily_max_requests",
