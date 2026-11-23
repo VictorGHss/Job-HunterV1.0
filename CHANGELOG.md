@@ -6,6 +6,23 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-03.1.2] - 2026-11-23 — Aprimoramento do relatório de reclassificação geográfica
+
+### Modificado
+
+- **Exposição de diffs geográficos em `ReclassificationChange` (`sync_service.py`):**
+  - Adicionados os atributos `old_eligible_countries`, `new_eligible_countries`, `old_country`, `new_country`, `old_eligibility_unknown` e `new_eligibility_unknown` na dataclass `ReclassificationChange`.
+  - `reclassify_opportunities` passou a registrar o estado geográfico anterior e o novo estado resultante para cada oportunidade alterada.
+- **Transparência e exibição integral de alterações no CLI (`cli.py`):**
+  - Removido o filtro condicional restritivo em `handle_reclassify_opportunities` que suprimia alterações quando `new_employment_type == "unknown"` e os demais campos estruturais permaneciam inalterados, eliminando o ponto cego sobre modificações puramente geográficas.
+  - O comando `reclassify-opportunities` passou a exibir o diff de classificação e a linha detalhada de diff geográfico (`geo: eligible_countries=... -> ... | country=... -> ... | eligibility_unknown=... -> ...`) para todas as oportunidades alteradas.
+
+### Testes
+
+- `backend/tests/test_dx031_geography_remoteok.py`: novos testes de regressão cobrindo o preenchimento dos campos geográficos em `ReclassificationChange`, exibição no CLI de mudanças exclusivamente geográficas e com `employment_type="unknown"`, e garantia de imutabilidade do banco de dados na simulação `--dry-run`.
+
+---
+
 ## [DX-03.1] - 2026-11-22 — Correção geográfica e consistência do Remote OK
 
 ### Corrigido

@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.cli import main as cli_main
 from app.models.opportunity import (
     EmploymentType,
     ExperienceRequirementMode,
@@ -38,6 +39,7 @@ from app.services.opportunities.matching import (
     resolve_canonical_country,
 )
 from app.services.opportunities.sync_service import (
+    ReclassificationChange,
     ensure_default_sources,
     reclassify_opportunities,
 )
@@ -686,6 +688,14 @@ def test_dx031_reclassify_opportunities_dry_run_and_apply_on_remote_ok_fixtures(
     dry_report = reclassify_opportunities(db_session, source_slug="remote_ok", dry_run=True)
     assert dry_report.evaluated_count == 3
     assert dry_report.updated_count == 3
+    # DX-03.1.2: campos geográficos populados em ReclassificationChange
+    change_rem = next(c for c in dry_report.changes if c.opportunity_id == str(opp_remote_only.id))
+    assert change_rem.old_eligible_countries == ("Remote",)
+    assert change_rem.new_eligible_countries == ()
+    assert change_rem.old_country == "Remote"
+    assert change_rem.new_country is None
+    assert change_rem.old_eligibility_unknown is False
+    assert change_rem.new_eligibility_unknown is True
     db_session.expire_all()
     assert db_session.get(Opportunity, opp_fe.id).opportunity_type == OpportunityType.INTERNSHIP.value
     assert db_session.get(Opportunity, opp_sm.id).seniority_level == SeniorityLevel.INTERNSHIP.value
@@ -713,3 +723,155 @@ def test_dx031_reclassify_opportunities_dry_run_and_apply_on_remote_ok_fixtures(
     assert rem_fixed.country is None
     assert rem_fixed.eligibility_unknown is True
     assert rem_fixed.location_text == "Remote,"
+
+
+# ==============================================================================
+# DX-03.1.2: Aprimoramento do relatório de reclassificação geográfica e CLI
+# ==============================================================================
+
+
+def test_dx031_2_reclassification_report_and_cli_geographic_diff(
+    db_session: Session,
+    db_engine,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    src = {s.slug: s for s in ensure_default_sources(db_session)}["remote_ok"]
+    now = datetime.now(UTC)
+
+    # Oportunidade 1: Mudança puramente geográfica (classificação estruturada permanece idêntica)
+    # Tinha eligible_countries=["Remote"], country="Remote", eligibility_unknown=False
+    # Resultará em eligible_countries=[], country=None, eligibility_unknown=True
+    # com employment_type="unknown", seniority="junior", area="backend" inalterados.
+    opp_pure_geo = Opportunity(
+        source_id=src.id,
+        external_id="dx031-2-pure-geo",
+        title="Junior Python Engineer",
+        company_name="CloudCo",
+        description="Write backend Python microservices.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        location_text="Remote,",
+        country="Remote",
+        eligible_countries=["Remote"],
+        eligibility_unknown=False,
+        technologies=["python", "fastapi"],
+        source_url="https://remoteok.com/remote-jobs/dx031-2-pure-geo",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-dx031-2-geo",
+        raw_metadata={"source": "remote_ok"},
+    )
+
+    # Oportunidade 2: Mudança de classificação + mudança geográfica
+    opp_both = Opportunity(
+        source_id=src.id,
+        external_id="dx031-2-both",
+        title="Frontend Intern",
+        company_name="WebCo",
+        description="Web development internship.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.FRONTEND.value,
+        location_text="Remote, USA",
+        country="USA",
+        eligible_countries=["Remote", "USA"],
+        eligibility_unknown=False,
+        technologies=["react", "internship"],
+        source_url="https://remoteok.com/remote-jobs/dx031-2-both",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-dx031-2-both",
+        raw_metadata={"source": "remote_ok"},
+    )
+
+    db_session.add_all([opp_pure_geo, opp_both])
+    db_session.commit()
+
+    # 1. Simulação dry-run: captura alterações geográficas sem gravar no banco
+    dry_report = reclassify_opportunities(db_session, source_slug="remote_ok", dry_run=True)
+    assert dry_report.dry_run is True
+    assert dry_report.evaluated_count == 2
+    assert dry_report.updated_count == 2
+    assert len(dry_report.changes) == 2
+
+    # Localizar change puramente geográfico
+    geo_change = next(c for c in dry_report.changes if c.opportunity_id == str(opp_pure_geo.id))
+    assert geo_change.title == "Junior Python Engineer"
+    # Campos estruturais inalterados
+    assert geo_change.old_opportunity_type == geo_change.new_opportunity_type == OpportunityType.JUNIOR.value
+    assert geo_change.old_seniority_level == geo_change.new_seniority_level == SeniorityLevel.JUNIOR.value
+    assert geo_change.old_employment_type == geo_change.new_employment_type == EmploymentType.UNKNOWN.value
+    assert geo_change.old_professional_area == geo_change.new_professional_area == ProfessionalArea.BACKEND.value
+    # Campos geográficos antes e depois
+    assert geo_change.old_eligible_countries == ("Remote",)
+    assert geo_change.new_eligible_countries == ()
+    assert geo_change.old_country == "Remote"
+    assert geo_change.new_country is None
+    assert geo_change.old_eligibility_unknown is False
+    assert geo_change.new_eligibility_unknown is True
+
+    # Localizar change de ambos
+    both_change = next(c for c in dry_report.changes if c.opportunity_id == str(opp_both.id))
+    assert both_change.old_eligible_countries == ("Remote", "USA")
+    assert both_change.new_eligible_countries == ("USA",)
+    assert both_change.old_country == "USA"
+    assert both_change.new_country == "USA"
+    assert both_change.old_eligibility_unknown is False
+    assert both_change.new_eligibility_unknown is False
+
+    # Imutabilidade do banco comprovada após dry-run
+    db_session.expire_all()
+    pure_in_db = db_session.get(Opportunity, opp_pure_geo.id)
+    assert pure_in_db.eligible_countries == ["Remote"]
+    assert pure_in_db.country == "Remote"
+    assert pure_in_db.eligibility_unknown is False
+
+    # 2. Execução via CLI em modo --dry-run
+    TestSession = sessionmaker(bind=db_engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr("app.cli.SessionLocal", TestSession)
+
+    exit_code = cli_main(["reclassify-opportunities", "--source", "remote_ok", "--dry-run"])
+    assert exit_code == 0
+    cli_out = capsys.readouterr().out
+
+    # Conferir cabeçalho e estatísticas
+    assert "[DRY_RUN] fonte=remote_ok" in cli_out
+    assert "avaliadas=2 | atualizadas=2 | inalteradas=0" in cli_out
+
+    # Conferir que a oportunidade com mudança exclusivamente geográfica É EXIBIDA
+    # (anteriormente era descartada devido ao filtro `new_employment_type != 'unknown'`)
+    assert f"[{opp_pure_geo.id}] Junior Python Engineer" in cli_out
+    assert "geo: eligible_countries=['Remote'] -> [] | country=Remote -> None | eligibility_unknown=False -> True" in cli_out
+
+    # Conferir que a oportunidade com ambas as alterações também é exibida
+    assert f"[{opp_both.id}] Frontend Intern" in cli_out
+    assert "geo: eligible_countries=['Remote', 'USA'] -> ['USA'] | country=USA -> USA | eligibility_unknown=False -> False" in cli_out
+
+    # 3. Comprovar que o CLI com --dry-run NÃO realizou persistência
+    db_session.expire_all()
+    assert db_session.get(Opportunity, opp_pure_geo.id).eligible_countries == ["Remote"]
+    assert db_session.get(Opportunity, opp_both.id).eligible_countries == ["Remote", "USA"]
+
+    # 4. Execução real via CLI (sem --dry-run) persiste as alterações
+    exit_code_real = cli_main(["reclassify-opportunities", "--source", "remote_ok"])
+    assert exit_code_real == 0
+    cli_out_real = capsys.readouterr().out
+    assert "[SUCCESS] fonte=remote_ok" in cli_out_real
+
+    db_session.expire_all()
+    persisted_pure = db_session.get(Opportunity, opp_pure_geo.id)
+    assert persisted_pure.eligible_countries == []
+    assert persisted_pure.country is None
+    assert persisted_pure.eligibility_unknown is True
+
+    persisted_both = db_session.get(Opportunity, opp_both.id)
+    assert persisted_both.eligible_countries == ["USA"]
+    assert persisted_both.opportunity_type == OpportunityType.INTERNSHIP.value

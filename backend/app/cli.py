@@ -261,18 +261,16 @@ def handle_reclassify_opportunities(args: argparse.Namespace) -> int:
         print(f"Distribuicao de experiencia anterior: {report.before_experience_counts}")
         print(f"Distribuicao de experiencia resultante: {report.after_experience_counts}")
     for change in report.changes:
-        if (
-            change.old_opportunity_type != change.new_opportunity_type
-            or change.new_employment_type != "unknown"
-            or change.old_professional_area != change.new_professional_area
-            or change.old_seniority_level != change.new_seniority_level
-            or change.old_experience_mode != change.new_experience_mode
-        ):
-            print(
-                f"  - [{change.opportunity_id}] {change.title}: "
-                f"{change.old_opportunity_type}/{change.old_seniority_level}/{change.old_experience_mode}/{change.old_employment_type}/{change.old_professional_area} -> "
-                f"{change.new_opportunity_type}/{change.new_seniority_level}/{change.new_experience_mode}/{change.new_employment_type}/{change.new_professional_area}"
-            )
+        print(
+            f"  - [{change.opportunity_id}] {change.title}: "
+            f"{change.old_opportunity_type}/{change.old_seniority_level}/{change.old_experience_mode}/{change.old_employment_type}/{change.old_professional_area} -> "
+            f"{change.new_opportunity_type}/{change.new_seniority_level}/{change.new_experience_mode}/{change.new_employment_type}/{change.new_professional_area}"
+        )
+        print(
+            f"    geo: eligible_countries={list(change.old_eligible_countries)} -> {list(change.new_eligible_countries)} | "
+            f"country={change.old_country} -> {change.new_country} | "
+            f"eligibility_unknown={change.old_eligibility_unknown} -> {change.new_eligibility_unknown}"
+        )
     return 0
 
 

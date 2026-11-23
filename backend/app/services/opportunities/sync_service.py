@@ -1408,6 +1408,12 @@ class ReclassificationChange:
     new_experience_mode: str = "not_specified"
     old_experience_min_years: int | None = None
     new_experience_min_years: int | None = None
+    old_eligible_countries: tuple[str, ...] = ()
+    new_eligible_countries: tuple[str, ...] = ()
+    old_country: str | None = None
+    new_country: str | None = None
+    old_eligibility_unknown: bool = False
+    new_eligibility_unknown: bool = False
     reasons: tuple[str, ...] = ()
 
 
@@ -1557,6 +1563,10 @@ def reclassify_opportunities(
                 if "software_development" not in new_sec_areas:
                     new_sec_areas = (*new_sec_areas, "software_development")
 
+        old_eligible = tuple(opp.eligible_countries or [])
+        old_country = opp.country
+        old_eligibility_unknown = bool(opp.eligibility_unknown)
+
         new_eligible_countries = list(opp.eligible_countries or [])
         new_country = opp.country
         new_eligibility_unknown = bool(opp.eligibility_unknown)
@@ -1599,9 +1609,9 @@ def reclassify_opportunities(
             old_exp_min,
             old_exp_pref,
             old_exp_sum,
-            tuple(opp.eligible_countries or []),
-            opp.country,
-            bool(opp.eligibility_unknown),
+            old_eligible,
+            old_country,
+            old_eligibility_unknown,
         ):
             change_reasons = list(decision.reasons)
             if has_non_country_remote_token:
@@ -1624,6 +1634,12 @@ def reclassify_opportunities(
                     new_experience_mode=decision.experience_requirement_mode,
                     old_experience_min_years=old_exp_min,
                     new_experience_min_years=decision.experience_min_years,
+                    old_eligible_countries=old_eligible,
+                    new_eligible_countries=tuple(new_eligible_countries),
+                    old_country=old_country,
+                    new_country=new_country,
+                    old_eligibility_unknown=old_eligibility_unknown,
+                    new_eligibility_unknown=new_eligibility_unknown,
                     reasons=tuple(change_reasons),
                 )
             )
