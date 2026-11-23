@@ -2,17 +2,17 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
+from app.core.config import settings
 from app.models.opportunity import (
-    EmploymentType,
     ExternalSourceStatus,
-    OpportunityType,
     ProfessionalArea,
     SourceType,
     WorkMode,
 )
-from app.services.opportunities.classification import classify_opportunity
+from app.services.opportunities.classification import (
+    classify_opportunity,
+    reconcile_structured_classification,
+)
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     CollectionBatch,
@@ -23,11 +23,13 @@ from app.services.opportunities.connectors.base import (
     SourceLifecycleSignal,
     parse_iso_datetime,
 )
+from app.services.opportunities.matching import parse_location_cities
 from app.services.opportunities.sanitization import (
     normalize_canonical_url,
     normalize_string_list,
     sanitize_external_html_text,
     sanitize_plain_text,
+    validate_safe_external_url,
 )
 
 _BRACKET_PREFIX_RE = re.compile(r"^\s*\[([^\]]+)\]\s*")
@@ -39,6 +41,7 @@ _EMAIL_PII_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 _PHONE_PII_RE = re.compile(
     r"(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?\d{4,5}[-\s]?\d{4}\b"
 )
+_LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel\s*=\s*"?next"?', re.I)
 
 _META_LABELS_LOWER = {
     "remoto",
@@ -78,10 +81,36 @@ def redact_contact_pii(text: str | None) -> str | None:
     return redacted
 
 
+def parse_github_next_link(link_header: str | None) -> str | None:
+    """
+    Extrai com segurança a URL de `rel="next"` do cabeçalho HTTP `Link` do GitHub,
+    validando esquema HTTPS e host estritamente `api.github.com` contra SSRF.
+    """
+    if not link_header or not isinstance(link_header, str):
+        return None
+    match = _LINK_NEXT_RE.search(link_header)
+    if not match:
+        return None
+    candidate = match.group(1).strip()
+    try:
+        validated = validate_safe_external_url(candidate)
+    except ValueError:
+        return None
+    parsed = urlparse(validated)
+    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "api.github.com":
+        return None
+    return validated
+
+
 def _extract_work_mode_and_location(
     raw_title: str,
     labels: list[str],
-) -> tuple[str, str | None, str | None, str | None, list[str], bool]:
+) -> tuple[str, str | None, str | None, str | None, str | None, list[str], bool, list[str]]:
+    """
+    Retorna `(work_mode, location_text, city, state, country, eligible_countries,
+    eligibility_unknown, parsed_cities)` preservando `location_text` original e
+    reconhecendo múltiplas cidades alternativas sem quebrar nomes compostos.
+    """
     labels_low = {lb.strip().lower() for lb in labels}
     bracket_match = _BRACKET_PREFIX_RE.match(raw_title)
     bracket_text = bracket_match.group(1).strip() if bracket_match else ""
@@ -101,21 +130,41 @@ def _extract_work_mode_and_location(
         country = (bracket_text or "Exterior")[:120]
         eligible_countries = [bracket_text] if bracket_text else []
         location_text = bracket_text or "Exterior"
-        return (work_mode, location_text[:255], None, country, eligible_countries, False)
+        return (
+            work_mode,
+            location_text[:255],
+            None,
+            None,
+            country,
+            eligible_countries,
+            False,
+            [],
+        )
 
     country = "Brasil"
     eligible_countries = ["Brasil"]
     location_text = bracket_text or ("Remoto - Brasil" if work_mode == WorkMode.REMOTE.value else "Brasil")
     city: str | None = None
+    state: str | None = None
+    parsed_cities: list[str] = []
+
     if work_mode in {WorkMode.HYBRID.value, WorkMode.ONSITE.value}:
-        cleaned_city = re.sub(
-            r"(?i)\b(?:híbrido|hibrido|presencial|brasil|remoto|remote)\b|(?:[/,-]\s*[A-Za-z]{2}\b)|[,/-]",
-            " ",
-            bracket_text,
-        )
-        cleaned_city = re.sub(r"\s+", " ", cleaned_city).strip()
-        city = cleaned_city[:120] if cleaned_city else "Outra localidade"
-    return (work_mode, location_text[:255], city, country, eligible_countries, False)
+        parsed_cities, state = parse_location_cities(bracket_text)
+        if parsed_cities:
+            city = " / ".join(parsed_cities)[:120]
+        else:
+            city = "Outra localidade"
+
+    return (
+        work_mode,
+        location_text[:255],
+        city,
+        state,
+        country,
+        eligible_countries,
+        False,
+        parsed_cities,
+    )
 
 
 def _extract_company_from_title(raw_title: str) -> str | None:
@@ -134,11 +183,38 @@ def _extract_company_from_title(raw_title: str) -> str | None:
 class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
     """
     Conector base para repositórios comunitários brasileiros de vagas no GitHub
-    licenciados sob MIT, consumidos via API REST oficial v3 do GitHub.
+    licenciados sob MIT, consumidos via API REST oficial v3 do GitHub com paginação
+    real (`per_page=100` + cabeçalho `Link`) e suporte opcional a `GITHUB_TOKEN`.
     """
 
     default_fallback_area: str = ProfessionalArea.SOFTWARE_DEVELOPMENT.value
     id_prefix: str = "gh"
+
+    def __init__(
+        self,
+        *,
+        github_token: str | None = None,
+        max_pages: int | None = None,
+        page_delay_seconds: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        raw_token = settings.github_token if github_token is None else github_token
+        self._github_token = raw_token.strip() if isinstance(raw_token, str) else ""
+        self.max_pages = max(
+            1,
+            int(max_pages if max_pages is not None else settings.sync_github_max_pages),
+        )
+        self.page_delay_seconds = max(0.0, float(page_delay_seconds))
+
+    def _build_github_headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self._github_token:
+            headers["Authorization"] = f"Bearer {self._github_token}"
+        return headers
 
     def parse_payload(self, payload: Any) -> list[NormalizedOpportunityDraft]:
         if not isinstance(payload, list):
@@ -243,35 +319,13 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                 metadata_levels=label_names,
             )
 
-            opp_type = decision.opportunity_type
-            emp_type = decision.employment_type
-            seniority_level = decision.seniority_level
+            opp_type, emp_type, seniority_level = reconcile_structured_classification(
+                decision,
+                metadata_levels=label_names,
+                metadata_labels=label_names,
+            )
             primary_area = decision.professional_area
             secondary_areas = list(decision.secondary_areas)
-
-            # Aplica labels estruturadas das issues comunitárias brasileiras
-            if ("estágio" in labels_lower or "estagio" in labels_lower) and opp_type == OpportunityType.OTHER.value:
-                opp_type = OpportunityType.INTERNSHIP.value
-                emp_type = EmploymentType.INTERNSHIP.value
-                seniority_level = "internship"
-            elif (
-                ("júnior" in labels_lower or "junior" in labels_lower)
-                and not (labels_lower & {"pleno", "sênior", "senior", "especialista"})
-                and opp_type == OpportunityType.OTHER.value
-            ):
-                opp_type = OpportunityType.JUNIOR.value
-            elif ("freela" in labels_lower or "freelance" in labels_lower) and opp_type == OpportunityType.OTHER.value:
-                opp_type = OpportunityType.FREELANCE.value
-                emp_type = EmploymentType.FREELANCE.value
-
-            if "clt" in labels_lower and "pj" not in labels_lower:
-                emp_type = EmploymentType.CLT.value
-            elif "pj" in labels_lower and "clt" not in labels_lower:
-                emp_type = EmploymentType.PJ.value
-            elif emp_type == EmploymentType.UNKNOWN.value and (
-                "freela" in labels_lower or "freelance" in labels_lower
-            ):
-                emp_type = EmploymentType.FREELANCE.value
 
             if primary_area == ProfessionalArea.UNKNOWN.value:
                 primary_area = self.default_fallback_area
@@ -284,15 +338,30 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
             tech_tags = [
                 lb for lb in label_names if lb.strip().lower() not in _META_LABELS_LOWER
             ]
-            work_mode, location_text, city, country, eligible_countries, eligibility_unknown = (
-                _extract_work_mode_and_location(raw_title, label_names)
-            )
+            (
+                work_mode,
+                location_text,
+                city,
+                state,
+                country,
+                eligible_countries,
+                eligibility_unknown,
+                parsed_cities,
+            ) = _extract_work_mode_and_location(raw_title, label_names)
             company_name = _extract_company_from_title(raw_title)
             published_at = parse_iso_datetime(item.get("created_at"))
 
+            raw_meta: dict[str, Any] = {
+                "issue_number": raw_number,
+                "labels": label_names,
+                "source": self.definition.slug,
+            }
+            if parsed_cities:
+                raw_meta["cities"] = parsed_cities
+
             drafts.append(
                 NormalizedOpportunityDraft(
-                    external_id=f"{self.id_prefix}-{raw_number}",
+                    external_id=ext_id,
                     title=raw_title,
                     company_name=company_name,
                     description=description,
@@ -301,7 +370,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                     work_mode=work_mode,
                     location_text=location_text,
                     city=city,
-                    state=None,
+                    state=state,
                     country=country,
                     eligible_countries=eligible_countries,
                     eligibility_unknown=eligibility_unknown,
@@ -324,11 +393,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                     experience_min_years=decision.experience_min_years,
                     experience_preferred_years=decision.experience_preferred_years,
                     experience_summary=decision.experience_summary,
-                    raw_metadata={
-                        "issue_number": raw_number,
-                        "labels": label_names,
-                        "source": self.definition.slug,
-                    },
+                    raw_metadata=raw_meta,
                 )
             )
 
@@ -340,6 +405,71 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
             lifecycle_signals=lifecycle_signals,
         )
         return drafts
+
+    def collect(self) -> list[NormalizedOpportunityDraft]:
+        headers = self._build_github_headers()
+        all_drafts: list[NormalizedOpportunityDraft] = []
+        seen_valid_ids: set[str] = set()
+        seen_signal_ids: set[str] = set()
+        all_signals: list[SourceLifecycleSignal] = []
+        total_rejected_non_signal = 0
+        rejection_breakdown: dict[str, int] = {}
+
+        next_url: str | None = self.definition.base_url
+        visited_urls: set[str] = set()
+        pages_fetched = 0
+
+        while next_url and pages_fetched < self.max_pages:
+            if next_url in visited_urls:
+                break
+            visited_urls.add(next_url)
+
+            if pages_fetched > 0 and self.page_delay_seconds > 0:
+                self.sleep_fn(self.page_delay_seconds)
+
+            payload, response_headers = self.fetch_json_with_headers(
+                next_url,
+                extra_headers=headers,
+            )
+            pages_fetched += 1
+
+            page_drafts = self.parse_payload(payload)
+            page_batch = self.last_batch
+
+            for draft in page_drafts:
+                if draft.external_id in seen_valid_ids:
+                    continue
+                seen_valid_ids.add(draft.external_id)
+                all_drafts.append(draft)
+
+            for sig in page_batch.lifecycle_signals:
+                if sig.external_id in seen_signal_ids:
+                    continue
+                seen_signal_ids.add(sig.external_id)
+                all_signals.append(sig)
+                reason_key = "stale" if sig.status == ExternalSourceStatus.EXPIRED.value else "closed"
+                rejection_breakdown[reason_key] = rejection_breakdown.get(reason_key, 0) + 1
+
+            for reason, cnt in page_batch.rejection_breakdown.items():
+                if reason in {"closed", "stale"}:
+                    continue
+                total_rejected_non_signal += cnt
+                rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + cnt
+
+            if not payload:
+                break
+
+            next_url = parse_github_next_link(response_headers.get("Link"))
+
+        total_rejected = total_rejected_non_signal + len(seen_signal_ids)
+        self.last_batch = CollectionBatch(
+            received_count=len(all_drafts) + total_rejected,
+            valid_drafts=list(all_drafts),
+            rejected_count=total_rejected,
+            rejection_breakdown=rejection_breakdown,
+            lifecycle_signals=all_signals,
+        )
+        return all_drafts
 
     def check_publication_status(
         self,
@@ -363,7 +493,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
         detail_url = f"{base_issues_url}/{issue_number}"
 
         try:
-            data = self.fetch_json(detail_url)
+            data = self.fetch_json(detail_url, extra_headers=self._build_github_headers())
         except ConnectorError as exc:
             msg = str(exc)
             if "HTTP 404" in msg or "HTTP 410" in msg:
@@ -418,7 +548,7 @@ class GitHubBackendBRConnector(BaseGitHubIssuesVagasConnector):
         slug="github_backend_br",
         name="GitHub Backend BR (Vagas)",
         source_type=SourceType.JSON_API.value,
-        base_url="https://api.github.com/repos/backend-br/vagas/issues?state=open&per_page=30",
+        base_url="https://api.github.com/repos/backend-br/vagas/issues?state=open&per_page=100",
         terms_url="https://github.com/backend-br/vagas/blob/master/LICENSE",
         attribution_text=(
             "Fonte: Comunidade Backend Brasil (repositório sob licença MIT; "
@@ -437,7 +567,7 @@ class GitHubFrontendBRConnector(BaseGitHubIssuesVagasConnector):
         slug="github_frontend_br",
         name="GitHub Frontend BR (Vagas)",
         source_type=SourceType.JSON_API.value,
-        base_url="https://api.github.com/repos/frontendbr/vagas/issues?state=open&per_page=30",
+        base_url="https://api.github.com/repos/frontendbr/vagas/issues?state=open&per_page=100",
         terms_url="https://github.com/frontendbr/vagas/blob/master/LICENSE",
         attribution_text=(
             "Fonte: Comunidade Frontend Brasil (repositório sob licença MIT; "

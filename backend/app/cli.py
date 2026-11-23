@@ -22,7 +22,11 @@ from app.db.session import SessionLocal
 from app.models.user import User
 from app.schemas.profile import ProfileSeedDocumentSchema
 from app.services.auth_service import create_user_account
-from app.services.opportunities.sync_service import reclassify_opportunities, sync_sources
+from app.services.opportunities.sync_service import (
+    ensure_default_sources,
+    reclassify_opportunities,
+    sync_sources,
+)
 from app.services.profile_service import get_or_create_profile, import_profile_seed_for_user
 
 
@@ -141,6 +145,23 @@ def handle_import_profile_seed(args: argparse.Namespace) -> int:
             f"projetos=+{summary.projects_created}/~{summary.projects_skipped}"
         )
         return 0
+
+
+def handle_init_sources(args: argparse.Namespace) -> int:
+    del args
+    with SessionLocal() as db:
+        sources = ensure_default_sources(db)
+        rows = [(s.slug, s.name, bool(s.enabled)) for s in sources]
+    enabled_count = sum(1 for _, _, enabled in rows if enabled)
+    disabled_count = len(rows) - enabled_count
+    print(
+        f"[OK] Fontes padrão inicializadas de forma idempotente: "
+        f"total={len(rows)} | habilitadas={enabled_count} | desabilitadas={disabled_count}"
+    )
+    for slug, name, enabled in rows:
+        status_label = "habilitada" if enabled else "desabilitada"
+        print(f"  - {slug} ({name}): {status_label}")
+    return 0
 
 
 def handle_sync_opportunities(args: argparse.Namespace) -> int:
@@ -312,6 +333,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Caminho para o arquivo JSON local (ex: /run/local-seeds/profile-seed.local.json).",
     )
     import_seed.set_defaults(func=handle_import_profile_seed)
+
+    init_sources_cmd = subparsers.add_parser(
+        "init-sources",
+        help="Inicializa ou sincroniza metadados das fontes padrão no banco de forma explícita e idempotente.",
+    )
+    init_sources_cmd.set_defaults(func=handle_init_sources)
 
     sync_opps = subparsers.add_parser(
         "sync-opportunities",

@@ -4,8 +4,12 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Mapping
 from urllib.parse import urlparse
+import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.opportunity import (
@@ -20,6 +24,7 @@ from app.schemas.opportunity import SyncRunSummary
 from app.services.opportunities.classification import (
     classify_opportunity,
     normalize_classification_text,
+    reconcile_structured_classification,
 )
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
@@ -38,6 +43,12 @@ from app.services.opportunities.connectors.jobicy import (
 )
 from app.services.opportunities.connectors.remote_ok import RemoteOKConnector
 from app.services.opportunities.connectors.remotive import RemotiveConnector
+from app.services.opportunities.matching import (
+    ensure_utc,
+    is_deadline_expired,
+    parse_location_cities,
+    utc_now,
+)
 from app.services.opportunities.sanitization import compute_opportunity_content_hash
 
 CONNECTOR_CLASSES: dict[str, type[BaseOpportunityConnector]] = {
@@ -59,38 +70,80 @@ class UpsertOutcome(StrEnum):
 
 def ensure_default_sources(db: Session) -> list[OpportunitySource]:
     """
-    Garante o registro das fontes públicas no banco respeitando o estado explícito
-    de habilitação padrão. Nunca reativa automaticamente fontes que tenham sido
-    desabilitadas manualmente quando a definição padrão permitir habilitação.
+    Garante o registro das fontes públicas no banco de forma idempotente e segura
+    contra inicializações concorrentes (multiworker), usando INSERT ... ON CONFLICT DO NOTHING
+    no PostgreSQL/SQLite. Nunca reativa automaticamente fontes desabilitadas manualmente
+    quando a definição padrão permitir habilitação.
     """
+    dialect_name = db.bind.dialect.name if db.bind is not None else ""
+    now = utc_now()
+    for connector_cls in CONNECTOR_CLASSES.values():
+        defn = connector_cls.definition
+        values = {
+            "id": uuid.uuid4(),
+            "slug": defn.slug,
+            "name": defn.name,
+            "source_type": defn.source_type,
+            "base_url": defn.base_url,
+            "terms_url": defn.terms_url,
+            "attribution_text": defn.attribution_text,
+            "enabled": defn.enabled_by_default,
+            "refresh_interval_seconds": defn.refresh_interval_seconds,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if dialect_name == "postgresql":
+            stmt = (
+                pg_insert(OpportunitySource)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["slug"])
+            )
+            db.execute(stmt)
+        elif dialect_name == "sqlite":
+            stmt = (
+                sqlite_insert(OpportunitySource)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["slug"])
+            )
+            db.execute(stmt)
+        else:
+            existing = db.execute(
+                select(OpportunitySource).where(OpportunitySource.slug == defn.slug)
+            ).scalar_one_or_none()
+            if existing is None:
+                try:
+                    with db.begin_nested():
+                        db.add(
+                            OpportunitySource(
+                                slug=defn.slug,
+                                name=defn.name,
+                                source_type=defn.source_type,
+                                base_url=defn.base_url,
+                                terms_url=defn.terms_url,
+                                attribution_text=defn.attribution_text,
+                                enabled=defn.enabled_by_default,
+                                refresh_interval_seconds=defn.refresh_interval_seconds,
+                            )
+                        )
+                        db.flush()
+                except IntegrityError:
+                    pass
+
     sources: list[OpportunitySource] = []
     for connector_cls in CONNECTOR_CLASSES.values():
         defn = connector_cls.definition
         existing = db.execute(
             select(OpportunitySource).where(OpportunitySource.slug == defn.slug)
-        ).scalar_one_or_none()
-        if existing is None:
-            existing = OpportunitySource(
-                slug=defn.slug,
-                name=defn.name,
-                source_type=defn.source_type,
-                base_url=defn.base_url,
-                terms_url=defn.terms_url,
-                attribution_text=defn.attribution_text,
-                enabled=defn.enabled_by_default,
-                refresh_interval_seconds=defn.refresh_interval_seconds,
-            )
-            db.add(existing)
-        else:
-            existing.name = defn.name
-            existing.source_type = defn.source_type
-            existing.base_url = defn.base_url
-            existing.terms_url = defn.terms_url
-            existing.attribution_text = defn.attribution_text
-            if not defn.enabled_by_default:
-                existing.enabled = False
-            if existing.refresh_interval_seconds <= 0:
-                existing.refresh_interval_seconds = defn.refresh_interval_seconds
+        ).scalar_one()
+        existing.name = defn.name
+        existing.source_type = defn.source_type
+        existing.base_url = defn.base_url
+        existing.terms_url = defn.terms_url
+        existing.attribution_text = defn.attribution_text
+        if not defn.enabled_by_default:
+            existing.enabled = False
+        if existing.refresh_interval_seconds <= 0:
+            existing.refresh_interval_seconds = defn.refresh_interval_seconds
         sources.append(existing)
     db.commit()
     return sources
@@ -128,9 +181,17 @@ def _regions_compatible_for_cross_source(
     if cand.work_mode in {"onsite", "hybrid"} or draft.work_mode in {"onsite", "hybrid"}:
         if cand.work_mode != draft.work_mode:
             return False
-        cand_city = normalize_classification_text(cand.city)
-        draft_city = normalize_classification_text(draft.city)
-        if cand_city and draft_city and cand_city != draft_city:
+        cand_cities = {
+            normalize_classification_text(c)
+            for c in parse_location_cities(cand.city or cand.location_text)[0]
+            if c
+        }
+        draft_cities = {
+            normalize_classification_text(c)
+            for c in parse_location_cities(draft.city or draft.location_text)[0]
+            if c
+        }
+        if cand_cities and draft_cities and not (cand_cities & draft_cities):
             return False
         cand_country = normalize_classification_text(cand.country)
         draft_country = normalize_classification_text(draft.country)
@@ -470,14 +531,13 @@ def _upsert_source_link(
 def _recompute_opportunity_lifecycle(opp: Opportunity, now: datetime) -> None:
     links = list(opp.source_links or [])
     if not links:
-        if opp.deadline_at is not None and opp.deadline_at < now:
+        if is_deadline_expired(opp.deadline_at, now=now):
             opp.source_status = ExternalSourceStatus.EXPIRED.value
         return
 
     for link in links:
         if (
-            link.deadline_at is not None
-            and link.deadline_at < now
+            is_deadline_expired(link.deadline_at, now=now)
             and link.source_status == ExternalSourceStatus.ACTIVE.value
         ):
             link.source_status = ExternalSourceStatus.EXPIRED.value
@@ -855,19 +915,38 @@ def _update_absent_opportunities(
     revalidation_budget = 5
     touched_opps: dict = {}
 
+    absent_links: list[OpportunitySourceLink] = []
     for link in active_links:
         if link.id in seen_link_ids:
             continue
         link.last_checked_at = now
-        if link.deadline_at is not None and link.deadline_at < now:
+        if is_deadline_expired(link.deadline_at, now=now):
             link.missing_sync_count += 1
             link.source_status = ExternalSourceStatus.EXPIRED.value
             if link.opportunity is not None:
                 touched_opps[link.opportunity.id] = link.opportunity
             continue
+        absent_links.append(link)
 
-        signal: SourceLifecycleSignal | None = None
-        if revalidation_budget > 0:
+    # Tenta revalidação em lote quando o conector suportar (ex.: Jobicy /api/jobs/status?ids=...)
+    batch_signals: dict[str, SourceLifecycleSignal] = {}
+    if absent_links:
+        batch_result = connector.check_publications_status_batch(
+            [
+                (
+                    link.external_id,
+                    link.source_url,
+                    link.raw_metadata if isinstance(link.raw_metadata, dict) else None,
+                )
+                for link in absent_links[:100]
+            ]
+        )
+        if batch_result:
+            batch_signals = batch_result
+
+    for link in absent_links:
+        signal: SourceLifecycleSignal | None = batch_signals.get(link.external_id)
+        if signal is None and not batch_signals and revalidation_budget > 0:
             revalidation_budget -= 1
             signal = connector.check_publication_status(
                 link.external_id,
@@ -913,27 +992,44 @@ def _update_absent_opportunities(
             continue
         opp.last_status_check_at = now
         opp.missing_sync_count += 1
-        if opp.deadline_at is not None and opp.deadline_at < now:
+        if is_deadline_expired(opp.deadline_at, now=now):
             opp.source_status = ExternalSourceStatus.EXPIRED.value
         elif opp.missing_sync_count >= 3:
             opp.source_status = ExternalSourceStatus.UNKNOWN.value
 
 
-def _compute_source_catalog_counts(db: Session, source_id) -> tuple[int, int, int, int]:
+def _compute_source_catalog_counts(
+    db: Session,
+    source_id,
+    *,
+    now: datetime | None = None,
+) -> tuple[int, int, int, int]:
     """Retorna `(unique_count, open_count, closed_or_expired_count, unconfirmed_count)`."""
+    reference_now = ensure_utc(now) or utc_now()
     opps = (
         db.execute(
-            select(Opportunity).where(Opportunity.source_id == source_id)
+            select(Opportunity.source_status, Opportunity.deadline_at).where(
+                Opportunity.source_id == source_id
+            )
         )
-        .scalars()
         .all()
     )
     unique_count = len(opps)
     open_count = 0
     closed_or_expired_count = 0
     unconfirmed_count = 0
-    for opp in opps:
-        st = (opp.source_status or "active").lower()
+    for raw_st, deadline_at in opps:
+        st = (raw_st or "active").lower()
+        if (
+            st
+            not in {
+                ExternalSourceStatus.EXPIRED.value,
+                ExternalSourceStatus.CLOSED.value,
+                ExternalSourceStatus.REMOVED.value,
+            }
+            and is_deadline_expired(deadline_at, now=reference_now)
+        ):
+            st = ExternalSourceStatus.EXPIRED.value
         if st == ExternalSourceStatus.ACTIVE.value:
             open_count += 1
         elif st in {
@@ -948,11 +1044,7 @@ def _compute_source_catalog_counts(db: Session, source_id) -> tuple[int, int, in
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+    return ensure_utc(dt)
 
 
 def sync_sources(
@@ -963,8 +1055,14 @@ def sync_sources(
     dry_run: bool = False,
     connector_overrides: Mapping[str, BaseOpportunityConnector] | None = None,
 ) -> list[SyncRunSummary]:
-    """Executa coleta, validação, deduplicação e atualização de ciclo de vida."""
-    ensure_default_sources(db)
+    """
+    Executa coleta, validação, deduplicação e atualização de ciclo de vida.
+    Quando `dry_run=True`, executa estritamente em modo somente leitura:
+    não inicializa fontes padrão, não grava `OpportunitySyncRun`, não altera
+    registros e não executa `COMMIT` nem `FLUSH`.
+    """
+    if not dry_run:
+        ensure_default_sources(db)
 
     query = select(OpportunitySource).order_by(OpportunitySource.slug.asc())
     if source_slug:
@@ -973,8 +1071,16 @@ def sync_sources(
         query = query.where(OpportunitySource.enabled.is_(True))
 
     sources = db.execute(query).scalars().all()
-    if source_slug and not sources:
-        raise ValueError(f"Fonte '{source_slug}' não encontrada no catálogo.")
+    if not sources:
+        if dry_run:
+            any_source = db.execute(select(OpportunitySource.id).limit(1)).scalar_one_or_none()
+            if any_source is None:
+                raise ValueError(
+                    "Fontes padrão ainda não foram inicializadas no banco de dados. "
+                    "Execute 'python -m app.cli init-sources' antes de rodar em modo --dry-run."
+                )
+        if source_slug:
+            raise ValueError(f"Fonte '{source_slug}' não encontrada no catálogo.")
 
     if connector_overrides is not None and not source_slug:
         sources = [s for s in sources if s.slug in connector_overrides]
@@ -982,7 +1088,7 @@ def sync_sources(
     summaries: list[SyncRunSummary] = []
 
     for source in sources:
-        started_at = datetime.now(UTC)
+        started_at = utc_now()
         connector: BaseOpportunityConnector | None = None
         if connector_overrides and source.slug in connector_overrides:
             connector = connector_overrides[source.slug]
@@ -990,20 +1096,22 @@ def sync_sources(
             connector = CONNECTOR_CLASSES[source.slug]()
 
         if connector is None:
-            run = OpportunitySyncRun(
-                source_id=source.id,
-                status=SyncRunStatus.SKIPPED.value,
-                started_at=started_at,
-                finished_at=datetime.now(UTC),
-                error_summary="Nenhum conector registrado para esta fonte.",
-            )
-            db.add(run)
-            db.commit()
+            err_msg = "Nenhum conector registrado para esta fonte."
+            if not dry_run:
+                run = OpportunitySyncRun(
+                    source_id=source.id,
+                    status=SyncRunStatus.SKIPPED.value,
+                    started_at=started_at,
+                    finished_at=utc_now(),
+                    error_summary=err_msg,
+                )
+                db.add(run)
+                db.commit()
             summaries.append(
                 SyncRunSummary(
                     source_slug=source.slug,
                     status=SyncRunStatus.SKIPPED.value,
-                    error_summary=run.error_summary,
+                    error_summary=err_msg,
                 )
             )
             continue
@@ -1015,15 +1123,16 @@ def sync_sources(
             )
             if source_slug:
                 raise ValueError(disabled_msg)
-            run = OpportunitySyncRun(
-                source_id=source.id,
-                status=SyncRunStatus.SKIPPED.value,
-                started_at=started_at,
-                finished_at=datetime.now(UTC),
-                error_summary=disabled_msg,
-            )
-            db.add(run)
-            db.commit()
+            if not dry_run:
+                run = OpportunitySyncRun(
+                    source_id=source.id,
+                    status=SyncRunStatus.SKIPPED.value,
+                    started_at=started_at,
+                    finished_at=utc_now(),
+                    error_summary=disabled_msg,
+                )
+                db.add(run)
+                db.commit()
             summaries.append(
                 SyncRunSummary(
                     source_slug=source.slug,
@@ -1043,20 +1152,23 @@ def sync_sources(
                     f"Intervalo mínimo de atualização respeitado "
                     f"({source.refresh_interval_seconds}s)."
                 )
-                u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(db, source.id)
-                run = OpportunitySyncRun(
-                    source_id=source.id,
-                    status=SyncRunStatus.SKIPPED.value,
-                    started_at=started_at,
-                    finished_at=datetime.now(UTC),
-                    unique_opportunities_count=u_cnt,
-                    open_opportunities_count=o_cnt,
-                    closed_or_expired_count=c_cnt,
-                    unconfirmed_count=unc_cnt,
-                    error_summary=msg,
+                u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(
+                    db, source.id, now=started_at
                 )
-                db.add(run)
-                db.commit()
+                if not dry_run:
+                    run = OpportunitySyncRun(
+                        source_id=source.id,
+                        status=SyncRunStatus.SKIPPED.value,
+                        started_at=started_at,
+                        finished_at=utc_now(),
+                        unique_opportunities_count=u_cnt,
+                        open_opportunities_count=o_cnt,
+                        closed_or_expired_count=c_cnt,
+                        unconfirmed_count=unc_cnt,
+                        error_summary=msg,
+                    )
+                    db.add(run)
+                    db.commit()
                 summaries.append(
                     SyncRunSummary(
                         source_slug=source.slug,
@@ -1079,24 +1191,27 @@ def sync_sources(
                 if isinstance(exc, ConnectorError)
                 else f"Erro inesperado no conector ({type(exc).__name__})."
             )
-            finished_at = datetime.now(UTC)
-            source.last_synced_at = finished_at
-            source.last_error_at = finished_at
-            source.last_error_summary = error_msg
-            u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(db, source.id)
-            run = OpportunitySyncRun(
-                source_id=source.id,
-                status=SyncRunStatus.FAILED.value,
-                started_at=started_at,
-                finished_at=finished_at,
-                unique_opportunities_count=u_cnt,
-                open_opportunities_count=o_cnt,
-                closed_or_expired_count=c_cnt,
-                unconfirmed_count=unc_cnt,
-                error_summary=error_msg,
+            finished_at = utc_now()
+            u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(
+                db, source.id, now=finished_at
             )
-            db.add(run)
-            db.commit()
+            if not dry_run:
+                source.last_synced_at = finished_at
+                source.last_error_at = finished_at
+                source.last_error_summary = error_msg
+                run = OpportunitySyncRun(
+                    source_id=source.id,
+                    status=SyncRunStatus.FAILED.value,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    unique_opportunities_count=u_cnt,
+                    open_opportunities_count=o_cnt,
+                    closed_or_expired_count=c_cnt,
+                    unconfirmed_count=unc_cnt,
+                    error_summary=error_msg,
+                )
+                db.add(run)
+                db.commit()
             summaries.append(
                 SyncRunSummary(
                     source_slug=source.slug,
@@ -1116,29 +1231,10 @@ def sync_sources(
         fetched_count = valid_count
 
         if dry_run:
-            finished_at = datetime.now(UTC)
-            u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(db, source.id)
-            run = OpportunitySyncRun(
-                source_id=source.id,
-                status=SyncRunStatus.DRY_RUN.value,
-                started_at=started_at,
-                finished_at=finished_at,
-                fetched_count=fetched_count,
-                received_count=received_count,
-                valid_count=valid_count,
-                rejected_count=rejected_count,
-                inserted_count=0,
-                updated_count=0,
-                intra_source_duplicate_count=0,
-                cross_source_duplicate_count=0,
-                skipped_count=fetched_count,
-                unique_opportunities_count=u_cnt,
-                open_opportunities_count=o_cnt,
-                closed_or_expired_count=c_cnt,
-                unconfirmed_count=unc_cnt,
+            # Modo dry-run estritamente sem escrita: nenhum INSERT, UPDATE, DELETE, FLUSH ou COMMIT.
+            u_cnt, o_cnt, c_cnt, unc_cnt = _compute_source_catalog_counts(
+                db, source.id, now=started_at
             )
-            db.add(run)
-            db.commit()
             summaries.append(
                 SyncRunSummary(
                     source_slug=source.slug,
@@ -1342,7 +1438,8 @@ def reclassify_opportunities(
     e `secondary_areas` de registros já persistidos de fontes externas habilitadas sem
     alterar cadastros manuais, metadados originais, histórico temporal ou estados do usuário.
     """
-    ensure_default_sources(db)
+    if not dry_run:
+        ensure_default_sources(db)
 
     if source_slug:
         normalized_slug = source_slug.strip().lower()
@@ -1433,9 +1530,19 @@ def reclassify_opportunities(
             requirements=list(opp.requirements or []),
             metadata_levels=meta_levels,
         )
-        new_opp_type = decision.opportunity_type
-        new_emp_type = decision.employment_type
-        new_sen = decision.seniority_level
+        raw_labels = [str(x) for x in (meta.get("labels") or [])] if isinstance(meta.get("labels"), list) else []
+        raw_job_types: list[str] = []
+        if isinstance(meta.get("job_type"), list):
+            raw_job_types.extend(str(x) for x in meta["job_type"])
+        if meta.get("employment_type_raw"):
+            raw_job_types.append(str(meta["employment_type_raw"]))
+
+        new_opp_type, new_emp_type, new_sen = reconcile_structured_classification(
+            decision,
+            metadata_levels=meta_levels,
+            metadata_job_types=raw_job_types,
+            metadata_labels=raw_labels,
+        )
         new_area = decision.professional_area
         new_sec_areas = decision.secondary_areas
         if new_area == "unknown" and opp.source is not None:
@@ -1447,29 +1554,6 @@ def reclassify_opportunities(
                 new_area = "backend"
                 if "software_development" not in new_sec_areas:
                     new_sec_areas = (*new_sec_areas, "software_development")
-        labels_low = {str(x).strip().lower() for x in (meta.get("labels") or [])}
-        meta_low = {str(x).strip().lower() for x in meta_levels}
-        if ("estágio" in labels_low or "estagio" in labels_low or "intern" in meta_low) and new_opp_type == "other":
-            new_opp_type = "internship"
-            new_emp_type = "internship"
-            new_sen = "internship"
-        elif (labels_low & {"júnior", "junior"} or meta_low & {"junior", "entry-level", "entry level"}) and not (
-            labels_low & {"pleno", "sênior", "senior", "especialista"}
-        ) and new_opp_type == "other":
-            new_opp_type = "junior"
-
-        if "clt" in labels_low and "pj" not in labels_low:
-            new_emp_type = "clt"
-        elif "pj" in labels_low and "clt" not in labels_low:
-            new_emp_type = "pj"
-        elif new_emp_type == "unknown":
-            jt_low = " ".join(extra_tags).lower()
-            if "freelance" in jt_low:
-                new_emp_type = "freelance"
-            elif "contract" in jt_low or "contractor" in jt_low:
-                new_emp_type = "pj"
-            elif "temporary" in jt_low:
-                new_emp_type = "temporary"
 
         after_counter[new_opp_type] += 1
         after_area_counter[new_area] += 1

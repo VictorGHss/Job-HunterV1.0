@@ -446,7 +446,7 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
       expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
     });
 
-    // Navega para Desenvolvedor Júnior (filtra por seniority="junior", sem depender de type legado)
+    // Navega para Desenvolvedor Júnior (filtra por seniority=["junior", "entry_level"], sem depender de type legado)
     fireEvent.click(screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]);
 
     await waitFor(() => {
@@ -454,7 +454,7 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
       expect(screen.getByText("Freelance Junior Python API Developer")).toBeInTheDocument();
     });
     expect(listSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ seniority: "junior" })
+      expect.objectContaining({ seniority: ["junior", "entry_level"] })
     );
     expect(listSpy.mock.calls.some((call) => call[0]?.type !== undefined)).toBe(false);
     expect(screen.getAllByText(/Área: Backend/i).length).toBeGreaterThanOrEqual(1);
@@ -639,6 +639,201 @@ describe("Job Hunter Frontend - Fase 02 Descoberta de Oportunidades", () => {
         screen.getByText(/Nenhuma oportunidade encontrada com os filtros atuais/i)
       ).toBeInTheDocument();
     });
+  });
+
+  it("DX-02.1: aba Júnior exibe junior + entry_level preservando rótulos e visão Outras potencialmente compatíveis exibe aviso, filtros e estado vazio", async () => {
+    vi.spyOn(api.auth, "me").mockResolvedValue({
+      authenticated: true,
+      user: mockUser,
+      csrf_token: "test-csrf",
+    });
+    vi.spyOn(api.profile, "getBundle").mockResolvedValue(mockBundle);
+    vi.spyOn(api.opportunities, "listSources").mockResolvedValue(mockSources);
+
+    const oppJunior = buildMockOpportunity({
+      id: "opp-dx-jr",
+      title: "Desenvolvedor Python Júnior PJ",
+      seniority_level: "junior",
+      opportunity_type: "junior",
+    });
+    const oppEntry = buildMockOpportunity({
+      id: "opp-dx-entry",
+      title: "Entry-Level Software Engineer Python",
+      seniority_level: "entry_level",
+      opportunity_type: "junior",
+    });
+    const oppUnknownPotential = buildMockOpportunity({
+      id: "opp-dx-unk-1",
+      title: "Software Engineer — Python APIs",
+      seniority_level: "unknown",
+      opportunity_type: "other",
+      match: {
+        eligible: true,
+        overall_compatibility: "potential",
+        geographic_eligibility: "eligible",
+        seniority_compatibility: "unknown",
+        experience_compatibility: "unknown",
+        technical_compatibility: "compatible",
+        inclusion_reasons: ["Área profissional compatível com o perfil: Backend."],
+        uncertainty_notes: [
+          "Senioridade da vaga não foi especificada pela fonte; requer avaliação do candidato.",
+        ],
+        exclusion_reasons: [],
+      },
+    });
+
+    const listSpy = vi
+      .spyOn(api.opportunities, "list")
+      .mockImplementation(async (params = {}) => {
+        if (
+          Array.isArray(params.seniority) &&
+          params.seniority.includes("junior") &&
+          params.seniority.includes("entry_level")
+        ) {
+          return {
+            items: [oppJunior, oppEntry],
+            total: 2,
+            page: params.page || 1,
+            page_size: 10,
+            total_pages: 1,
+          };
+        }
+        if (
+          params.seniority === "unknown" &&
+          params.compatibility === "potential"
+        ) {
+          if (params.area === "data") {
+            return {
+              items: [],
+              total: 0,
+              page: 1,
+              page_size: 10,
+              total_pages: 1,
+            };
+          }
+          return {
+            items: [oppUnknownPotential],
+            total: 15,
+            page: params.page || 1,
+            page_size: 10,
+            total_pages: 2,
+          };
+        }
+        return {
+          items: [],
+          total: 0,
+          page: 1,
+          page_size: 10,
+          total_pages: 1,
+        };
+      });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Cidade Exemplo/i)).toBeInTheDocument();
+    });
+
+    // 1. Aba Júnior solicita ["junior", "entry_level"] e exibe ambas classificações sem mascarar entry_level como junior
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Desenvolvedor Júnior$/i })[0]
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Desenvolvedor Python Júnior PJ")).toBeInTheDocument();
+      expect(
+        screen.getByText("Entry-Level Software Engineer Python")
+      ).toBeInTheDocument();
+    });
+    expect(listSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        seniority: ["junior", "entry_level"],
+      })
+    );
+    expect(screen.getByText(/Nível: Júnior/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Nível: Início de carreira \/ Entry-level/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Software Engineer — Python APIs")
+    ).not.toBeInTheDocument();
+
+    // 2. Navega para visão separada "Outras potencialmente compatíveis"
+    fireEvent.click(
+      screen.getAllByRole("button", {
+        name: /^Outras potencialmente compatíveis$/i,
+      })[0]
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByText("Software Engineer — Python APIs")
+      ).toBeInTheDocument();
+    });
+    expect(listSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        seniority: "unknown",
+        compatibility: "potential",
+        include_excluded: false,
+      })
+    );
+    expect(
+      screen.getByText(
+        "A senioridade não foi informada pela fonte. Confira os requisitos diretamente na publicação original."
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/Incluir incompatíveis com perfil/i)
+    ).not.toBeInTheDocument();
+
+    // 3. Paginação na visão "Outras potencialmente compatíveis"
+    fireEvent.click(screen.getByRole("button", { name: /Próxima/i }));
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          seniority: "unknown",
+          compatibility: "potential",
+          include_excluded: false,
+          page: 2,
+        })
+      );
+    });
+
+    // 4. Filtro combinado + estado vazio na visão "Outras potencialmente compatíveis"
+    const areaSelect = screen.getByLabelText(/Área profissional/i);
+    fireEvent.change(areaSelect, { target: { value: "data" } });
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Nenhuma oportunidade encontrada com os filtros atuais/i)
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("DX-02.1: serializa múltiplos valores de seniority em api.opportunities.list como query params repetidos", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [],
+          total: 0,
+          page: 1,
+          page_size: 10,
+          total_pages: 1,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      )
+    );
+
+    await api.opportunities.list({
+      seniority: ["junior", "entry_level"],
+      area: "backend",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestedUrl = String(fetchMock.mock.calls[0]?.[0] || "");
+    expect(requestedUrl).toContain("seniority=junior");
+    expect(requestedUrl).toContain("seniority=entry_level");
+    expect(requestedUrl).toContain("area=backend");
   });
 });
 

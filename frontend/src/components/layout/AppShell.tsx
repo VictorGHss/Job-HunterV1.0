@@ -2,6 +2,7 @@ import React from "react";
 import {
   Briefcase,
   Code2,
+  Compass,
   FileCheck2,
   Globe2,
   GraduationCap,
@@ -21,6 +22,7 @@ export type NavSection =
   | "estagios"
   | "junior"
   | "freelancers"
+  | "potenciais"
   | "candidaturas"
   | "perfil";
 
@@ -55,6 +57,12 @@ const NAV_ITEMS: NavItem[] = [
     label: "Freelancers",
     shortLabel: "Freelance",
     icon: Globe2,
+  },
+  {
+    id: "potenciais",
+    label: "Outras potencialmente compatíveis",
+    shortLabel: "Potenciais",
+    icon: Compass,
   },
   {
     id: "candidaturas",
@@ -246,7 +254,7 @@ export function AppShell({
         aria-label="Navegação móvel"
         className="lg:hidden fixed bottom-0 inset-x-0 z-30 border-t border-border bg-card/95 backdrop-blur px-2 py-1.5"
       >
-        <div className="grid grid-cols-6 gap-1">
+        <div className="grid grid-cols-7 gap-1">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = activeSection === item.id;

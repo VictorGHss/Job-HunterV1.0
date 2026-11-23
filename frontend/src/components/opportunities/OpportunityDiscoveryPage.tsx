@@ -44,7 +44,7 @@ import type {
 } from "@/types/api";
 
 interface OpportunityDiscoveryPageProps {
-  category: "internship" | "junior" | "freelance";
+  category: "internship" | "junior" | "freelance" | "unknown_potential";
   title: string;
   subtitle: string;
   refreshTrigger?: number;
@@ -52,6 +52,10 @@ interface OpportunityDiscoveryPageProps {
   onOpenApplications?: (applicationId?: string) => void;
   preferencesSummary?: React.ReactNode;
 }
+
+const JUNIOR_AND_ENTRY_FILTER = "junior_and_entry";
+const UNKNOWN_SENIORITY_NOTICE =
+  "A senioridade não foi informada pela fonte. Confira os requisitos diretamente na publicação original.";
 
 const WORK_MODE_LABELS: Record<WorkMode, string> = {
   remote: "Remoto",
@@ -182,13 +186,21 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [totalPages, setTotalPages] = useState(1);
   const [page, setPage] = useState(1);
 
+  const isUnknownPotentialView = category === "unknown_potential";
+  const manualModalCategory: OpportunityType = isUnknownPotentialView
+    ? "unknown"
+    : category;
+
   const defaultSeniorityForTab =
     category === "internship"
       ? "internship"
       : category === "junior"
-        ? "junior"
-        : "";
+        ? JUNIOR_AND_ENTRY_FILTER
+        : isUnknownPotentialView
+          ? "unknown"
+          : "";
   const defaultEmploymentForTab = category === "freelance" ? "freelance" : "";
+  const defaultCompatibilityForTab = isUnknownPotentialView ? "potential" : "";
 
   const [queryText, setQueryText] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -200,7 +212,9 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
   const [seniorityFilter, setSeniorityFilter] = useState<string>(
     defaultSeniorityForTab
   );
-  const [compatibilityFilter, setCompatibilityFilter] = useState<string>("");
+  const [compatibilityFilter, setCompatibilityFilter] = useState<string>(
+    defaultCompatibilityForTab
+  );
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [sortOrder, setSortOrder] = useState<"recent" | "oldest">("recent");
@@ -227,10 +241,16 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
       category === "internship"
         ? "internship"
         : category === "junior"
-          ? "junior"
-          : ""
+          ? JUNIOR_AND_ENTRY_FILTER
+          : category === "unknown_potential"
+            ? "unknown"
+            : ""
     );
     setEmploymentFilter(category === "freelance" ? "freelance" : "");
+    setCompatibilityFilter(
+      category === "unknown_potential" ? "potential" : ""
+    );
+    setIncludeExcluded(false);
     setPage(1);
   }, [category]);
 
@@ -262,17 +282,29 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     setLoading(true);
     setErrorMessage(null);
 
-    const effectiveIncludeExcluded =
-      includeExcluded ||
-      compatibilityFilter === "incompatible" ||
-      (areaFilter !== "" && NON_DEV_AREAS.has(areaFilter));
+    const effectiveIncludeExcluded = isUnknownPotentialView
+      ? false
+      : includeExcluded ||
+        compatibilityFilter === "incompatible" ||
+        (areaFilter !== "" && NON_DEV_AREAS.has(areaFilter));
+
+    const seniorityParam: SeniorityLevel | SeniorityLevel[] | undefined =
+      isUnknownPotentialView
+        ? "unknown"
+        : seniorityFilter === JUNIOR_AND_ENTRY_FILTER
+          ? ["junior", "entry_level"]
+          : (seniorityFilter as SeniorityLevel) || undefined;
+
+    const compatibilityParam: OverallCompatibility | undefined =
+      isUnknownPotentialView
+        ? "potential"
+        : (compatibilityFilter as OverallCompatibility) || undefined;
 
     api.opportunities
       .list({
         q: debouncedQuery || undefined,
-        seniority: (seniorityFilter as SeniorityLevel) || undefined,
-        compatibility:
-          (compatibilityFilter as OverallCompatibility) || undefined,
+        seniority: seniorityParam,
+        compatibility: compatibilityParam,
         work_mode: (workModeFilter as WorkMode) || undefined,
         employment_type: (employmentFilter as EmploymentType) || undefined,
         area: (areaFilter as ProfessionalArea) || undefined,
@@ -308,6 +340,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
     };
   }, [
     category,
+    isUnknownPotentialView,
     debouncedQuery,
     seniorityFilter,
     compatibilityFilter,
@@ -427,13 +460,23 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
           <Button
             type="button"
             size="sm"
-            onClick={() => onOpenManualModal(category)}
+            onClick={() => onOpenManualModal(manualModalCategory)}
           >
             <Plus className="mr-1.5 h-4 w-4" />
             Adicionar Oportunidade
           </Button>
         </div>
       </div>
+
+      {isUnknownPotentialView && (
+        <div
+          role="note"
+          className="flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-300"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{UNKNOWN_SENIORITY_NOTICE}</span>
+        </div>
+      )}
 
       {preferencesSummary}
 
@@ -565,14 +608,18 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
               <Label htmlFor={`seniority-${category}`}>Senioridade</Label>
               <select
                 id={`seniority-${category}`}
-                value={seniorityFilter}
+                value={isUnknownPotentialView ? "unknown" : seniorityFilter}
+                disabled={isUnknownPotentialView}
                 onChange={(e) => {
                   setSeniorityFilter(e.target.value);
                   setPage(1);
                 }}
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground disabled:opacity-70"
               >
                 <option value="">Todas</option>
+                <option value={JUNIOR_AND_ENTRY_FILTER}>
+                  Júnior e Início de carreira
+                </option>
                 <option value="internship">Estágio</option>
                 <option value="entry_level">Início de carreira</option>
                 <option value="junior">Júnior</option>
@@ -588,12 +635,15 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
               <Label htmlFor={`compatibility-${category}`}>Compatibilidade</Label>
               <select
                 id={`compatibility-${category}`}
-                value={compatibilityFilter}
+                value={
+                  isUnknownPotentialView ? "potential" : compatibilityFilter
+                }
+                disabled={isUnknownPotentialView}
                 onChange={(e) => {
                   setCompatibilityFilter(e.target.value);
                   setPage(1);
                 }}
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground disabled:opacity-70"
               >
                 <option value="">Elegíveis (Compatível / Potencial)</option>
                 <option value="compatible">Somente Compatíveis</option>
@@ -629,17 +679,19 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
                 Mostrar dispensadas
               </label>
 
-              <label className="inline-flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={includeExcluded}
-                  onChange={(e) => {
-                    setIncludeExcluded(e.target.checked);
-                    setPage(1);
-                  }}
-                />
-                Incluir incompatíveis com perfil
-              </label>
+              {!isUnknownPotentialView && (
+                <label className="inline-flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeExcluded}
+                    onChange={(e) => {
+                      setIncludeExcluded(e.target.checked);
+                      setPage(1);
+                    }}
+                  />
+                  Incluir incompatíveis com perfil
+                </label>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -727,7 +779,7 @@ export const OpportunityDiscoveryPage: React.FC<OpportunityDiscoveryPageProps> =
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => onOpenManualModal(category)}
+              onClick={() => onOpenManualModal(manualModalCategory)}
             >
               <Plus className="mr-1.5 h-4 w-4" />
               Cadastrar oportunidade manualmente

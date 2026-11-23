@@ -1,15 +1,16 @@
-from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
+from app.core.config import settings
 from app.models.opportunity import (
-    EmploymentType,
     ExternalSourceStatus,
-    OpportunityType,
     SourceType,
     WorkMode,
 )
-from app.services.opportunities.classification import classify_opportunity
+from app.services.opportunities.classification import (
+    classify_opportunity,
+    reconcile_structured_classification,
+)
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     CollectionBatch,
@@ -19,12 +20,30 @@ from app.services.opportunities.connectors.base import (
     SourceLifecycleSignal,
     parse_iso_datetime,
 )
+from app.services.opportunities.matching import is_deadline_expired, utc_now
 from app.services.opportunities.sanitization import (
     normalize_canonical_url,
     normalize_string_list,
     sanitize_external_html_text,
     sanitize_plain_text,
     validate_safe_external_url,
+)
+
+HIMALAYAS_BROWSE_ENDPOINT = "https://himalayas.app/jobs/api"
+HIMALAYAS_SEARCH_ENDPOINT = "https://himalayas.app/jobs/api/search"
+
+# Conceitos técnicos e de início de carreira cobertos nas buscas segmentadas controladas
+DEFAULT_HIMALAYAS_SEARCH_QUERIES: tuple[str, ...] = (
+    "software developer",
+    "intern",
+    "internship",
+    "entry-level",
+    "junior",
+    "backend",
+    "frontend",
+    "data",
+    "artificial intelligence",
+    "qa",
 )
 
 
@@ -45,18 +64,43 @@ def _extract_himalayas_external_id(source_url: str) -> str:
     return (path_clean or source_url)[:255]
 
 
+def _normalize_timezone_restrictions(raw_value: Any) -> list[str | int]:
+    if not isinstance(raw_value, list):
+        return []
+    result: list[str | int] = []
+    seen: set[str] = set()
+    for item in raw_value[:48]:
+        if isinstance(item, bool) or item is None:
+            continue
+        if isinstance(item, (int, float)):
+            val = int(item)
+            key = str(val)
+            if key not in seen:
+                seen.add(key)
+                result.append(val)
+        elif isinstance(item, str):
+            cleaned = sanitize_plain_text(item, max_length=64)
+            if cleaned and cleaned.lower() not in seen:
+                seen.add(cleaned.lower())
+                result.append(cleaned)
+    return result
+
+
 class HimalayasConnector(BaseOpportunityConnector):
     """
     Conector para a API pública oficial de vagas remotas da Himalayas.
-    Cumpre os termos de atribuição, preserva o `applicationLink` oficial e descarta
-    vagas expiradas (`expiryDate`).
+    Prioriza o catálogo completo paginado por cursor (`GET /jobs/api`) e complementa
+    com buscas segmentadas controladas (`GET /jobs/api/search`), deduplicando por `guid`
+    antes da persistência. Suporta `HIMALAYAS_API_KEY` opcional via header
+    `Authorization: Bearer <token>`, preserva `applicationLink`, `timezoneRestrictions`
+    e descarta vagas com `expiryDate` vencido.
     """
 
     definition = SourceDefinition(
         slug="himalayas",
         name="Himalayas",
         source_type=SourceType.JSON_API.value,
-        base_url="https://himalayas.app/jobs/api/search?q=software+developer",
+        base_url="https://himalayas.app/jobs/api?limit=20",
         terms_url="https://himalayas.app/api",
         attribution_text=(
             "Fonte: Himalayas — atribuição obrigatória à Himalayas e candidatura via applicationLink oficial."
@@ -65,13 +109,68 @@ class HimalayasConnector(BaseOpportunityConnector):
         enabled_by_default=True,
     )
 
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        page_limit: int = 20,
+        max_pages: int | None = None,
+        search_queries: tuple[str, ...] | list[str] | None = None,
+        max_search_pages_per_query: int = 1,
+        max_total_requests: int | None = None,
+        page_delay_seconds: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        raw_key = settings.himalayas_api_key if api_key is None else api_key
+        self._api_key = raw_key.strip() if isinstance(raw_key, str) else ""
+        # A documentação oficial do `/jobs/api` limita `limit` a 20 por página
+        self.page_limit = max(1, min(int(page_limit), 20))
+        self.max_pages = max(
+            1,
+            int(max_pages if max_pages is not None else settings.sync_himalayas_max_pages),
+        )
+        if search_queries is None:
+            self.search_queries: tuple[str, ...] = DEFAULT_HIMALAYAS_SEARCH_QUERIES
+        else:
+            seen_q: set[str] = set()
+            normalized_q: list[str] = []
+            for q in search_queries:
+                cleaned = q.strip()
+                if cleaned and cleaned.lower() not in seen_q:
+                    seen_q.add(cleaned.lower())
+                    normalized_q.append(cleaned)
+            self.search_queries = tuple(normalized_q)
+        self.max_search_pages_per_query = max(1, int(max_search_pages_per_query))
+        default_budget = self.max_pages + len(self.search_queries) * self.max_search_pages_per_query
+        self.max_total_requests = max(
+            1,
+            int(max_total_requests if max_total_requests is not None else default_budget),
+        )
+        self.page_delay_seconds = max(0.0, float(page_delay_seconds))
+
+    def _build_auth_headers(self) -> dict[str, str] | None:
+        if not self._api_key:
+            return None
+        return {"Authorization": f"Bearer {self._api_key}"}
+
+    def _build_browse_url(self, *, cursor: str | None = None) -> str:
+        params: dict[str, str] = {"limit": str(self.page_limit)}
+        if cursor:
+            params["cursor"] = cursor
+        return f"{HIMALAYAS_BROWSE_ENDPOINT}?{urlencode(params)}"
+
+    def _build_search_url(self, *, query: str, page: int = 1) -> str:
+        params: dict[str, str] = {"q": query, "page": str(page)}
+        return f"{HIMALAYAS_SEARCH_ENDPOINT}?{urlencode(params)}"
+
     def parse_payload(self, payload: Any) -> list[NormalizedOpportunityDraft]:
         if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
             raise ConnectorPayloadError(
                 "Himalayas retornou formato inválido (esperado objeto JSON com lista 'jobs')."
             )
 
-        now = datetime.now(UTC)
+        now = utc_now()
         drafts: list[NormalizedOpportunityDraft] = []
         raw_jobs = payload["jobs"]
         rejected_count = 0
@@ -106,7 +205,7 @@ class HimalayasConnector(BaseOpportunityConnector):
 
             ext_id = _extract_himalayas_external_id(source_url)
             deadline_at = parse_iso_datetime(item.get("expiryDate"))
-            if deadline_at is not None and deadline_at < now:
+            if is_deadline_expired(deadline_at, now=now):
                 # Termos da Himalayas exigem não exibir vagas já expiradas:
                 # emite sinal de expiração para atualizar eventual vaga já persistida
                 lifecycle_signals.append(
@@ -153,33 +252,17 @@ class HimalayasConnector(BaseOpportunityConnector):
                 metadata_levels=seniority_list,
             )
 
-            opp_type = decision.opportunity_type
-            emp_type = decision.employment_type
-            seniority_level = decision.seniority_level
-
-            sen_low = " ".join(seniority_list).lower()
-            emp_low = emp_raw.lower()
-            if "intern" in emp_low or "intern" in sen_low:
-                opp_type = OpportunityType.INTERNSHIP.value
-                emp_type = EmploymentType.INTERNSHIP.value
-                seniority_level = "internship"
-            elif (
-                ("entry-level" in sen_low or "entry level" in sen_low or "junior" in sen_low)
-                and "senior" not in sen_low
-                and "mid" not in sen_low
-                and opp_type == OpportunityType.OTHER.value
-            ):
-                opp_type = OpportunityType.JUNIOR.value
-
-            if emp_type == EmploymentType.UNKNOWN.value:
-                if "freelance" in emp_low:
-                    emp_type = EmploymentType.FREELANCE.value
-                elif "contractor" in emp_low or "contract" in emp_low:
-                    emp_type = EmploymentType.PJ.value
-                elif "temporary" in emp_low:
-                    emp_type = EmploymentType.TEMPORARY.value
+            opp_type, emp_type, seniority_level = reconcile_structured_classification(
+                decision,
+                metadata_levels=seniority_list,
+                metadata_job_types=[emp_raw] if emp_raw else [],
+            )
 
             raw_locs = item.get("locationRestrictions")
+            timezone_restrictions = _normalize_timezone_restrictions(
+                item.get("timezoneRestrictions")
+            )
+
             if isinstance(raw_locs, list):
                 cleaned_locs = normalize_string_list(
                     [str(loc) for loc in raw_locs], max_items=250
@@ -256,6 +339,7 @@ class HimalayasConnector(BaseOpportunityConnector):
                         "application_link": application_url or source_url,
                         "seniority": seniority_list,
                         "employment_type_raw": emp_raw,
+                        "timezone_restrictions": timezone_restrictions,
                         "source": "himalayas",
                     },
                 )
@@ -269,3 +353,89 @@ class HimalayasConnector(BaseOpportunityConnector):
             lifecycle_signals=lifecycle_signals,
         )
         return drafts
+
+    def collect(self) -> list[NormalizedOpportunityDraft]:
+        all_drafts: list[NormalizedOpportunityDraft] = []
+        seen_valid_ids: set[str] = set()
+        seen_expired_ids: set[str] = set()
+        all_signals: list[SourceLifecycleSignal] = []
+        total_rejected_non_expired = 0
+        rejection_breakdown: dict[str, int] = {}
+        requests_made = 0
+        auth_headers = self._build_auth_headers()
+
+        def _consume_payload(payload: Any) -> None:
+            nonlocal total_rejected_non_expired
+            page_drafts = self.parse_payload(payload)
+            page_batch = self.last_batch
+
+            for draft in page_drafts:
+                if draft.external_id in seen_valid_ids:
+                    continue
+                seen_valid_ids.add(draft.external_id)
+                all_drafts.append(draft)
+
+            for sig in page_batch.lifecycle_signals:
+                if sig.external_id in seen_expired_ids:
+                    continue
+                seen_expired_ids.add(sig.external_id)
+                all_signals.append(sig)
+                rejection_breakdown["expired"] = rejection_breakdown.get("expired", 0) + 1
+
+            for reason, cnt in page_batch.rejection_breakdown.items():
+                if reason == "expired":
+                    continue
+                total_rejected_non_expired += cnt
+                rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + cnt
+
+        # 1. Catálogo completo oficial paginado por cursor (`GET /jobs/api`)
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        browse_pages = 0
+        while browse_pages < self.max_pages and requests_made < self.max_total_requests:
+            if requests_made > 0 and self.page_delay_seconds > 0:
+                self.sleep_fn(self.page_delay_seconds)
+            url = self._build_browse_url(cursor=cursor)
+            payload = self.fetch_json(url, extra_headers=auth_headers)
+            requests_made += 1
+            browse_pages += 1
+            _consume_payload(payload)
+
+            raw_next = payload.get("nextCursor")
+            next_cursor = (
+                raw_next.strip()
+                if isinstance(raw_next, str) and raw_next.strip()
+                else None
+            )
+            if not next_cursor or next_cursor in seen_cursors or not payload.get("jobs"):
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        # 2. Buscas segmentadas controladas (`GET /jobs/api/search`) cobrindo termos prioritários
+        for query in self.search_queries:
+            if requests_made >= self.max_total_requests:
+                break
+            for page_num in range(1, self.max_search_pages_per_query + 1):
+                if requests_made >= self.max_total_requests:
+                    break
+                if requests_made > 0 and self.page_delay_seconds > 0:
+                    self.sleep_fn(self.page_delay_seconds)
+                url = self._build_search_url(query=query, page=page_num)
+                payload = self.fetch_json(url, extra_headers=auth_headers)
+                requests_made += 1
+                _consume_payload(payload)
+                if not payload.get("jobs"):
+                    break
+
+        total_rejected = total_rejected_non_expired + len(seen_expired_ids)
+        total_received = len(all_drafts) + total_rejected
+
+        self.last_batch = CollectionBatch(
+            received_count=total_received,
+            valid_drafts=list(all_drafts),
+            rejected_count=total_rejected,
+            rejection_breakdown=rejection_breakdown,
+            lifecycle_signals=all_signals,
+        )
+        return all_drafts

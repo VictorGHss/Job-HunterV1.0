@@ -1,12 +1,53 @@
+from contextlib import asynccontextmanager
 import logging
+import os
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.routes import applications, auth, health, materials, opportunities, profile
 from app.core.config import settings
+from app.db.session import SessionLocal, get_db
+from app.services.opportunities.sync_service import ensure_default_sources
 
 logger = logging.getLogger("job_hunter")
+
+
+@asynccontextmanager
+async def _app_lifespan(application: FastAPI):
+    """
+    Inicializa fontes padrão no startup da aplicação de forma idempotente e segura
+    para múltiplos workers, evitando qualquer escrita colateral em rotas GET.
+    Em ambiente de testes (`ENVIRONMENT=testing` ou `PYTEST_CURRENT_TEST`), nunca
+    acessa o banco padrão da máquina se não houver override explícito de `get_db`.
+    """
+    override_get_db = application.dependency_overrides.get(get_db)
+    is_test_runtime = settings.environment == "testing" or bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+    )
+    if override_get_db is not None:
+        gen = override_get_db()
+        try:
+            db = next(gen)
+            ensure_default_sources(db)
+        except SQLAlchemyError:
+            logger.warning("Não foi possível inicializar fontes padrão no lifespan (override).")
+        finally:
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+    elif not is_test_runtime:
+        with SessionLocal() as db:
+            try:
+                ensure_default_sources(db)
+            except SQLAlchemyError:
+                db.rollback()
+                logger.warning(
+                    "Falha ao inicializar fontes padrão no startup; execute 'python -m app.cli init-sources'."
+                )
+    yield
 
 
 def create_app() -> FastAPI:
@@ -21,6 +62,7 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
+        lifespan=_app_lifespan,
     )
 
     application.add_middleware(

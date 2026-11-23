@@ -21,8 +21,62 @@ TRACKING_QUERY_PARAMS = {
 _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style|iframe|object|embed)[^>]*>.*?</\1>")
 _HTML_BREAK_RE = re.compile(r"(?i)<(br\s*/?|/p|/div|/li|/h[1-6]|tr)[^>]*>")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-_MULTI_SPACE_RE = re.compile(r"[ \t\r\f\v]+")
+_MULTI_SPACE_RE = re.compile(r"[ \t\r\f\v\u00a0]+")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+# Sequências características de UTF-8 decodificado incorretamente como Latin-1 ou CP1252.
+# Cobre:
+# - Bytes 2-4 em Latin-1: lead [\u00c2-\u00f4] seguido de 1-3 bytes [\u0080-\u00bf]
+#   (ex.: MÃ¼nchen -> München, Ciudad de MÃ©xico -> Ciudad de México, SÃ£o -> São, Â  -> NBSP)
+# - Bytes 3-4 em CP1252 (onde 0x80..0x9F mapeiam para símbolos Unicode como €, ™, “, ”, —, –)
+_CP1252_CONT_CHARS = (
+    "\u0080-\u00bf"
+    "\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d"
+    "\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178"
+)
+_MOJIBAKE_SPAN_RE = re.compile(
+    rf"(?:[\u00c2-\u00f4][{_CP1252_CONT_CHARS}]{{1,3}})"
+)
+
+
+def _is_valid_repaired_char(ch: str) -> bool:
+    code = ord(ch)
+    if ch == "\ufffd":
+        return False
+    # Rejeita caracteres de controle C0/C1 exceto whitespace legítimo
+    if code < 32 and ch not in ("\t", "\n", "\r"):
+        return False
+    if 0x7F <= code <= 0x9F:
+        return False
+    return True
+
+
+def repair_mojibake(text: str) -> str:
+    """
+    Repara conservadoramente sequências características de mojibake UTF-8 lido como
+    Latin-1/CP1252 em passagem única e idempotente, sem corromper Unicode válido
+    em português, inglês, espanhol ou alemão.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    def _decode_span(match: re.Match[str]) -> str:
+        chunk = match.group(0)
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                raw_bytes = chunk.encode(encoding)
+                decoded = raw_bytes.decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            if (
+                decoded
+                and len(decoded) < len(chunk)
+                and all(_is_valid_repaired_char(ch) for ch in decoded)
+            ):
+                return decoded
+        return chunk
+
+    return _MOJIBAKE_SPAN_RE.sub(_decode_span, text)
 
 
 def sanitize_external_html_text(
@@ -30,7 +84,7 @@ def sanitize_external_html_text(
     *,
     max_length: int = MAX_DESCRIPTION_LENGTH,
 ) -> str | None:
-    """Remove scripts, tags HTML perigosas e controla o tamanho de textos externos."""
+    """Remove scripts, tags HTML perigosas, repara mojibake e controla o tamanho de textos externos."""
     if not raw_value or not isinstance(raw_value, str):
         return None
 
@@ -38,6 +92,7 @@ def sanitize_external_html_text(
     cleaned = _HTML_BREAK_RE.sub("\n", cleaned)
     cleaned = _HTML_TAG_RE.sub(" ", cleaned)
     cleaned = html.unescape(cleaned)
+    cleaned = repair_mojibake(cleaned)
 
     lines = [_MULTI_SPACE_RE.sub(" ", line).strip() for line in cleaned.splitlines()]
     normalized = "\n".join(line for line in lines if line)

@@ -6,6 +6,44 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-02.1 + DX-02.2] - 2026-11-22 — Correções de descoberta, matching e expansão das fontes gratuitas
+
+### Corrigido (DX-02.1)
+
+- **DX-F01 — Aba Júnior incluindo `entry_level` (`api/routes/opportunities.py`, `opportunity_service.py`, `OpportunityDiscoveryPage.tsx`, `lib/api.ts`, `types/api.ts`):**
+  - `GET /api/v1/opportunities` passou a aceitar múltiplos valores repetidos em `seniority` (`?seniority=junior&seniority=entry_level`), preservando retrocompatibilidade integral com consultas de valor único (`?seniority=junior`).
+  - A aba **Desenvolvedor Júnior & Posições de Entrada** consulta `["junior", "entry_level"]` por padrão e exibe fielmente cada classificação original (`Júnior` vs `Início de carreira / Entry-level`), preservando todas as regras de elegibilidade (bloqueio CLT, experiência mínima obrigatória e exclusão de suporte técnico).
+- **DX-F01 complementar — Visão separada "Outras potencialmente compatíveis" (`AppShell.tsx`, `DashboardViews.tsx`, `App.tsx`, `OpportunityDiscoveryPage.tsx`):**
+  - Adicionada navegação e visão dedicada para oportunidades com `seniority_level=unknown`, `overall_compatibility=potential` e `eligible=true`, sem misturá-las na aba Júnior, sem inventar senioridade, excluindo vagas incompatíveis e expiradas e apresentando o aviso explícito: `"A senioridade não foi informada pela fonte. Confira os requisitos diretamente na publicação original."`
+- **DX-F07 — Parsing conservador e matching de múltiplas cidades (`matching.py`, `github_vagas.py`, `sync_service.py`):**
+  - Adicionados `parse_location_cities` e `extract_opportunity_cities` para reconhecer alternativas válidas como `Belo Horizonte ou São Paulo, Brasil`, `Curitiba / São Paulo` e listas com UF/país sem dividir nomes compostos nem aplicar fuzzy matching genérico, preservando `location_text` original e a exclusão de cidades divergentes.
+- **DX-F08 — Expiração em tempo real por `deadline_at` (`matching.py`, `opportunity_service.py`, `sync_service.py`):**
+  - Introduzidos helpers determinísticos em UTC (`utc_now`, `ensure_utc`, `is_deadline_expired`, `resolve_effective_source_status`) com normalização segura de datetimes naive/aware. Vagas com `deadline_at <= now` são avaliadas imediatamente como expiradas (`eligible=False`, `overall_compatibility="incompatible"`, `source_status="expired"` na resposta) sem qualquer `UPDATE` implícito em rotas GET.
+- **DX-F09 — Coerência entre `opportunity_type` e `seniority_level` (`classification.py`, `jobicy.py`, `himalayas.py`, `github_vagas.py`, `sync_service.py`):**
+  - Centralizado `reconcile_structured_classification` eliminando divergências em que `opportunity_type=junior` permanecia com `seniority_level=unknown`, preservando `entry_level` como `entry_level`, removendo correspondências frágeis por substring e impedindo rebaixamento de sinais explícitos de senioridade superior.
+- **DX-F10 — Reparo conservador de mojibake (`sanitization.py`, `classification.py`):**
+  - Centralizado `repair_mojibake` em passagem única e idempotente na sanitização textual (`sanitize_external_html_text` / `sanitize_plain_text`), corrigindo sequências como `MÃ¼nchen` → `München` e `Ciudad de MÃ©xico` → `Ciudad de México` sem corromper Unicode válido em PT, EN, ES ou DE.
+- **DX-F11 — Rotas GET estritamente somente leitura e inicialização segura (`opportunity_service.py`, `main.py`, `sync_service.py`, `cli.py`):**
+  - Removidas todas as chamadas a `ensure_default_sources` e escritas implícitas (`get_or_create_profile`) dos caminhos `GET /api/v1/opportunities`, `GET /api/v1/opportunities/{id}` e `GET /api/v1/opportunities/sources`.
+  - Inicialização de fontes padrão movida para `lifespan` em `main.py` (com proteção contra acesso ao banco padrão durante testes) e comando explícito `python -m app.cli init-sources`, com `INSERT ... ON CONFLICT DO NOTHING` seguro para inicialização concorrente multiworker.
+- **`sync-opportunities --dry-run` verdadeiramente sem escrita (`sync_service.py`):**
+  - `dry_run=True` não inicializa fontes, não cria `OpportunitySyncRun`, não altera metadados de erro/sync da fonte e não executa `INSERT`/`UPDATE`/`DELETE`/`FLUSH`/`COMMIT`, retornando mensagem explícita solicitando `init-sources` quando o catálogo de fontes ainda não foi inicializado.
+
+### Adicionado e Expandido (DX-02.2)
+
+- **Jobicy (`connectors/jobicy.py`):** migrado para `https://jobicy.com/api/jobs` com `count=100`, paginação por cursor (`nextCursor` / `hasMore`), consultas segmentadas (`engineering`, `data-science`) com deduplicação local, pausa mínima de `1s` entre páginas, teto configurável (`SYNC_JOBICY_MAX_PAGES`) e revalidação de encerramento em lote via `/api/jobs/status?ids=...`.
+- **Himalayas (`connectors/himalayas.py`):** priorização do catálogo completo paginado por cursor (`https://himalayas.app/jobs/api?limit=20`) complementado por buscas segmentadas controladas (`/jobs/api/search`) cobrindo os 10 conceitos técnicos/início de carreira com deduplicação por `guid`, suporte opcional a `HIMALAYAS_API_KEY` (`Authorization: Bearer`) e aproveitamento conservador de `timezoneRestrictions`.
+- **Remote OK (`connectors/remote_ok.py`):** filtragem enxuta por tags de tecnologia (`?tag=...`, respeitando a semântica AND do endpoint com consultas segmentadas limitadas por `SYNC_REMOTE_OK_MAX_QUERIES`), deduplicação local por ID e preservação integral de atribuição, URL e classificação global.
+- **GitHub Vagas BR (`connectors/github_vagas.py`):** atualizado para `per_page=100`, paginação real via cabeçalho `Link` (`rel="next"` com validação anti-SSRF restrita a `https://api.github.com`), teto configurável (`SYNC_GITHUB_MAX_PAGES`), deduplicação entre páginas, suporte opcional a `GITHUB_TOKEN` (`Authorization: Bearer`) e tratamento de HTTP `403`/`429` rate limit.
+- **Configuração e Operação (`config.py`, `.env.example`, `infra/compose.yaml`, `README.md`, `DEPLOY.md`, `SECURITY.md`):** adicionadas variáveis opcionais `GITHUB_TOKEN` e `HIMALAYAS_API_KEY` e tetos conservadores de paginação, mantendo `AI_ASSISTED_ENABLED=false`, `AI_PROVIDER=disabled`, `remotive` desabilitada e inicialização sem nenhuma chave obrigatória.
+
+### Testes
+- `backend/tests/test_opportunity_coverage_dx02.py`: 12 cenários abrangentes cobrindo DX-F01 a DX-F11, dry-run sem escrita, os 4 conectores expandidos e defaults de segurança.
+- Backend completo: **303/303 testes passando** em SQLite local e em PostgreSQL 16 (`jobhunter_test`).
+- Frontend completo: `tsc --noEmit`, `eslint .` (0 warnings), **29/29 testes Vitest** e `vite build` sem erros.
+
+---
+
 ## [0.4.4.5] - 2026-11-21 — Subfase 04.4.5: Hardening e Integração Final (MVP 1.0)
 
 ### Adicionado e Validado

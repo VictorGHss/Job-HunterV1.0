@@ -1,5 +1,7 @@
 from typing import Any
+from urllib.parse import urlencode
 
+from app.core.config import settings
 from app.models.opportunity import (
     ExternalSourceStatus,
     SourceType,
@@ -21,6 +23,21 @@ from app.services.opportunities.sanitization import (
     sanitize_external_html_text,
     sanitize_plain_text,
     validate_safe_external_url,
+)
+
+REMOTE_OK_API_BASE = "https://remoteok.com/api"
+
+# Estratégia enxuta de cobertura tecnológica: o endpoint oficial do Remote OK aplica
+# semântica AND para múltiplas tags na mesma URL (?tags=a,b), portanto consultamos um
+# conjunto pequeno, limitado e configurável de tags individuais com deduplicação por ID.
+DEFAULT_REMOTE_OK_TECH_TAGS: tuple[str, ...] = (
+    "dev",
+    "python",
+    "javascript",
+    "java",
+    "react",
+    "backend",
+    "data",
 )
 
 
@@ -45,7 +62,7 @@ def _parse_optional_float(value: Any) -> float | None:
 
 class RemoteOKConnector(BaseOpportunityConnector):
     """
-    Conector para o feed JSON público da Remote OK.
+    Conector para o feed JSON público da Remote OK filtrado por tags de tecnologia.
     Requer atribuição visível à Remote OK e link follow para a URL original.
     """
 
@@ -53,7 +70,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
         slug="remote_ok",
         name="Remote OK",
         source_type=SourceType.JSON_API.value,
-        base_url="https://remoteok.com/api",
+        base_url="https://remoteok.com/api?tag=dev",
         terms_url="https://remoteok.com/terms",
         attribution_text=(
             "Fonte: Remote OK — atribuição obrigatória com link direto para a "
@@ -61,6 +78,38 @@ class RemoteOKConnector(BaseOpportunityConnector):
         ),
         refresh_interval_seconds=3600,
     )
+
+    def __init__(
+        self,
+        *,
+        tags: tuple[str, ...] | list[str] | None = None,
+        max_queries: int | None = None,
+        page_delay_seconds: float = 0.5,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        raw_tags = DEFAULT_REMOTE_OK_TECH_TAGS if tags is None else tags
+        cleaned_tags: list[str] = []
+        seen: set[str] = set()
+        for t in raw_tags:
+            if not isinstance(t, str):
+                continue
+            norm = t.strip().lower()
+            if norm and norm not in seen:
+                seen.add(norm)
+                cleaned_tags.append(norm)
+        self.tags: tuple[str, ...] = tuple(cleaned_tags)
+        self.max_queries = max(
+            1,
+            int(max_queries if max_queries is not None else settings.sync_remote_ok_max_queries),
+        )
+        self.page_delay_seconds = max(0.0, float(page_delay_seconds))
+
+    def _build_query_urls(self) -> list[str]:
+        if not self.tags:
+            return [REMOTE_OK_API_BASE]
+        selected = self.tags[: self.max_queries]
+        return [f"{REMOTE_OK_API_BASE}?{urlencode({'tag': tag})}" for tag in selected]
 
     def parse_payload(self, payload: Any) -> list[NormalizedOpportunityDraft]:
         if not isinstance(payload, list):
@@ -189,3 +238,35 @@ class RemoteOKConnector(BaseOpportunityConnector):
             rejection_breakdown=rejection_breakdown,
         )
         return drafts
+
+    def collect(self) -> list[NormalizedOpportunityDraft]:
+        urls = self._build_query_urls()
+        all_drafts: list[NormalizedOpportunityDraft] = []
+        seen_ids: set[str] = set()
+        total_rejected = 0
+        rejection_breakdown: dict[str, int] = {}
+
+        for idx, url in enumerate(urls):
+            if idx > 0 and self.page_delay_seconds > 0:
+                self.sleep_fn(self.page_delay_seconds)
+            payload = self.fetch_json(url)
+            page_drafts = self.parse_payload(payload)
+            page_batch = self.last_batch
+
+            for draft in page_drafts:
+                if draft.external_id in seen_ids:
+                    continue
+                seen_ids.add(draft.external_id)
+                all_drafts.append(draft)
+
+            total_rejected += page_batch.rejected_count
+            for reason, cnt in page_batch.rejection_breakdown.items():
+                rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + cnt
+
+        self.last_batch = CollectionBatch(
+            received_count=len(all_drafts) + total_rejected,
+            valid_drafts=list(all_drafts),
+            rejected_count=total_rejected,
+            rejection_breakdown=rejection_breakdown,
+        )
+        return all_drafts

@@ -9,15 +9,24 @@ from app.models.opportunity import (
     ProfessionalArea,
     SeniorityLevel,
 )
+from app.services.opportunities.sanitization import repair_mojibake
 
 _COMBINING_MARKS_RE = re.compile(r"[\u0300-\u036f]")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
-_MOJIBAKE_LATIN1_SPAN_RE = re.compile(r"[\u00c2-\u00f4][\u0080-\u00bf]{1,3}")
 _CAMEL_BOUNDARY_RE = re.compile(
     r"([a-z])((?:Contract|Salary|Hours|Location|Role|Type|Position|Schedule)\b)"
 )
 _GENDER_SUFFIX_RE = re.compile(r"\(\s*a\s*\)|/a(?![a-z0-9])")
+
+UPPER_SENIORITY_LEVELS: frozenset[str] = frozenset(
+    {
+        SeniorityLevel.MID_LEVEL.value,
+        SeniorityLevel.SENIOR.value,
+        SeniorityLevel.STAFF_PRINCIPAL.value,
+        SeniorityLevel.MANAGEMENT.value,
+    }
+)
 
 PROFESSIONAL_AREA_LABELS_PT: dict[str, str] = {
     ProfessionalArea.SOFTWARE_DEVELOPMENT.value: "Desenvolvimento de Software",
@@ -668,18 +677,6 @@ def _classify_seniority_level(
     title_has_entry = bool(_ENTRY_LEVEL_ONLY_RE.search(norm_title))
     title_has_upper = title_has_staff or title_has_mgmt or title_has_senior or title_has_mid
 
-    if _INTERNSHIP_STRONG_RE.search(norm_title):
-        return (SeniorityLevel.INTERNSHIP.value, "seniority:title_internship")
-    if not title_has_upper and _INTERNSHIP_BODY_PHRASE_RE.search(norm_desc):
-        return (SeniorityLevel.INTERNSHIP.value, "seniority:body_internship")
-    if (
-        combined_meta & {"intern", "internship", "estagio", "apprentice", "working student"}
-        and not title_has_upper
-        and not title_has_junior
-        and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
-    ):
-        return (SeniorityLevel.INTERNSHIP.value, "seniority:meta_internship")
-
     if title_has_staff:
         return (SeniorityLevel.STAFF_PRINCIPAL.value, "seniority:title_staff_or_principal")
     if title_has_mgmt:
@@ -688,6 +685,20 @@ def _classify_seniority_level(
         return (SeniorityLevel.SENIOR.value, "seniority:title_senior")
     if title_has_mid:
         return (SeniorityLevel.MID_LEVEL.value, "seniority:title_mid_level")
+
+    if _INTERNSHIP_STRONG_RE.search(norm_title):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:title_internship")
+    if not title_has_upper and _INTERNSHIP_BODY_PHRASE_RE.search(norm_desc):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:body_internship")
+    if (
+        combined_meta & {"intern", "internship", "estagio", "apprentice", "working student"}
+        and not title_has_upper
+        and not title_has_junior
+        and not (combined_meta & {"senior", "sr", "staff", "principal", "mid", "mid-level", "mid level", "pleno", "lead", "manager", "director", "especialista"})
+        and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
+    ):
+        return (SeniorityLevel.INTERNSHIP.value, "seniority:meta_internship")
+
     if title_has_junior:
         return (SeniorityLevel.JUNIOR.value, "seniority:title_junior")
     if title_has_entry:
@@ -710,13 +721,15 @@ def _classify_seniority_level(
 
     if meta_tokens & {"staff", "principal"}:
         return (SeniorityLevel.STAFF_PRINCIPAL.value, "seniority:meta_staff_principal")
-    if meta_tokens & {"senior", "sr"}:
+    if meta_tokens & {"management", "manager", "director", "head", "lead", "executive"}:
+        return (SeniorityLevel.MANAGEMENT.value, "seniority:meta_management")
+    if meta_tokens & {"senior", "sr", "especialista"}:
         return (SeniorityLevel.SENIOR.value, "seniority:meta_senior")
-    if meta_tokens & {"mid", "mid-level", "mid level", "pleno"}:
+    if meta_tokens & {"mid", "mid-level", "mid level", "pleno", "intermediate"}:
         return (SeniorityLevel.MID_LEVEL.value, "seniority:meta_mid_level")
     if combined_meta & {"junior", "jr"} and not has_required_senior_years:
         return (SeniorityLevel.JUNIOR.value, "seniority:meta_or_tag_junior")
-    if combined_meta & {"entry-level", "entry level", "trainee", "graduate"} and not has_required_senior_years:
+    if combined_meta & {"entry_level", "entry-level", "entry level", "entry", "trainee", "graduate", "early-career", "early career"} and not has_required_senior_years:
         return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:meta_or_tag_entry_level")
 
     return (SeniorityLevel.UNKNOWN.value, "seniority:unspecified_unknown")
@@ -863,22 +876,8 @@ _MID_LEVEL_BODY_SELF_RE = re.compile(
 
 
 def _repair_mojibake(text: str) -> str:
-    """Corrige sequências UTF-8 decodificadas como Latin-1 sem alterar Unicode já válido."""
-    def _decode_span(match: re.Match[str]) -> str:
-        chunk = match.group(0)
-        try:
-            return chunk.encode("latin-1").decode("utf-8")
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            return chunk
-
-    repaired = (
-        text.replace("\u00e2\u20ac\u2014", " - ")
-        .replace("\u00e2\u20ac\u2013", " - ")
-        .replace("\u00e2\u20ac\u2122", "'")
-        .replace("\u00e2\u20ac\u0153", '"')
-        .replace("\u00e2\u20ac\u009d", '"')
-    )
-    return _MOJIBAKE_LATIN1_SPAN_RE.sub(_decode_span, repaired)
+    """Wrapper retrocompatível para o reparo conservador centralizado em `sanitization.py`."""
+    return repair_mojibake(text)
 
 
 def normalize_classification_text(text: str | None) -> str:
@@ -1287,8 +1286,8 @@ def classify_opportunity(
             desirable_technologies=exp_assessment.desirable_technologies,
         )
 
-    # 1. Estágio / Programa acadêmico
-    if _INTERNSHIP_STRONG_RE.search(norm_title):
+    # 1. Estágio / Programa acadêmico (somente se não houver título superior/liderança)
+    if _INTERNSHIP_STRONG_RE.search(norm_title) and not title_is_senior_or_lead:
         reasons.append("title:explicit_internship_or_student_role")
         return _finalize(OpportunityType.INTERNSHIP.value, "high")
 
@@ -1297,9 +1296,10 @@ def classify_opportunity(
         return _finalize(OpportunityType.INTERNSHIP.value, "medium")
 
     if (
-        tag_set & {"intern", "internship", "estagio", "apprentice", "working student"}
+        (tag_set | meta_tokens) & {"intern", "internship", "estagio", "apprentice", "working student"}
         and not title_is_senior_or_lead
         and not desc_has_senior_req
+        and seniority_level not in UPPER_SENIORITY_LEVELS
         and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
     ):
         reasons.append("tags:internship_without_conflict")
@@ -1339,11 +1339,11 @@ def classify_opportunity(
         return _finalize(OpportunityType.FREELANCE.value, "medium")
 
     # 3. Bloqueio explícito de senioridade/liderança antes de considerar júnior
-    if title_is_senior_or_lead:
+    if title_is_senior_or_lead or seniority_level in UPPER_SENIORITY_LEVELS:
         reasons.append("title:senior_lead_manager_or_specialist_role")
         return _finalize(OpportunityType.OTHER.value, "high")
 
-    # 4. Júnior / Entrada na área
+    # 4. Júnior / Entrada na área (mantendo coerência estrita com seniority_level)
     if _JUNIOR_TITLE_RE.search(norm_title) and not desc_has_senior_req:
         reasons.append("title:explicit_junior_or_entry_level")
         return _finalize(OpportunityType.JUNIOR.value, "high")
@@ -1353,7 +1353,14 @@ def classify_opportunity(
         return _finalize(OpportunityType.JUNIOR.value, "medium")
 
     if (
-        tag_set & {"junior", "jr", "entry-level", "entry level", "trainee", "graduate"}
+        seniority_level in {SeniorityLevel.JUNIOR.value, SeniorityLevel.ENTRY_LEVEL.value}
+        and not desc_has_senior_req
+    ):
+        reasons.append("seniority:coherent_junior_or_entry_level")
+        return _finalize(OpportunityType.JUNIOR.value, "medium")
+
+    if (
+        (tag_set | meta_tokens) & {"junior", "jr", "entry_level", "entry-level", "entry level", "trainee", "graduate"}
         and not desc_has_senior_req
     ):
         reasons.append("tags:junior_without_conflict")
@@ -1363,3 +1370,142 @@ def classify_opportunity(
     reasons.append("fallback:senior_mid_or_generic_other")
     confidence = "high" if desc_has_senior_req else "medium"
     return _finalize(OpportunityType.OTHER.value, confidence)
+
+
+_STRUCTURED_INTERNSHIP_TOKENS = frozenset(
+    {"intern", "internship", "estagio", "estagiario", "estagiaria", "apprentice", "working student"}
+)
+_STRUCTURED_UPPER_TOKENS = frozenset(
+    {
+        "pleno",
+        "mid",
+        "mid-level",
+        "mid level",
+        "mid-senior",
+        "intermediate",
+        "senior",
+        "sr",
+        "especialista",
+        "staff",
+        "principal",
+        "lead",
+        "manager",
+        "director",
+        "management",
+        "executive",
+    }
+)
+_STRUCTURED_JUNIOR_TOKENS = frozenset({"junior", "jr"})
+_STRUCTURED_ENTRY_TOKENS = frozenset(
+    {
+        "entry",
+        "entry_level",
+        "entry-level",
+        "entry level",
+        "trainee",
+        "graduate",
+        "early-career",
+        "early career",
+    }
+)
+
+
+def reconcile_structured_classification(
+    decision: ClassificationDecision,
+    *,
+    metadata_levels: list[str] | None = None,
+    metadata_job_types: list[str] | None = None,
+    metadata_labels: list[str] | None = None,
+) -> tuple[str, str, str]:
+    """
+    Aplica reforço conservador e coerente de metadados estruturados da fonte
+    (`jobLevel`, `seniority`, `jobType`, `labels`) sobre `(opportunity_type, employment_type, seniority_level)`:
+    - Nunca rebaixa senioridade explícita superior (`mid_level`, `senior`, `staff_principal`, `management`).
+    - Nunca deixa `opportunity_type=junior` com `seniority_level=unknown`.
+    - Mantém `entry_level` como `seniority_level=entry_level` + `opportunity_type=junior`.
+    - Mantém `junior` como `seniority_level=junior` + `opportunity_type=junior`.
+    - Mantém `internship` coerente nos três campos.
+    - Nunca usa substring genérica (ex.: `"intern"` dentro de `"internal"`).
+    """
+    opp_type = decision.opportunity_type
+    emp_type = decision.employment_type
+    sen_level = decision.seniority_level
+
+    level_tokens = set(_normalize_tags(metadata_levels))
+    job_type_tokens = set(_normalize_tags(metadata_job_types))
+    label_tokens = set(_normalize_tags(metadata_labels))
+    all_level_tokens = level_tokens | label_tokens
+    all_struct_tokens = all_level_tokens | job_type_tokens
+
+    has_upper_signal = (
+        sen_level in UPPER_SENIORITY_LEVELS
+        or bool(all_level_tokens & _STRUCTURED_UPPER_TOKENS)
+    )
+    has_required_senior_years = (
+        decision.experience_requirement_mode == ExperienceRequirementMode.REQUIRED.value
+        and decision.experience_min_years is not None
+        and decision.experience_min_years >= 3
+    )
+
+    # 1. Estágio estruturado (somente quando não conflita com nível superior)
+    if not has_upper_signal and bool(all_struct_tokens & _STRUCTURED_INTERNSHIP_TOKENS):
+        opp_type = OpportunityType.INTERNSHIP.value
+        emp_type = EmploymentType.INTERNSHIP.value
+        sen_level = SeniorityLevel.INTERNSHIP.value
+    # 2. Júnior / Entry-level estruturado (sem conflito com nível superior ou >=3 anos obrigatórios)
+    elif (
+        not has_upper_signal
+        and not has_required_senior_years
+        and opp_type == OpportunityType.OTHER.value
+        and sen_level == SeniorityLevel.UNKNOWN.value
+    ):
+        if bool(all_level_tokens & _STRUCTURED_JUNIOR_TOKENS):
+            opp_type = OpportunityType.JUNIOR.value
+            sen_level = SeniorityLevel.JUNIOR.value
+        elif bool(all_level_tokens & _STRUCTURED_ENTRY_TOKENS):
+            opp_type = OpportunityType.JUNIOR.value
+            sen_level = SeniorityLevel.ENTRY_LEVEL.value
+    # 3. Freelance via label explícito quando não há conflito
+    elif (
+        opp_type == OpportunityType.OTHER.value
+        and bool(label_tokens & {"freela", "freelance"})
+        and not has_upper_signal
+    ):
+        opp_type = OpportunityType.FREELANCE.value
+        if emp_type == EmploymentType.UNKNOWN.value:
+            emp_type = EmploymentType.FREELANCE.value
+
+    # 4. Contratos estruturados (CLT / PJ / Freelance / Temporário)
+    if "clt" in label_tokens and "pj" not in label_tokens:
+        emp_type = EmploymentType.CLT.value
+    elif "pj" in label_tokens and "clt" not in label_tokens:
+        emp_type = EmploymentType.PJ.value
+    elif emp_type == EmploymentType.UNKNOWN.value:
+        if bool(all_struct_tokens & {"freelance", "freela"}):
+            emp_type = EmploymentType.FREELANCE.value
+        elif bool(all_struct_tokens & {"contract", "contractor"}):
+            emp_type = EmploymentType.PJ.value
+        elif bool(all_struct_tokens & {"temporary", "temporario", "fixed-term", "fixed term"}):
+            emp_type = EmploymentType.TEMPORARY.value
+
+    # 5. Garantia final de invariante de coerência entre seniority_level e opportunity_type
+    if sen_level == SeniorityLevel.INTERNSHIP.value and opp_type != OpportunityType.INTERNSHIP.value:
+        opp_type = OpportunityType.INTERNSHIP.value
+        emp_type = EmploymentType.INTERNSHIP.value
+    elif (
+        sen_level in {SeniorityLevel.JUNIOR.value, SeniorityLevel.ENTRY_LEVEL.value}
+        and opp_type == OpportunityType.OTHER.value
+    ):
+        opp_type = OpportunityType.JUNIOR.value
+    elif opp_type == OpportunityType.JUNIOR.value and sen_level == SeniorityLevel.UNKNOWN.value:
+        if bool(all_level_tokens & _STRUCTURED_ENTRY_TOKENS) and not bool(all_level_tokens & _STRUCTURED_JUNIOR_TOKENS):
+            sen_level = SeniorityLevel.ENTRY_LEVEL.value
+        else:
+            sen_level = SeniorityLevel.JUNIOR.value
+    elif sen_level in UPPER_SENIORITY_LEVELS and opp_type in {
+        OpportunityType.INTERNSHIP.value,
+        OpportunityType.JUNIOR.value,
+    }:
+        opp_type = OpportunityType.OTHER.value
+
+    return (opp_type, emp_type, sen_level)

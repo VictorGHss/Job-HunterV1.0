@@ -170,6 +170,7 @@ def test_remote_ok_and_remotive_parsing_and_retry_limits():
         return httpx.Response(200, json=sample_remote_ok_payload())
 
     ok_connector = RemoteOKConnector(
+        tags=("dev",),
         transport=httpx.MockTransport(remote_ok_handler),
         sleep_fn=lambda s: sleep_calls.append(s),
     )
@@ -255,6 +256,11 @@ def test_sync_deduplication_idempotency_intervals_and_conservative_absence(db_se
                 sleep_fn=lambda _: None,
             ),
         }
+
+    # Inicializa fontes padrão explicitamente antes do dry-run (DX-02.1: dry-run nunca grava)
+    from app.services.opportunities.sync_service import ensure_default_sources
+
+    ensure_default_sources(db_session)
 
     # Dry-run não persiste oportunidades e não consulta Remotive desabilitada
     dry_results = sync_sources(
@@ -797,6 +803,7 @@ def test_source_compliance_remotive_disabled_and_remote_ok_active(
 
     overrides = {
         "remote_ok": RemoteOKConnector(
+            tags=("dev",),
             transport=httpx.MockTransport(ok_handler),
             sleep_fn=lambda _: None,
         ),
@@ -1585,6 +1592,7 @@ def test_phase024_new_connectors_normalization_pii_redaction_and_cross_source_de
         return httpx.Response(200, json=jobicy_payload)
 
     jobicy_conn = JobicyConnector(
+        industries=("engineering",),
         transport=httpx.MockTransport(jobicy_handler),
         sleep_fn=lambda s: jobicy_sleeps.append(s),
     )

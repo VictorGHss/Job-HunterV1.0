@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import UTC, date, datetime
 import re
 from typing import Any, Sequence
 
 from app.models.opportunity import (
     EmploymentType,
     ExperienceRequirementMode,
+    ExternalSourceStatus,
     Opportunity,
     OpportunityType,
     ProfessionalArea,
@@ -54,6 +55,289 @@ _BRAZIL_SYNONYMS = {
     "américa latina",
     "america latina",
 }
+
+_BRAZIL_STATE_CODES = frozenset(
+    {
+        "ac", "al", "ap", "am", "ba", "ce", "df", "es", "go",
+        "ma", "mt", "ms", "mg", "pa", "pb", "pr", "pe", "pi",
+        "rj", "rn", "rs", "ro", "rr", "sc", "sp", "se", "to",
+    }
+)
+
+# Estados cujo nome completo nunca é nome de capital/cidade-sede de mesmo nome
+_PURE_BRAZIL_STATE_NAMES = frozenset(
+    {
+        "acre", "alagoas", "amapa", "amazonas", "bahia", "ceara",
+        "distrito federal", "espirito santo", "goias", "maranhao",
+        "mato grosso", "mato grosso do sul", "minas gerais", "para",
+        "paraiba", "parana", "pernambuco", "piaui", "rio grande do norte",
+        "rio grande do sul", "rondonia", "roraima", "santa catarina",
+        "sergipe", "tocantins",
+    }
+)
+
+# Estados que compartilham nome com grandes capitais (tratados como estado apenas quando sucedem outra cidade após vírgula)
+_DUAL_CITY_STATE_NAMES = frozenset({"sao paulo", "rio de janeiro"})
+
+_COUNTRY_OR_REGION_TOKENS = frozenset(
+    {
+        "brasil", "brazil", "br", "portugal", "argentina", "mexico", "chile",
+        "colombia", "uruguai", "uruguay", "peru", "usa", "us", "united states",
+        "estados unidos", "canada", "uk", "united kingdom", "germany", "alemanha",
+        "spain", "espanha", "france", "franca", "italy", "italia", "latam",
+        "latin america", "south america", "america latina", "europe", "europa",
+        "emea", "apac", "worldwide", "anywhere", "global", "international",
+        "exterior", "outra localidade",
+    }
+)
+
+_WORK_MODE_PREFIX_RE = re.compile(
+    r"(?i)\b(?:h[ií]brido|presencial|remoto|remote|hybrid|on-?site|alocado|home\s+office)\b"
+)
+_UF_SUFFIX_RE = re.compile(
+    r"(?i)(?:\s*(?:/|-|–|—|,)\s*|\s*\(\s*)(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)(?:\s*\))?\s*$"
+)
+_TRAILING_COUNTRY_RE = re.compile(
+    r"(?i)(?:\s*(?:,|-|–|—)\s*|\s*\(\s*)(?:brasil|brazil|br|portugal|argentina|m[eé]xico|chile|col[oô]mbia|usa|united\s+states|estados\s+unidos)(?:\s*\))?\s*$"
+)
+_ALT_CITY_SPLIT_RE = re.compile(r"(?i)\s+(?:ou|or)\s+|[;|]")
+_SLASH_CITY_SPLIT_RE = re.compile(
+    r"(?i)\s*/\s*(?!(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)(?:$|[\s,;/|)-]))"
+)
+
+
+def utc_now() -> datetime:
+    """Relógio UTC centralizado para avaliações temporais determinísticas."""
+    return datetime.now(UTC)
+
+
+def ensure_utc(dt: datetime | None) -> datetime | None:
+    """Normaliza datetimes com ou sem timezone para UTC de forma segura."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def is_deadline_expired(
+    deadline_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Retorna True quando `deadline_at` está vencido (<= instante de referência UTC)."""
+    normalized_deadline = ensure_utc(deadline_at)
+    if normalized_deadline is None:
+        return False
+    reference = ensure_utc(now) or utc_now()
+    return normalized_deadline <= reference
+
+
+def resolve_effective_source_status(
+    opportunity: Opportunity,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """
+    Calcula o estado efetivo da oportunidade em tempo real sem mutar o objeto ORM.
+    Vagas cujo `deadline_at` já venceu retornam `expired` mesmo que ainda estejam
+    marcadas como `active`/`unknown` no banco desde a última sincronização.
+    """
+    raw_status = (getattr(opportunity, "source_status", None) or ExternalSourceStatus.ACTIVE.value).strip().lower()
+    if raw_status in {
+        ExternalSourceStatus.CLOSED.value,
+        ExternalSourceStatus.REMOVED.value,
+        ExternalSourceStatus.EXPIRED.value,
+    }:
+        return raw_status
+
+    deadline_at = getattr(opportunity, "deadline_at", None)
+    if is_deadline_expired(deadline_at, now=now):
+        return ExternalSourceStatus.EXPIRED.value
+
+    return raw_status
+
+
+def _clean_city_candidate(raw_segment: str) -> tuple[str | None, str | None]:
+    """Limpa um segmento de localidade extraindo `(cidade, uf_opcional)` conservadoramente."""
+    seg = _WORK_MODE_PREFIX_RE.sub(" ", raw_segment)
+    seg = re.sub(r"^[\s\-–—:,/()]+|[\s\-–—:,/()]+$", "", seg)
+    if not seg:
+        return (None, None)
+
+    state_code: str | None = None
+    # Remove sufixo de país repetidamente se houver (ex.: "São Paulo, SP, Brasil")
+    for _ in range(2):
+        seg = _TRAILING_COUNTRY_RE.sub("", seg).strip(" -–—,:()")
+        uf_match = _UF_SUFFIX_RE.search(seg)
+        if uf_match:
+            state_code = uf_match.group(1).upper()
+            seg = seg[: uf_match.start()].strip(" -–—,:()")
+
+    seg = re.sub(r"\s+", " ", seg).strip(" -–—,:()")
+    if not seg:
+        return (None, state_code)
+
+    norm = normalize_classification_text(seg)
+    if not norm or len(norm) < 2:
+        return (None, state_code)
+    if norm in _BRAZIL_STATE_CODES:
+        return (None, norm.upper())
+    if norm in _COUNTRY_OR_REGION_TOKENS or norm in _PURE_BRAZIL_STATE_NAMES:
+        return (None, state_code)
+
+    return (seg, state_code)
+
+
+def parse_location_cities(raw_text: str | None) -> tuple[list[str], str | None]:
+    """
+    Extrai lista conservadora de cidades alternativas válidas e estado único opcional
+    a partir de strings como:
+    - "Belo Horizonte ou São Paulo, Brasil" -> (["Belo Horizonte", "São Paulo"], None)
+    - "Curitiba / São Paulo" -> (["Curitiba", "São Paulo"], None)
+    - "Curitiba/PR ou São Paulo/SP" -> (["Curitiba", "São Paulo"], None)
+    - "São Paulo, Campinas ou Sorocaba - SP" -> (["São Paulo", "Campinas", "Sorocaba"], "SP")
+    - "Campinas, São Paulo, Brasil" -> (["Campinas"], None)
+    - "Rio de Janeiro, RJ" -> (["Rio de Janeiro"], "RJ")
+
+    Não divide nomes de cidades compostas nem trata nomes de país/estado como cidade.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return ([], None)
+
+    cleaned_raw = raw_text.strip()
+    if not cleaned_raw:
+        return ([], None)
+
+    # Primeiro separa alternativas explícitas por "ou"/"or"/";"/"|" e "/" que não seja "/UF"
+    primary_parts: list[str] = []
+    has_explicit_alt = bool(_ALT_CITY_SPLIT_RE.search(cleaned_raw) or _SLASH_CITY_SPLIT_RE.search(cleaned_raw))
+    for chunk in _ALT_CITY_SPLIT_RE.split(cleaned_raw):
+        for sub in _SLASH_CITY_SPLIT_RE.split(chunk):
+            sub_clean = sub.strip()
+            if sub_clean:
+                primary_parts.append(sub_clean)
+
+    cities: list[str] = []
+    seen_norm: set[str] = set()
+    states_found: set[str] = set()
+
+    for part in primary_parts:
+        # Remove país do final antes de inspecionar vírgulas internas
+        part_no_country = _TRAILING_COUNTRY_RE.sub("", part).strip(" -–—,:()")
+        comma_tokens = [tok.strip() for tok in part_no_country.split(",") if tok.strip()]
+
+        if len(comma_tokens) >= 2:
+            # Avalia se os tokens separados por vírgula são "Cidade, Estado" ou lista de cidades
+            trailing_norm = normalize_classification_text(comma_tokens[-1])
+            if trailing_norm in _BRAZIL_STATE_CODES:
+                states_found.add(trailing_norm.upper())
+                comma_tokens = comma_tokens[:-1]
+            elif trailing_norm in _PURE_BRAZIL_STATE_NAMES:
+                comma_tokens = comma_tokens[:-1]
+            elif (
+                len(comma_tokens) == 2
+                and not has_explicit_alt
+                and trailing_norm in _DUAL_CITY_STATE_NAMES
+            ):
+                # Ex.: "Campinas, São Paulo" -> Campinas é a cidade, São Paulo é o estado
+                comma_tokens = comma_tokens[:-1]
+
+            # Se restou apenas 1 token, ou se há múltiplos tokens de cidade (ex.: "São Paulo, Campinas" antes de "ou Sorocaba")
+            candidate_segments = comma_tokens if (len(comma_tokens) == 1 or has_explicit_alt) else [comma_tokens[0]]
+        else:
+            candidate_segments = [part]
+
+        for seg in candidate_segments:
+            city_name, uf = _clean_city_candidate(seg)
+            if uf:
+                states_found.add(uf)
+            if city_name:
+                city_norm = normalize_classification_text(city_name)
+                if city_norm and city_norm not in seen_norm:
+                    seen_norm.add(city_norm)
+                    cities.append(city_name)
+
+    single_state = next(iter(states_found)) if len(states_found) == 1 else None
+    return (cities, single_state)
+
+
+def extract_opportunity_cities(opportunity: Opportunity) -> list[str]:
+    """Retorna todas as cidades válidas associadas à oportunidade para matching geográfico."""
+    meta = getattr(opportunity, "raw_metadata", None)
+    cities: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        norm = normalize_classification_text(name)
+        if norm and norm not in seen and norm not in _COUNTRY_OR_REGION_TOKENS:
+            seen.add(norm)
+            cities.append(name)
+
+    if isinstance(meta, dict) and isinstance(meta.get("cities"), list):
+        for raw_city in meta["cities"]:
+            if isinstance(raw_city, str) and raw_city.strip():
+                parsed, _ = parse_location_cities(raw_city)
+                for c in parsed:
+                    _add(c)
+
+    if opportunity.city:
+        parsed_city, _ = parse_location_cities(opportunity.city)
+        for c in parsed_city:
+            _add(c)
+
+    if not cities and opportunity.location_text:
+        parsed_loc, _ = parse_location_cities(opportunity.location_text)
+        for c in parsed_loc:
+            _add(c)
+
+    return cities
+
+
+def _parse_utc_offset_hours(value: Any) -> float | None:
+    """Converte representações de fuso horário (ex.: -3, '-3', 'UTC-3', 'GMT-03:00') em horas UTC."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if -12 <= float(value) <= 14:
+            return float(value)
+        return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if any(k in low for k in ("sao_paulo", "são_paulo", "brt", "america/bahia", "america/fortaleza", "america/recife")):
+        return -3.0
+    if low in {"utc", "gmt"}:
+        return 0.0
+    m = re.match(r"^(?:utc|gmt)?\s*([+-]?\d{1,2})(?::(\d{2}))?$", low)
+    if m:
+        hours = int(m.group(1))
+        mins = int(m.group(2) or 0)
+        sign = -1.0 if hours < 0 or raw.startswith("-") else 1.0
+        val = sign * (abs(hours) + mins / 60.0)
+        if -12.0 <= val <= 14.0:
+            return val
+    return None
+
+
+def _evaluate_brazil_timezone_overlap(raw_timezones: Any) -> bool | None:
+    """
+    Retorna True se alguma restrição de timezone é compatível com o Brasil (UTC-5 a UTC-2),
+    False se há restrições explícitas de fuso totalmente incompatíveis com o Brasil,
+    ou None se não houver informação estruturada interpretável.
+    Nunca substitui autorização legal de país.
+    """
+    if not isinstance(raw_timezones, list) or not raw_timezones:
+        return None
+    offsets: list[float] = []
+    for item in raw_timezones:
+        parsed = _parse_utc_offset_hours(item)
+        if parsed is not None:
+            offsets.append(parsed)
+    if not offsets:
+        return None
+    return any(-5.0 <= off <= -2.0 for off in offsets)
 
 _NON_TECH_PRIMARY_AREAS = frozenset(
     {
@@ -300,13 +584,14 @@ def _evaluate_geography(
     exclusions: list[str] = []
 
     user_country = (profile.country or "Brasil").strip()
-    user_city = (profile.city or "").strip().lower()
-    user_state = (profile.state or "").strip().lower()
+    user_city_norm = normalize_classification_text(profile.city)
+    user_state_norm = normalize_classification_text(profile.state)
 
     if opportunity.work_mode in {WorkMode.HYBRID.value, WorkMode.ONSITE.value}:
         opp_country = (opportunity.country or "").strip()
-        opp_city = (opportunity.city or "").strip().lower()
-        opp_state = (opportunity.state or "").strip().lower()
+        opp_cities = extract_opportunity_cities(opportunity)
+        opp_cities_norm = {normalize_classification_text(c) for c in opp_cities if c}
+        opp_state_norm = normalize_classification_text(opportunity.state)
 
         if opp_country and not _region_matches_user(opp_country, user_country):
             exclusions.append(
@@ -314,13 +599,22 @@ def _evaluate_geography(
             )
             return ("excluded", inclusions, exclusions)
 
-        if user_city and opp_city and user_city != opp_city:
-            exclusions.append(
-                f"Vaga {opportunity.work_mode} exige localidade diferente ({opportunity.city})."
-            )
-            return ("excluded", inclusions, exclusions)
+        if user_city_norm and opp_cities_norm:
+            if user_city_norm not in opp_cities_norm:
+                cities_display = opportunity.city or ", ".join(opp_cities)
+                exclusions.append(
+                    f"Vaga {opportunity.work_mode} exige localidade diferente ({cities_display})."
+                )
+                return ("excluded", inclusions, exclusions)
+        elif user_city_norm and opportunity.city:
+            raw_city_norm = normalize_classification_text(opportunity.city)
+            if raw_city_norm and raw_city_norm != user_city_norm:
+                exclusions.append(
+                    f"Vaga {opportunity.work_mode} exige localidade diferente ({opportunity.city})."
+                )
+                return ("excluded", inclusions, exclusions)
 
-        if user_state and opp_state and user_state != opp_state and not opp_city:
+        if user_state_norm and opp_state_norm and user_state_norm != opp_state_norm and not opp_cities_norm:
             exclusions.append(
                 f"Vaga {opportunity.work_mode} em estado divergente ({opportunity.state})."
             )
@@ -335,16 +629,35 @@ def _evaluate_geography(
     if opportunity.country and opportunity.country not in regions:
         regions.append(opportunity.country)
 
+    meta = getattr(opportunity, "raw_metadata", None)
+    tz_restrictions = meta.get("timezone_restrictions") if isinstance(meta, dict) else None
+    tz_br_compatible = (
+        _evaluate_brazil_timezone_overlap(tz_restrictions)
+        if _is_brazil(user_country)
+        else None
+    )
+
     if opportunity.eligibility_unknown or not regions:
         inclusions.append(
             "Elegibilidade geográfica não especificada pela fonte; mantida para análise manual."
         )
+        if tz_br_compatible is True:
+            inclusions.append(
+                "Fuso horário informado pela fonte é compatível com o Brasil (verificar elegibilidade legal de contratação)."
+            )
         return ("unknown", inclusions, exclusions)
 
     if any(_region_matches_user(region, user_country) for region in regions):
         inclusions.append(
             f"Elegibilidade remota compatível com o perfil ({', '.join(regions[:2])})."
         )
+        if tz_br_compatible is True:
+            inclusions.append("Restrição de fuso horário compatível com o horário do Brasil.")
+        elif tz_br_compatible is False:
+            exclusions.append(
+                "Restrição de fuso horário informada pela fonte é incompatível com o horário do Brasil."
+            )
+            return ("excluded", inclusions, exclusions)
         return ("eligible", inclusions, exclusions)
 
     exclusions.append(
@@ -671,12 +984,14 @@ def evaluate_opportunity_for_user(
     experiences: Sequence[WorkExperience] | None = None,
     educations: Sequence[Education] | None = None,
     projects: Sequence[ProfessionalProject] | None = None,
+    now: datetime | None = None,
 ) -> OpportunityMatchEvaluation:
     """
     Avalia compatibilidade de forma 100% determinística e explicável considerando seis
     dimensões independentes: área profissional, geografia, contrato, senioridade,
     requisitos de experiência e compatibilidade técnica com as habilidades do candidato.
     """
+    reference_now = ensure_utc(now) or utc_now()
     defaults = default_career_preferences()
     prefs: dict[str, Any] = dict(defaults)
     if isinstance(profile.preferences, dict):
@@ -716,8 +1031,8 @@ def evaluate_opportunity_for_user(
         }:
             category = opportunity.opportunity_type
 
-    # 1. Ciclo de vida e restrições de fontes externas
-    opp_status = (getattr(opportunity, "source_status", None) or "active").lower()
+    # 1. Ciclo de vida (incluindo expiração em tempo real por deadline_at em UTC) e restrições de fontes externas
+    opp_status = resolve_effective_source_status(opportunity, now=reference_now)
     if opp_status == "expired":
         exclusions.append("Publicação expirada conforme prazo informado pela fonte.")
     elif opp_status == "closed":

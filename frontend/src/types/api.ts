@@ -434,7 +434,7 @@ export interface OpportunityListResponse {
 export interface OpportunityListParams {
   q?: string;
   type?: OpportunityType;
-  seniority?: SeniorityLevel;
+  seniority?: SeniorityLevel | SeniorityLevel[];
   compatibility?: OverallCompatibility;
   work_mode?: WorkMode;
   employment_type?: EmploymentType;

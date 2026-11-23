@@ -1,5 +1,6 @@
 import math
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import or_, select
@@ -23,9 +24,12 @@ from app.models.opportunity import (
 )
 from app.models.profile import (
     Education,
+    ProfessionalProfile,
     ProfessionalProject,
     Skill,
+    VerificationStatus,
     WorkExperience,
+    default_career_preferences,
 )
 from app.models.user import User
 from app.schemas.opportunity import (
@@ -41,24 +45,71 @@ from app.schemas.opportunity import (
 )
 from app.services.opportunities.classification import classify_opportunity
 from app.services.opportunities.matching import (
+    ensure_utc,
     evaluate_opportunity_for_user,
+    is_deadline_expired,
+    resolve_effective_source_status,
     resolve_opportunity_areas,
     resolve_opportunity_seniority_and_experience,
+    utc_now,
 )
 from app.services.opportunities.sanitization import (
     compute_opportunity_content_hash,
     normalize_canonical_url,
 )
-from app.services.opportunities.sync_service import ensure_default_sources
 from app.services.profile_service import get_or_create_profile
+
+
+def _get_profile_readonly(db: Session, user: User) -> ProfessionalProfile:
+    """
+    Carrega o perfil profissional em modo estritamente somente leitura.
+    Caso o usuário ainda não tenha registro persistido, retorna uma instância
+    transitória em memória sem adicionar à sessão nem executar COMMIT.
+    """
+    profile = db.execute(
+        select(ProfessionalProfile).where(ProfessionalProfile.user_id == user.id)
+    ).scalar_one_or_none()
+    if profile is not None:
+        return profile
+    return ProfessionalProfile(
+        user_id=user.id,
+        full_name=user.display_name,
+        professional_email=user.email,
+        city=None,
+        state=None,
+        country=None,
+        preferences=default_career_preferences(),
+        verification_status=VerificationStatus.DRAFT.value,
+    )
+
+
+def _normalize_seniority_filter(
+    seniority_level: str | Sequence[str] | None,
+) -> set[str] | None:
+    if seniority_level is None:
+        return None
+    if isinstance(seniority_level, str):
+        cleaned = seniority_level.strip()
+        return {cleaned} if cleaned else None
+    values: set[str] = set()
+    for item in seniority_level:
+        raw = item.value if hasattr(item, "value") else str(item)
+        cleaned = raw.strip()
+        if cleaned:
+            values.add(cleaned)
+    return values or None
 
 
 class GlobalOpportunityImmutableError(PermissionError):
     """Lançado quando um usuário tenta alterar um registro global de provedor externo."""
 
 
-def _build_status_uncertainty_note(opp: Opportunity) -> str | None:
-    st = (opp.source_status or "active").lower()
+def _build_status_uncertainty_note(
+    opp: Opportunity,
+    *,
+    effective_status: str | None = None,
+) -> str | None:
+    st = (effective_status or opp.source_status or "active").lower()
     if st in {ExternalSourceStatus.UNKNOWN.value, ExternalSourceStatus.UNCONFIRMED.value}:
         return (
             "Esta publicação deixou de aparecer nas consultas parciais mais recentes da fonte, "
@@ -79,11 +130,26 @@ def _build_status_uncertainty_note(opp: Opportunity) -> str | None:
     return None
 
 
-def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkResponse]:
+def _serialize_source_links(
+    opp: Opportunity,
+    *,
+    reference_now: datetime,
+) -> list[OpportunitySourceLinkResponse]:
     links = list(getattr(opp, "source_links", None) or [])
     result: list[OpportunitySourceLinkResponse] = []
     for link in links:
         src = link.source or opp.source
+        link_status = (link.source_status or ExternalSourceStatus.ACTIVE.value).lower()
+        if (
+            link_status
+            not in {
+                ExternalSourceStatus.CLOSED.value,
+                ExternalSourceStatus.REMOVED.value,
+                ExternalSourceStatus.EXPIRED.value,
+            }
+            and is_deadline_expired(link.deadline_at, now=reference_now)
+        ):
+            link_status = ExternalSourceStatus.EXPIRED.value
         result.append(
             OpportunitySourceLinkResponse(
                 id=link.id,
@@ -94,7 +160,7 @@ def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkRespo
                 source_url=link.source_url,
                 application_url=link.application_url,
                 is_primary=link.is_primary,
-                source_status=link.source_status,
+                source_status=link_status,
                 published_at=link.published_at,
                 deadline_at=link.deadline_at,
                 location_text=link.location_text,
@@ -110,6 +176,7 @@ def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkRespo
             )
         )
     if not result and opp.source_id is not None and opp.source is not None:
+        eff_opp_status = resolve_effective_source_status(opp, now=reference_now)
         result.append(
             OpportunitySourceLinkResponse(
                 id=opp.id,
@@ -120,7 +187,7 @@ def _serialize_source_links(opp: Opportunity) -> list[OpportunitySourceLinkRespo
                 source_url=opp.source_url,
                 application_url=opp.application_url,
                 is_primary=True,
-                source_status=opp.source_status,
+                source_status=eff_opp_status,
                 published_at=opp.published_at,
                 deadline_at=opp.deadline_at,
                 location_text=opp.location_text,
@@ -209,7 +276,11 @@ def _serialize_opportunity(
     state: OpportunityUserState | None,
     match: OpportunityMatchEvaluation,
     tracking: tuple[uuid.UUID | None, str | None, int, str | None] | None = None,
+    *,
+    reference_now: datetime | None = None,
 ) -> OpportunityResponse:
+    now_utc = ensure_utc(reference_now) or utc_now()
+    effective_status = resolve_effective_source_status(opp, now=now_utc)
     source_dto = (
         OpportunitySourcePublicResponse.model_validate(opp.source)
         if opp.source is not None
@@ -262,13 +333,15 @@ def _serialize_opportunity(
         application_url=opp.application_url,
         published_at=opp.published_at,
         deadline_at=opp.deadline_at,
-        source_status=opp.source_status,
+        source_status=effective_status,
         first_seen_at=opp.first_seen_at,
         last_seen_at=opp.last_seen_at,
         last_status_check_at=opp.last_status_check_at or opp.last_seen_at,
-        status_uncertainty_note=_build_status_uncertainty_note(opp),
+        status_uncertainty_note=_build_status_uncertainty_note(
+            opp, effective_status=effective_status
+        ),
         source=source_dto,
-        source_links=_serialize_source_links(opp),
+        source_links=_serialize_source_links(opp, reference_now=now_utc),
         user_state=state_dto,
         match=match,
         tracked_application_id=tracking[0] if tracking else None,
@@ -292,7 +365,7 @@ def _matches_query_filters(
     *,
     q: str | None,
     opportunity_type: str | None,
-    seniority_level: str | None = None,
+    seniority_levels: set[str] | None = None,
     compatibility: str | None = None,
     work_mode: str | None,
     employment_type: str | None,
@@ -315,6 +388,8 @@ def _matches_query_filters(
     if compatibility:
         if match.overall_compatibility != compatibility:
             return False
+        if compatibility != "incompatible" and not match.eligible:
+            return False
     elif not include_excluded and not match.eligible:
         return False
 
@@ -322,11 +397,11 @@ def _matches_query_filters(
         if opp.opportunity_type != opportunity_type:
             return False
 
-    if seniority_level:
+    if seniority_levels:
         resolved_sen = (getattr(opp, "seniority_level", None) or "").strip()
         if not resolved_sen or resolved_sen == SeniorityLevel.UNKNOWN.value:
             resolved_sen = resolve_opportunity_seniority_and_experience(opp)[0]
-        if resolved_sen != seniority_level:
+        if resolved_sen not in seniority_levels:
             return False
 
     if work_mode and opp.work_mode != work_mode:
@@ -414,7 +489,7 @@ def list_opportunities(
     *,
     q: str | None = None,
     opportunity_type: str | None = None,
-    seniority_level: str | None = None,
+    seniority_level: str | Sequence[str] | None = None,
     compatibility: str | None = None,
     work_mode: str | None = None,
     employment_type: str | None = None,
@@ -429,9 +504,11 @@ def list_opportunities(
     sort: str = "recent",
     page: int = 1,
     page_size: int = 20,
+    now: datetime | None = None,
 ) -> OpportunityListResponse:
-    ensure_default_sources(db)
-    profile = get_or_create_profile(db, user)
+    reference_now = ensure_utc(now) or utc_now()
+    target_seniorities = _normalize_seniority_filter(seniority_level)
+    profile = _get_profile_readonly(db, user)
     skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
 
     stmt = (
@@ -448,14 +525,13 @@ def list_opportunities(
         stmt = stmt.where(Opportunity.work_mode == work_mode)
     if employment_type:
         stmt = stmt.where(Opportunity.employment_type == employment_type)
-    if seniority_level:
-        if seniority_level == SeniorityLevel.UNKNOWN.value:
+    if target_seniorities:
+        if target_seniorities == {SeniorityLevel.UNKNOWN.value}:
             stmt = stmt.where(Opportunity.seniority_level == SeniorityLevel.UNKNOWN.value)
         else:
             stmt = stmt.where(
-                or_(
-                    Opportunity.seniority_level == seniority_level,
-                    Opportunity.seniority_level == SeniorityLevel.UNKNOWN.value,
+                Opportunity.seniority_level.in_(
+                    target_seniorities | {SeniorityLevel.UNKNOWN.value}
                 )
             )
     opportunities = db.execute(stmt).scalars().all()
@@ -467,12 +543,11 @@ def list_opportunities(
 
     effective_target_category = opportunity_type
     if effective_target_category is None:
-        if seniority_level == SeniorityLevel.INTERNSHIP.value:
+        if target_seniorities == {SeniorityLevel.INTERNSHIP.value}:
             effective_target_category = OpportunityType.INTERNSHIP.value
-        elif seniority_level in {
-            SeniorityLevel.JUNIOR.value,
-            SeniorityLevel.ENTRY_LEVEL.value,
-        }:
+        elif target_seniorities and target_seniorities.issubset(
+            {SeniorityLevel.JUNIOR.value, SeniorityLevel.ENTRY_LEVEL.value}
+        ):
             effective_target_category = OpportunityType.JUNIOR.value
         elif employment_type == EmploymentType.FREELANCE.value:
             effective_target_category = OpportunityType.FREELANCE.value
@@ -488,6 +563,7 @@ def list_opportunities(
             experiences=experiences,
             educations=educations,
             projects=projects,
+            now=reference_now,
         )
         if _matches_query_filters(
             opp,
@@ -495,7 +571,7 @@ def list_opportunities(
             match,
             q=q,
             opportunity_type=opportunity_type,
-            seniority_level=seniority_level,
+            seniority_levels=target_seniorities,
             compatibility=compatibility,
             work_mode=work_mode,
             employment_type=employment_type,
@@ -535,7 +611,13 @@ def list_opportunities(
         opportunity_ids=[opp.id for opp, _, _ in page_rows],
     )
     items = [
-        _serialize_opportunity(opp, state, match, tracking_by_opp_id.get(opp.id))
+        _serialize_opportunity(
+            opp,
+            state,
+            match,
+            tracking_by_opp_id.get(opp.id),
+            reference_now=reference_now,
+        )
         for opp, state, match in page_rows
     ]
 
@@ -552,7 +634,10 @@ def get_opportunity_for_user(
     db: Session,
     user: User,
     opportunity_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
 ) -> OpportunityResponse | None:
+    reference_now = ensure_utc(now) or utc_now()
     opp = db.execute(
         select(Opportunity)
         .options(
@@ -567,7 +652,7 @@ def get_opportunity_for_user(
     if opp is None:
         return None
 
-    profile = get_or_create_profile(db, user)
+    profile = _get_profile_readonly(db, user)
     skills, experiences, educations, projects = _load_user_matching_context(db, user.id)
     state = db.execute(
         select(OpportunityUserState).where(
@@ -582,9 +667,16 @@ def get_opportunity_for_user(
         experiences=experiences,
         educations=educations,
         projects=projects,
+        now=reference_now,
     )
     tracking_map = _load_user_application_tracking(db, user.id, opportunity_ids=[opp.id])
-    return _serialize_opportunity(opp, state, match, tracking_map.get(opp.id))
+    return _serialize_opportunity(
+        opp,
+        state,
+        match,
+        tracking_map.get(opp.id),
+        reference_now=reference_now,
+    )
 
 
 def create_manual_opportunity(
@@ -842,23 +934,49 @@ def update_opportunity_user_state(
     )
 
 
-def list_public_sources(db: Session) -> list[OpportunitySourcePublicResponse]:
-    sources = ensure_default_sources(db)
+def list_public_sources(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> list[OpportunitySourcePublicResponse]:
+    """
+    Lista fontes públicas registradas em modo estritamente somente leitura
+    (sem chamar `ensure_default_sources` nem executar commits).
+    Contabiliza vencimentos em tempo real por `deadline_at` sem alterar registros no banco.
+    """
+    reference_now = ensure_utc(now) or utc_now()
+    sources = (
+        db.execute(select(OpportunitySource).order_by(OpportunitySource.slug.asc()))
+        .scalars()
+        .all()
+    )
     opps = (
         db.execute(
-            select(Opportunity.source_id, Opportunity.source_status).where(
-                Opportunity.source_id.is_not(None)
-            )
+            select(
+                Opportunity.source_id,
+                Opportunity.source_status,
+                Opportunity.deadline_at,
+            ).where(Opportunity.source_id.is_not(None))
         )
         .all()
     )
     counts_by_src: dict[uuid.UUID, list[int]] = {}
-    for src_id, st in opps:
+    for src_id, st, deadline_at in opps:
         if src_id is None:
             continue
         bucket = counts_by_src.setdefault(src_id, [0, 0, 0, 0])
         bucket[0] += 1
         st_low = (st or "active").lower()
+        if (
+            st_low
+            not in {
+                ExternalSourceStatus.EXPIRED.value,
+                ExternalSourceStatus.CLOSED.value,
+                ExternalSourceStatus.REMOVED.value,
+            }
+            and is_deadline_expired(deadline_at, now=reference_now)
+        ):
+            st_low = ExternalSourceStatus.EXPIRED.value
         if st_low == ExternalSourceStatus.ACTIVE.value:
             bucket[1] += 1
         elif st_low in {
