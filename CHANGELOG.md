@@ -6,6 +6,34 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-03.1] - 2026-11-22 — Correção geográfica e consistência do Remote OK
+
+### Corrigido
+
+- **DX-03.1-A — Normalização canônica de países sem substring curta (`matching.py`):**
+  - Introduzidos `classify_geographic_token` e `resolve_canonical_country` para mapear países canônicos (`Brazil`, `Brunei`, `Canada`, etc.), macrorregiões (`LATAM`), região global explícita (`Worldwide`) e marcadores não-país (`Remote`) por token/fronteira de palavra.
+  - Eliminado o falso positivo geográfico em que a substring `"br"` casava com `"Brunei"` e `"British Columbia, Canada"`; código ISO `BR` só é reconhecido quando isolado.
+  - Conflitos explícitos entre `Worldwide` e restrição de outro país não promovem automaticamente elegibilidade para o Brasil.
+- **DX-03.1-B — Interpretação conservadora de `Remote` / `Remote,` (`connectors/base.py`, `matching.py`):**
+  - `parse_geo_eligibility` remove marcadores puramente de modalidade remota (`Remote`, `Remote,`, `Remoto`) antes de montar `eligible_countries`, retornando `eligible_countries=[]` e `eligibility_unknown=True` quando não há país concreto (preservando `location_text` original e `work_mode="remote"`), e preservando restrições explícitas de país quando combinadas (ex.: `Remote, USA` → `["USA"]`).
+  - `_evaluate_geography` também ignora marcadores `non_country` em registros legados (`eligible_countries=["Remote"]`), avaliando-os como `geographic_eligibility="unknown"` em vez de `excluded`, sem assumir `Worldwide` nem elegibilidade automática para o Brasil.
+- **DX-03.1-C — Consistência de classificação no Remote OK e reclassificação (`classification.py`, `connectors/remote_ok.py`, `sync_service.py`):**
+  - Bloqueada a classificação de estágio por tags/metadados quando há exigência obrigatória de `>= 3` anos de experiência ou conflito com tags de senioridade superior (`senior`, `exec`, `executive`, etc.), eliminando os casos `Frontend Engineer` (`internship`/`unknown`) e `Scrum Master` (`other`/`internship` com `3+` anos obrigatórios).
+  - `RemoteOKConnector` passou a aplicar `reconcile_structured_classification`.
+  - `reclassify_opportunities` passou a contemplar também a limpeza de marcadores `"Remote"` indevidamente armazenados em `eligible_countries` (suportando `--dry-run` sem escrita).
+
+### Corrigido (pós-auditoria DX-03.1.1)
+
+- **`DX031-AUD-01` — Desambiguação contextual de códigos ISO-2 (`matching.py`):**
+  - Separados os aliases de países em nomes completos (`_CANONICAL_COUNTRY_ALIASES`), códigos ISO-2 não ambíguos (`BR`, `US`, `UK`) e códigos ISO-2 que colidem com estados/UFs (`CA`, `DE`, `ES`, `PT`, `FR`, `AU`), impedindo que localidades compostas como `"San Francisco, CA"`, `"Wilmington, DE"` e `"Vitória, ES"` sejam confundidas com Canadá, Alemanha ou Espanha tanto em string única quanto em listas particionadas (`["San Francisco", "CA"]`).
+- **`DX031-AUD-02` — Precedência de restrições concretas sobre `Worldwide` na mesma string (`matching.py`):**
+  - `classify_geographic_token` agora particiona e avalia todos os componentes antes de conceder elegibilidade global, garantindo que `"Worldwide, USA"`, `"USA, Worldwide"`, `"Worldwide, Canada"` e `"Worldwide, LATAM"` respeitem a restrição concreta de país ou região de forma consistente com a representação em lista.
+
+### Testes
+- `backend/tests/test_dx031_geography_remoteok.py`: regressões cobrindo normalização canônica de países, eliminação de falsos positivos (`Brunei`, `British Columbia`), desambiguação de códigos ISO-2 em localidades compostas (`DX031-AUD-01`), precedência de restrições concretas sobre `Worldwide` (`DX031-AUD-02`), interpretação de `Remote`, fixtures fiéis aos registros inconsistentes do Remote OK e simulação `reclassify_opportunities(..., dry_run=True)`.
+
+---
+
 ## [DX-02.1 + DX-02.2] - 2026-11-22 — Correções de descoberta, matching e expansão das fontes gratuitas
 
 ### Corrigido (DX-02.1)

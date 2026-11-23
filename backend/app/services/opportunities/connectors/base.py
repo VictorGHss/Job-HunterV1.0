@@ -99,37 +99,71 @@ def parse_retry_after_seconds(header_value: str | None, default_seconds: int = 5
     return default_seconds
 
 
+_NON_GEO_REMOTE_TOKENS = frozenset(
+    {
+        "remote",
+        "remoto",
+        "remote work",
+        "telecommute",
+        "work from home",
+        "home office",
+        "fully remote",
+        "100% remote",
+        "remote only",
+        "remote-only",
+    }
+)
+
+_WORLDWIDE_GEO_MARKERS = (
+    "worldwide",
+    "anywhere",
+    "global",
+    "work from anywhere",
+    "remote worldwide",
+    "100% anywhere",
+)
+
+
 def parse_geo_eligibility(
     raw_location: str | None,
 ) -> tuple[list[str], str | None, bool]:
     """
     Analisa a string geográfica declarada para trabalho remoto sem assumir
-    elegibilidade mundial quando a fonte é omissa.
+    elegibilidade mundial quando a fonte é omissa e sem tratar marcadores
+    como `Remote` / `Remote,` como país estrangeiro.
     Retorna: (eligible_countries, primary_country, eligibility_unknown)
     """
     if not raw_location or not raw_location.strip():
         return ([], None, True)
 
     cleaned = raw_location.strip()
-    lower = cleaned.lower()
+    raw_parts = [
+        part.strip(" \t\r\n,;-–—|/")
+        for part in cleaned.replace(";", ",").split(",")
+    ]
+    concrete_parts: list[str] = []
+    has_worldwide = False
 
-    if lower in {"remote", "remoto", "remote work", "telecommute"}:
+    for part in raw_parts:
+        if not part:
+            continue
+        low = part.lower()
+        if low in _NON_GEO_REMOTE_TOKENS:
+            continue
+        if low in _WORLDWIDE_GEO_MARKERS or any(
+            marker in low for marker in ("worldwide", "anywhere", "work from anywhere")
+        ):
+            has_worldwide = True
+            continue
+        concrete_parts.append(part)
+
+    if not concrete_parts:
+        if has_worldwide:
+            return (["Worldwide"], None, False)
         return ([], None, True)
 
-    worldwide_markers = (
-        "worldwide",
-        "anywhere",
-        "global",
-        "work from anywhere",
-        "remote worldwide",
-        "100% anywhere",
-    )
-    if any(marker in lower for marker in worldwide_markers):
-        return (["Worldwide"], None, False)
-
-    parts = [part.strip() for part in cleaned.replace(";", ",").split(",") if part.strip()]
-    primary_country = parts[0] if len(parts) == 1 else None
-    return (parts, primary_country, False)
+    primary_country = concrete_parts[0] if len(concrete_parts) == 1 else None
+    return (concrete_parts, primary_country, False)
 
 
 class BaseOpportunityConnector(ABC):

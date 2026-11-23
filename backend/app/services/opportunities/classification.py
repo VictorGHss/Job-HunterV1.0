@@ -694,7 +694,26 @@ def _classify_seniority_level(
         combined_meta & {"intern", "internship", "estagio", "apprentice", "working student"}
         and not title_has_upper
         and not title_has_junior
-        and not (combined_meta & {"senior", "sr", "staff", "principal", "mid", "mid-level", "mid level", "pleno", "lead", "manager", "director", "especialista"})
+        and not has_required_senior_years
+        and not (
+            combined_meta
+            & {
+                "senior",
+                "sr",
+                "staff",
+                "principal",
+                "mid",
+                "mid-level",
+                "mid level",
+                "pleno",
+                "lead",
+                "manager",
+                "director",
+                "especialista",
+                "exec",
+                "executive",
+            }
+        )
         and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
     ):
         return (SeniorityLevel.INTERNSHIP.value, "seniority:meta_internship")
@@ -1299,7 +1318,8 @@ def classify_opportunity(
         (tag_set | meta_tokens) & {"intern", "internship", "estagio", "apprentice", "working student"}
         and not title_is_senior_or_lead
         and not desc_has_senior_req
-        and seniority_level not in UPPER_SENIORITY_LEVELS
+        and seniority_level == SeniorityLevel.INTERNSHIP.value
+        and not ((tag_set | meta_tokens) & _STRUCTURED_UPPER_TOKENS)
         and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
     ):
         reasons.append("tags:internship_without_conflict")
@@ -1392,6 +1412,7 @@ _STRUCTURED_UPPER_TOKENS = frozenset(
         "manager",
         "director",
         "management",
+        "exec",
         "executive",
     }
 )
@@ -1447,8 +1468,12 @@ def reconcile_structured_classification(
         and decision.experience_min_years >= 3
     )
 
-    # 1. Estágio estruturado (somente quando não conflita com nível superior)
-    if not has_upper_signal and bool(all_struct_tokens & _STRUCTURED_INTERNSHIP_TOKENS):
+    # 1. Estágio estruturado (somente quando não conflita com nível superior ou >=3 anos obrigatórios)
+    if (
+        not has_upper_signal
+        and not has_required_senior_years
+        and bool(all_struct_tokens & _STRUCTURED_INTERNSHIP_TOKENS)
+    ):
         opp_type = OpportunityType.INTERNSHIP.value
         emp_type = EmploymentType.INTERNSHIP.value
         sen_level = SeniorityLevel.INTERNSHIP.value
