@@ -677,6 +677,143 @@ def test_dx021_f09_coherence_between_opportunity_type_and_seniority_level(db_ses
     )
 
 
+def test_dx02_aud01_reconcile_structured_classification_canonical_entry_level_and_variants():
+    """
+    Regressão pós-auditoria (DX02-AUD-01): garante reconhecimento do token canônico
+    `entry_level` (com underscore) e variantes, preservando coerência e precedência.
+    """
+    dec_unknown = classify_opportunity(title="Software Engineer", description="Build Python APIs.")
+    assert dec_unknown.opportunity_type == OpportunityType.OTHER.value
+    assert dec_unknown.seniority_level == SeniorityLevel.UNKNOWN.value
+
+    # 1, 2, 3, 5, 6. Variantes de entry_level -> (junior, unknown, entry_level)
+    for token in ("entry_level", "entry-level", "entry level", "graduate", "trainee"):
+        opp_type, emp_type, sen_level = reconcile_structured_classification(
+            dec_unknown,
+            metadata_levels=[token],
+        )
+        assert opp_type == OpportunityType.JUNIOR.value, f"falhou para token={token}"
+        assert emp_type == EmploymentType.UNKNOWN.value, f"falhou para token={token}"
+        assert sen_level == SeniorityLevel.ENTRY_LEVEL.value, f"falhou para token={token}"
+
+    # Token canônico `entry_level` também reconhecido diretamente via classify_opportunity
+    dec_direct_entry = classify_opportunity(
+        title="Software Engineer",
+        description="Build Python APIs.",
+        metadata_levels=["entry_level"],
+    )
+    assert dec_direct_entry.opportunity_type == OpportunityType.JUNIOR.value
+    assert dec_direct_entry.seniority_level == SeniorityLevel.ENTRY_LEVEL.value
+
+    # 4. Token `junior` -> (junior, unknown, junior)
+    assert reconcile_structured_classification(dec_unknown, metadata_levels=["junior"]) == (
+        OpportunityType.JUNIOR.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.JUNIOR.value,
+    )
+
+    # 7. Classificação previamente conhecida não é degradada
+    dec_known_junior = classify_opportunity(
+        title="Junior Backend Developer",
+        description="Build Python APIs.",
+    )
+    assert dec_known_junior.opportunity_type == OpportunityType.JUNIOR.value
+    assert dec_known_junior.seniority_level == SeniorityLevel.JUNIOR.value
+    assert reconcile_structured_classification(
+        dec_known_junior,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.JUNIOR.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.JUNIOR.value,
+    )
+
+    # 8. Precedência de evidências explícitas de senioridade superior
+    dec_senior = classify_opportunity(
+        title="Senior Backend Engineer",
+        description="Architect distributed services.",
+    )
+    assert reconcile_structured_classification(
+        dec_senior,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.OTHER.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.SENIOR.value,
+    )
+
+    dec_mid = classify_opportunity(
+        title="Mid-level Backend Engineer",
+        description="Build distributed services.",
+    )
+    assert reconcile_structured_classification(
+        dec_mid,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.OTHER.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.MID_LEVEL.value,
+    )
+
+    # Conflito nos próprios metadados estruturados: nível superior prevalece
+    assert reconcile_structured_classification(
+        dec_unknown,
+        metadata_levels=["senior", "entry_level"],
+    ) == (
+        OpportunityType.OTHER.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.UNKNOWN.value,
+    )
+
+    # Exigência explícita de >= 3 anos impede promoção para entry_level
+    dec_exp_required = classify_opportunity(
+        title="Backend Developer",
+        description="Requirements: 4+ years of experience in Python required.",
+    )
+    assert reconcile_structured_classification(
+        dec_exp_required,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.OTHER.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.UNKNOWN.value,
+    )
+
+    # 9. Coerência entre opportunity_type=junior e seniority_level=entry_level
+    # mesmo quando a decisão intermediária chegou com opportunity_type=junior e seniority_level=unknown
+    from dataclasses import replace
+
+    dec_incoherent_junior = replace(
+        dec_unknown,
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+    )
+    assert reconcile_structured_classification(
+        dec_incoherent_junior,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.JUNIOR.value,
+        EmploymentType.UNKNOWN.value,
+        SeniorityLevel.ENTRY_LEVEL.value,
+    )
+
+    # 10. Entrada já classificada como estágio permanece estágio
+    dec_internship = classify_opportunity(
+        title="Estágio em Desenvolvimento Backend",
+        description="Atuação com Python e SQL.",
+    )
+    assert dec_internship.opportunity_type == OpportunityType.INTERNSHIP.value
+    assert dec_internship.seniority_level == SeniorityLevel.INTERNSHIP.value
+    assert reconcile_structured_classification(
+        dec_internship,
+        metadata_levels=["entry_level"],
+    ) == (
+        OpportunityType.INTERNSHIP.value,
+        EmploymentType.INTERNSHIP.value,
+        SeniorityLevel.INTERNSHIP.value,
+    )
+
+
 # ==============================================================================
 # DX-F10: Reparo conservador de mojibake
 # ==============================================================================

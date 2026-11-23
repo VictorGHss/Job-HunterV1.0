@@ -729,7 +729,7 @@ def _classify_seniority_level(
         return (SeniorityLevel.MID_LEVEL.value, "seniority:meta_mid_level")
     if combined_meta & {"junior", "jr"} and not has_required_senior_years:
         return (SeniorityLevel.JUNIOR.value, "seniority:meta_or_tag_junior")
-    if combined_meta & {"entry-level", "entry level", "entry", "trainee", "graduate", "early-career", "early career"} and not has_required_senior_years:
+    if combined_meta & {"entry_level", "entry-level", "entry level", "entry", "trainee", "graduate", "early-career", "early career"} and not has_required_senior_years:
         return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:meta_or_tag_entry_level")
 
     return (SeniorityLevel.UNKNOWN.value, "seniority:unspecified_unknown")
@@ -1360,7 +1360,7 @@ def classify_opportunity(
         return _finalize(OpportunityType.JUNIOR.value, "medium")
 
     if (
-        (tag_set | meta_tokens) & {"junior", "jr", "entry-level", "entry level", "trainee", "graduate"}
+        (tag_set | meta_tokens) & {"junior", "jr", "entry_level", "entry-level", "entry level", "trainee", "graduate"}
         and not desc_has_senior_req
     ):
         reasons.append("tags:junior_without_conflict")
@@ -1397,7 +1397,16 @@ _STRUCTURED_UPPER_TOKENS = frozenset(
 )
 _STRUCTURED_JUNIOR_TOKENS = frozenset({"junior", "jr"})
 _STRUCTURED_ENTRY_TOKENS = frozenset(
-    {"entry", "entry-level", "entry level", "trainee", "graduate", "early-career", "early career"}
+    {
+        "entry",
+        "entry_level",
+        "entry-level",
+        "entry level",
+        "trainee",
+        "graduate",
+        "early-career",
+        "early career",
+    }
 )
 
 
