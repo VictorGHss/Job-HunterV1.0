@@ -1581,6 +1581,12 @@ def reclassify_opportunities(
                 new_eligibility_unknown,
             ) = parse_geo_eligibility(opp.location_text)
 
+        geography_changed = (
+            old_eligible != tuple(new_eligible_countries)
+            or old_country != new_country
+            or old_eligibility_unknown != new_eligibility_unknown
+        )
+
         after_counter[new_opp_type] += 1
         after_area_counter[new_area] += 1
         after_seniority_counter[new_sen] += 1
@@ -1614,7 +1620,7 @@ def reclassify_opportunities(
             old_eligibility_unknown,
         ):
             change_reasons = list(decision.reasons)
-            if has_non_country_remote_token:
+            if has_non_country_remote_token and geography_changed:
                 change_reasons.append("geo:normalized_remote_non_country_token")
             changes.append(
                 ReclassificationChange(

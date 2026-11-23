@@ -696,6 +696,7 @@ def test_dx031_reclassify_opportunities_dry_run_and_apply_on_remote_ok_fixtures(
     assert change_rem.new_country is None
     assert change_rem.old_eligibility_unknown is False
     assert change_rem.new_eligibility_unknown is True
+    assert "geo:normalized_remote_non_country_token" in change_rem.reasons
     db_session.expire_all()
     assert db_session.get(Opportunity, opp_fe.id).opportunity_type == OpportunityType.INTERNSHIP.value
     assert db_session.get(Opportunity, opp_sm.id).seniority_level == SeniorityLevel.INTERNSHIP.value
@@ -817,6 +818,7 @@ def test_dx031_2_reclassification_report_and_cli_geographic_diff(
     assert geo_change.new_country is None
     assert geo_change.old_eligibility_unknown is False
     assert geo_change.new_eligibility_unknown is True
+    assert "geo:normalized_remote_non_country_token" in geo_change.reasons
 
     # Localizar change de ambos
     both_change = next(c for c in dry_report.changes if c.opportunity_id == str(opp_both.id))
@@ -826,6 +828,7 @@ def test_dx031_2_reclassification_report_and_cli_geographic_diff(
     assert both_change.new_country == "USA"
     assert both_change.old_eligibility_unknown is False
     assert both_change.new_eligibility_unknown is False
+    assert "geo:normalized_remote_non_country_token" in both_change.reasons
 
     # Imutabilidade do banco comprovada após dry-run
     db_session.expire_all()
@@ -875,3 +878,93 @@ def test_dx031_2_reclassification_report_and_cli_geographic_diff(
     persisted_both = db_session.get(Opportunity, opp_both.id)
     assert persisted_both.eligible_countries == ["USA"]
     assert persisted_both.opportunity_type == OpportunityType.INTERNSHIP.value
+
+
+def test_dx0312_aud01_no_geo_reason_when_geography_unchanged(db_session: Session):
+    src = {s.slug: s for s in ensure_default_sources(db_session)}["remote_ok"]
+    now = datetime.now(UTC)
+
+    # 1. Vaga presencial/híbrida com marcador legado "Remote" em eligible_countries
+    # e inconsistência de classificação (cadastrada como "other/unknown", mas título é Junior Developer)
+    opp_hybrid = Opportunity(
+        source_id=src.id,
+        external_id="dx0312-hybrid-opp",
+        title="Junior Python Developer",
+        company_name="HybridCo",
+        description="Hybrid role working 2 days at the office in São Paulo.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.HYBRID.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        location_text="São Paulo, Brasil",
+        country="Brasil",
+        eligible_countries=["Remote"],
+        eligibility_unknown=False,
+        technologies=["python"],
+        source_url="https://remoteok.com/remote-jobs/dx0312-hybrid",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-dx0312-hybrid",
+        raw_metadata={"source": "remote_ok"},
+    )
+
+    # 2. Vaga remota com marcador legado "Remote" que sofrerá normalização geográfica real
+    opp_remote = Opportunity(
+        source_id=src.id,
+        external_id="dx0312-remote-opp",
+        title="Junior Python Developer",
+        company_name="RemoteCo",
+        description="Remote role.",
+        opportunity_type=OpportunityType.JUNIOR.value,
+        seniority_level=SeniorityLevel.JUNIOR.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        location_text="Remote,",
+        country="Remote",
+        eligible_countries=["Remote"],
+        eligibility_unknown=False,
+        technologies=["python"],
+        source_url="https://remoteok.com/remote-jobs/dx0312-remote",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-dx0312-remote",
+        raw_metadata={"source": "remote_ok"},
+    )
+
+    db_session.add_all([opp_hybrid, opp_remote])
+    db_session.commit()
+
+    report = reclassify_opportunities(db_session, source_slug="remote_ok", dry_run=True)
+    assert report.evaluated_count == 2
+    assert report.updated_count == 2
+
+    # A vaga híbrida sofreu reclassificação de tipo/senioridade:
+    change_hybrid = next(c for c in report.changes if c.opportunity_id == str(opp_hybrid.id))
+    assert change_hybrid.old_opportunity_type == OpportunityType.OTHER.value
+    assert change_hybrid.new_opportunity_type == OpportunityType.JUNIOR.value
+    assert change_hybrid.old_seniority_level == SeniorityLevel.UNKNOWN.value
+    assert change_hybrid.new_seniority_level == SeniorityLevel.JUNIOR.value
+    # A geografia permaneceu absolutamente inalterada:
+    assert change_hybrid.old_eligible_countries == ("Remote",)
+    assert change_hybrid.new_eligible_countries == ("Remote",)
+    assert change_hybrid.old_country == "Brasil"
+    assert change_hybrid.new_country == "Brasil"
+    assert change_hybrid.old_eligibility_unknown is False
+    assert change_hybrid.new_eligibility_unknown is False
+    # DX0312-AUD-01: Não deve incluir justificativa geográfica falsa:
+    assert "geo:normalized_remote_non_country_token" not in change_hybrid.reasons
+
+    # A vaga remota sofreu normalização geográfica real:
+    change_remote = next(c for c in report.changes if c.opportunity_id == str(opp_remote.id))
+    assert change_remote.old_eligible_countries == ("Remote",)
+    assert change_remote.new_eligible_countries == ()
+    assert change_remote.old_country == "Remote"
+    assert change_remote.new_country is None
+    assert change_remote.old_eligibility_unknown is False
+    assert change_remote.new_eligibility_unknown is True
+    # Preserva comportamento positivo: deve incluir a razão quando a geografia realmente mudou:
+    assert "geo:normalized_remote_non_country_token" in change_remote.reasons

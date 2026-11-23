@@ -16,10 +16,12 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 - **Transparência e exibição integral de alterações no CLI (`cli.py`):**
   - Removido o filtro condicional restritivo em `handle_reclassify_opportunities` que suprimia alterações quando `new_employment_type == "unknown"` e os demais campos estruturais permaneciam inalterados, eliminando o ponto cego sobre modificações puramente geográficas.
   - O comando `reclassify-opportunities` passou a exibir o diff de classificação e a linha detalhada de diff geográfico (`geo: eligible_countries=... -> ... | country=... -> ... | eligibility_unknown=... -> ...`) para todas as oportunidades alteradas.
+- **Correção de justificativa geográfica no relatório (`DX0312-AUD-01` / `sync_service.py`):**
+  - A razão `"geo:normalized_remote_non_country_token"` passou a ser adicionada a `reasons` exclusivamente quando houve alteração geográfica efetiva (`eligible_countries`, `country` ou `eligibility_unknown`), evitando justificativas enganosas em vagas híbridas ou presenciais onde a geografia permaneceu inalterada.
 
 ### Testes
 
-- `backend/tests/test_dx031_geography_remoteok.py`: novos testes de regressão cobrindo o preenchimento dos campos geográficos em `ReclassificationChange`, exibição no CLI de mudanças exclusivamente geográficas e com `employment_type="unknown"`, e garantia de imutabilidade do banco de dados na simulação `--dry-run`.
+- `backend/tests/test_dx031_geography_remoteok.py`: novos testes de regressão cobrindo o preenchimento dos campos geográficos em `ReclassificationChange`, exibição no CLI de mudanças exclusivamente geográficas e com `employment_type="unknown"`, garantia de imutabilidade do banco de dados na simulação `--dry-run`, e verificação da exclusão da razão geográfica quando a geografia permanece inalterada (`DX0312-AUD-01`).
 
 ---
 
