@@ -7,7 +7,10 @@ from app.models.opportunity import (
     SourceType,
     WorkMode,
 )
-from app.services.opportunities.classification import classify_opportunity
+from app.services.opportunities.classification import (
+    classify_opportunity,
+    reconcile_structured_classification,
+)
 from app.services.opportunities.connectors.base import (
     BaseOpportunityConnector,
     CollectionBatch,
@@ -171,8 +174,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
                 tags=tags,
                 description=description,
             )
-            opp_type = decision.opportunity_type
-            emp_type = decision.employment_type
+            opp_type, emp_type, sen_level = reconcile_structured_classification(decision)
             raw_location = sanitize_plain_text(item.get("location"))
             eligible_countries, country, eligibility_unknown = parse_geo_eligibility(
                 raw_location
@@ -219,7 +221,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     source_status=ExternalSourceStatus.ACTIVE.value,
                     professional_area=decision.professional_area,
                     secondary_areas=list(decision.secondary_areas),
-                    seniority_level=decision.seniority_level,
+                    seniority_level=sen_level,
                     experience_requirement_mode=decision.experience_requirement_mode,
                     experience_min_years=decision.experience_min_years,
                     experience_preferred_years=decision.experience_preferred_years,

@@ -414,21 +414,211 @@ def _normalize_contract_label(label: str) -> str:
     return lower
 
 
+_NON_COUNTRY_REMOTE_TOKENS = frozenset(
+    {
+        "remote",
+        "remoto",
+        "remote work",
+        "telecommute",
+        "work from home",
+        "home office",
+        "fully remote",
+        "100% remote",
+        "remote only",
+        "remote-only",
+    }
+)
+
+_LATAM_REGION_TOKENS = frozenset(
+    {
+        "latam",
+        "latin america",
+        "south america",
+        "america latina",
+        "americas",
+        "south & central america",
+    }
+)
+
+_CANONICAL_COUNTRY_ALIASES: dict[str, str] = {
+    "brasil": "Brazil",
+    "brazil": "Brazil",
+    "br": "Brazil",
+    "brunei": "Brunei",
+    "brunei darussalam": "Brunei",
+    "canada": "Canada",
+    "ca": "Canada",
+    "usa": "United States",
+    "us": "United States",
+    "u.s.": "United States",
+    "u.s.a.": "United States",
+    "united states": "United States",
+    "united states of america": "United States",
+    "estados unidos": "United States",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "united kingdom": "United Kingdom",
+    "great britain": "United Kingdom",
+    "england": "United Kingdom",
+    "reino unido": "United Kingdom",
+    "portugal": "Portugal",
+    "pt": "Portugal",
+    "germany": "Germany",
+    "alemanha": "Germany",
+    "de": "Germany",
+    "spain": "Spain",
+    "espanha": "Spain",
+    "es": "Spain",
+    "france": "France",
+    "franca": "France",
+    "fr": "France",
+    "italy": "Italy",
+    "italia": "Italy",
+    "netherlands": "Netherlands",
+    "holanda": "Netherlands",
+    "australia": "Australia",
+    "au": "Australia",
+    "india": "India",
+    "singapore": "Singapore",
+    "philippines": "Philippines",
+    "ukraine": "Ukraine",
+    "argentina": "Argentina",
+    "mexico": "Mexico",
+    "chile": "Chile",
+    "colombia": "Colombia",
+    "uruguay": "Uruguay",
+    "uruguai": "Uruguay",
+    "peru": "Peru",
+    "poland": "Poland",
+    "ireland": "Ireland",
+}
+
+# Países canônicos que admitem correspondência segura por fronteira de palavra dentro de
+# frases de localização (ex.: "EST United States", "Remote - Brazil"). Códigos ISO de 2
+# letras (como "br", "us", "ca") NUNCA entram aqui para impedir falsos positivos por substring.
+_SAFE_MULTIWORD_COUNTRY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?<![a-z0-9])(?:brasil|brazil)(?![a-z0-9])"), "Brazil"),
+    (re.compile(r"(?<![a-z0-9])brunei(?:\s+darussalam)?(?![a-z0-9])"), "Brunei"),
+    (re.compile(r"(?<![a-z0-9])canada(?![a-z0-9])"), "Canada"),
+    (re.compile(r"(?<![a-z0-9])(?:united\s+states(?:\s+of\s+america)?|estados\s+unidos|usa)(?![a-z0-9])"), "United States"),
+    (re.compile(r"(?<![a-z0-9])(?:united\s+kingdom|great\s+britain|reino\s+unido)(?![a-z0-9])"), "United Kingdom"),
+    (re.compile(r"(?<![a-z0-9])portugal(?![a-z0-9])"), "Portugal"),
+    (re.compile(r"(?<![a-z0-9])(?:germany|alemanha)(?![a-z0-9])"), "Germany"),
+    (re.compile(r"(?<![a-z0-9])(?:spain|espanha)(?![a-z0-9])"), "Spain"),
+    (re.compile(r"(?<![a-z0-9])(?:france|franca)(?![a-z0-9])"), "France"),
+    (re.compile(r"(?<![a-z0-9])(?:italy|italia)(?![a-z0-9])"), "Italy"),
+    (re.compile(r"(?<![a-z0-9])(?:netherlands|holanda)(?![a-z0-9])"), "Netherlands"),
+    (re.compile(r"(?<![a-z0-9])australia(?![a-z0-9])"), "Australia"),
+    (re.compile(r"(?<![a-z0-9])india(?![a-z0-9])"), "India"),
+    (re.compile(r"(?<![a-z0-9])singapore(?![a-z0-9])"), "Singapore"),
+    (re.compile(r"(?<![a-z0-9])philippines(?![a-z0-9])"), "Philippines"),
+    (re.compile(r"(?<![a-z0-9])ukraine(?![a-z0-9])"), "Ukraine"),
+    (re.compile(r"(?<![a-z0-9])argentina(?![a-z0-9])"), "Argentina"),
+    (re.compile(r"(?<![a-z0-9])mexico(?![a-z0-9])"), "Mexico"),
+    (re.compile(r"(?<![a-z0-9])chile(?![a-z0-9])"), "Chile"),
+    (re.compile(r"(?<![a-z0-9])colombia(?![a-z0-9])"), "Colombia"),
+    (re.compile(r"(?<![a-z0-9])(?:uruguay|uruguai)(?![a-z0-9])"), "Uruguay"),
+    (re.compile(r"(?<![a-z0-9])peru(?![a-z0-9])"), "Peru"),
+)
+
+
+def classify_geographic_token(value: str | None) -> tuple[str | None, str]:
+    """
+    Classifica uma string de localidade/país de forma determinística e segura,
+    sem correspondência por substring curta (ex.: `"br"` nunca casa com `"Brunei"`
+    ou `"British Columbia"`).
+
+    Retorna `(canonical_value, kind)` onde `kind` é:
+    - `"country"`: país canônico reconhecido (ex.: `"Brazil"`, `"Brunei"`, `"Canada"`).
+    - `"worldwide"`: região global explícita (`"Worldwide"`).
+    - `"region"`: macrorregião explícita não-país (ex.: `"LATAM"`).
+    - `"non_country"`: marcador de modalidade remota sem país (ex.: `"Remote"`).
+    - `"unknown"`: localidade/país não mapeado ou vazio.
+    """
+    norm = normalize_classification_text(value)
+    if not norm:
+        return (None, "unknown")
+
+    if norm in _NON_COUNTRY_REMOTE_TOKENS:
+        return (None, "non_country")
+
+    if norm in _WORLDWIDE_TOKENS or bool(
+        re.search(r"(?<![a-z0-9])(?:worldwide|anywhere|work\s+from\s+anywhere|global)(?![a-z0-9])", norm)
+    ):
+        return ("Worldwide", "worldwide")
+
+    if norm in _LATAM_REGION_TOKENS or bool(
+        re.search(r"(?<![a-z0-9])(?:latam|latin\s+america|south\s+america|america\s+latina)(?![a-z0-9])", norm)
+    ):
+        return ("LATAM", "region")
+
+    # 1. Correspondência exata do token inteiro (inclui códigos ISO de 2 letras como "br" isolado)
+    if norm in _CANONICAL_COUNTRY_ALIASES:
+        return (_CANONICAL_COUNTRY_ALIASES[norm], "country")
+
+    # 2. Localidades compostas separadas por vírgula / ponto-e-vírgula / barra / pipe
+    # (ex.: "British Columbia, Canada", "Toronto, Canada", "São Paulo, Brasil", "Remote, USA")
+    parts = [
+        p.strip(" \t\r\n-–—()")
+        for p in re.split(r"[,;/|]", norm)
+        if p.strip(" \t\r\n-–—()")
+    ]
+    meaningful_parts = [p for p in parts if p not in _NON_COUNTRY_REMOTE_TOKENS]
+    if not meaningful_parts:
+        return (None, "non_country")
+
+    # Inspeciona da direita para a esquerda (em endereços "Cidade, Estado, País", o país vem por último)
+    for part in reversed(meaningful_parts):
+        if part in _CANONICAL_COUNTRY_ALIASES:
+            return (_CANONICAL_COUNTRY_ALIASES[part], "country")
+        if part in _WORLDWIDE_TOKENS:
+            return ("Worldwide", "worldwide")
+        if part in _LATAM_REGION_TOKENS:
+            return ("LATAM", "region")
+
+    # 3. Correspondência por fronteira de palavra apenas para nomes completos de países (>= 3 letras)
+    for part in reversed(meaningful_parts):
+        for pattern, canonical in _SAFE_MULTIWORD_COUNTRY_PATTERNS:
+            if pattern.search(part):
+                return (canonical, "country")
+
+    return (None, "unknown")
+
+
+def resolve_canonical_country(value: str | None) -> str | None:
+    """Retorna o nome canônico do país quando identificável, ou None para não-países/regiões."""
+    canonical, kind = classify_geographic_token(value)
+    return canonical if kind == "country" else None
+
+
 def _is_brazil(value: str | None) -> bool:
-    if not value:
-        return False
-    return value.strip().lower() in _BRAZIL_SYNONYMS
+    canonical, kind = classify_geographic_token(value)
+    return kind == "country" and canonical == "Brazil"
 
 
 def _region_matches_user(region_text: str, user_country: str) -> bool:
-    token = region_text.strip().lower()
-    if not token:
+    canonical_region, region_kind = classify_geographic_token(region_text)
+    if region_kind == "non_country":
         return False
-    if token in _WORLDWIDE_TOKENS or any(w in token for w in ("worldwide", "anywhere", "global")):
+    if region_kind == "worldwide":
         return True
-    if _is_brazil(user_country):
-        return any(syn in token for syn in _BRAZIL_SYNONYMS)
-    return user_country in token or token in user_country
+
+    user_canonical, user_kind = classify_geographic_token(user_country)
+    if user_kind == "country" and user_canonical == "Brazil":
+        if region_kind == "country" and canonical_region == "Brazil":
+            return True
+        if region_kind == "region" and canonical_region == "LATAM":
+            return True
+        return False
+
+    if user_kind == "country" and region_kind == "country":
+        return canonical_region == user_canonical
+
+    region_norm = normalize_classification_text(region_text)
+    user_norm = normalize_classification_text(user_country)
+    if not region_norm or not user_norm:
+        return False
+    return region_norm == user_norm
 
 
 def resolve_opportunity_areas(opportunity: Opportunity) -> tuple[str, list[str]]:
@@ -625,9 +815,18 @@ def _evaluate_geography(
         )
         return ("eligible", inclusions, exclusions)
 
-    regions = list(opportunity.eligible_countries or [])
-    if opportunity.country and opportunity.country not in regions:
-        regions.append(opportunity.country)
+    raw_regions = list(opportunity.eligible_countries or [])
+    if opportunity.country and opportunity.country not in raw_regions:
+        raw_regions.append(opportunity.country)
+
+    # Remove marcadores puramente de modalidade remota (ex.: "Remote", "Remoto") que não representam país
+    regions: list[str] = []
+    for r in raw_regions:
+        _, r_kind = classify_geographic_token(r)
+        if r_kind == "non_country":
+            continue
+        if r and r.strip():
+            regions.append(r.strip())
 
     meta = getattr(opportunity, "raw_metadata", None)
     tz_restrictions = meta.get("timezone_restrictions") if isinstance(meta, dict) else None
@@ -647,7 +846,28 @@ def _evaluate_geography(
             )
         return ("unknown", inclusions, exclusions)
 
-    if any(_region_matches_user(region, user_country) for region in regions):
+    # Separa marcadores globais de países concretos para impedir que "Worldwide" sobrescreva
+    # uma restrição explícita conflitante de outro país (ex.: ["Worldwide", "USA"]).
+    user_canonical, _ = classify_geographic_token(user_country)
+    has_worldwide = False
+    explicit_non_matching_countries: list[str] = []
+    has_direct_match = False
+
+    for region in regions:
+        r_canonical, r_kind = classify_geographic_token(region)
+        if r_kind == "worldwide":
+            has_worldwide = True
+            continue
+        if _region_matches_user(region, user_country):
+            has_direct_match = True
+        elif r_kind == "country" and r_canonical != user_canonical:
+            explicit_non_matching_countries.append(region)
+
+    region_is_compatible = has_direct_match or (
+        has_worldwide and not explicit_non_matching_countries
+    )
+
+    if region_is_compatible:
         inclusions.append(
             f"Elegibilidade remota compatível com o perfil ({', '.join(regions[:2])})."
         )
