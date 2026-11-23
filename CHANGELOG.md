@@ -6,6 +6,21 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-03.1.3] - 2026-11-23 — Bloqueio de conflitos de senioridade em tags
+
+### Corrigido
+
+- **Simetria nas regras baseadas em tags (`classification.py`):**
+  - Consolidado `_STRUCTURED_UPPER_TOKENS` como fonte única de verdade para sinais superiores conflitantes (`senior`, `sr`, `staff`, `principal`, `mid`, `mid-level`, `pleno`, `lead`, `manager`, `director`, `especialista`, `exec`, `executive`, `management`), eliminando a lista duplicada em `_classify_seniority_level()`.
+  - Bloqueada a inferência de `junior` e `entry_level` por tags/metadados (`seniority:meta_or_tag_junior`, `seniority:meta_or_tag_entry_level` e `tags:junior_without_conflict`) quando há conflito com `_STRUCTURED_UPPER_TOKENS`, alinhando-as à proteção já aplicada em `seniority:meta_internship`.
+  - Preservadas integralmente a precedência de declarações explícitas no título e na descrição, os requisitos de experiência e os atributos geográficos.
+
+### Testes
+
+- `backend/tests/test_dx0313_conflicting_seniority_tags.py`: 17 testes de regressão cobrindo conflitos de tags (`junior`/`entry_level`/`internship` + `exec`/`senior`/`mid-level`/`executive`), reprodução dos 7 registros investigados do Remote OK, preservação de títulos/descrições explícitas, outras fontes e `reclassify_opportunities(..., dry_run=True)`.
+
+---
+
 ## [DX-03.1.2] - 2026-11-23 — Aprimoramento do relatório de reclassificação geográfica
 
 ### Modificado
