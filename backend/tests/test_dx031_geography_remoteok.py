@@ -203,6 +203,190 @@ def test_dx031_a_brunei_and_british_columbia_never_match_brazil():
 
 
 # ==============================================================================
+# DX-03.1.1 (DX031-AUD-01): Códigos ISO-2 ambíguos em localidades compostas
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected_canonical", "expected_kind"),
+    [
+        # Códigos ISO-2 isolados continuam reconhecidos
+        ("BR", "Brazil", "country"),
+        ("CA", "Canada", "country"),
+        ("DE", "Germany", "country"),
+        ("ES", "Spain", "country"),
+        ("US", "United States", "country"),
+        # Localidades compostas com abreviação subnacional NÃO podem virar outro país
+        ("San Francisco, CA", None, "unknown"),
+        ("Wilmington, DE", None, "unknown"),
+        ("Vitória, ES", None, "unknown"),
+        ("Toronto, ON", None, "unknown"),
+        ("Georgia", None, "unknown"),
+        # Localidades compostas com país explícito são corretamente resolvidas
+        ("San Francisco, CA, USA", "United States", "country"),
+        ("Wilmington, DE, USA", "United States", "country"),
+        ("Vitória, ES, Brasil", "Brazil", "country"),
+        ("California, USA", "United States", "country"),
+        ("Georgia, USA", "United States", "country"),
+        ("Toronto, Canada", "Canada", "country"),
+        # Códigos não ambíguos com Remote
+        ("Remote, US", "United States", "country"),
+        ("Remote, USA", "United States", "country"),
+        ("Remote, BR", "Brazil", "country"),
+    ],
+)
+def test_dx031_1_aud01_ambiguous_iso2_codes_and_compound_locations(
+    raw_value: str, expected_canonical: str | None, expected_kind: str
+):
+    assert classify_geographic_token(raw_value) == (expected_canonical, expected_kind)
+    if expected_kind == "country":
+        assert resolve_canonical_country(raw_value) == expected_canonical
+    else:
+        assert resolve_canonical_country(raw_value) is None
+
+
+def test_dx031_1_aud01_full_pipeline_parse_geo_and_matching_preserves_context():
+    # Fluxo real: parse_geo_eligibility("San Francisco, CA") -> ["San Francisco", "CA"].
+    # _evaluate_geography NÃO pode interpretar "CA" como Canadá nem "ES" como Espanha.
+    profile_ca = ProfessionalProfile(
+        full_name="Perfil Canada",
+        professional_email="ca@example.com",
+        city="Toronto",
+        state="ON",
+        country="Canada",
+        preferences=default_career_preferences(),
+    )
+    ec_sf, c_sf, unk_sf = parse_geo_eligibility("San Francisco, CA")
+    opp_sf = _make_opp(
+        location_text="San Francisco, CA",
+        country=c_sf,
+        eligible_countries=ec_sf,
+        eligibility_unknown=unk_sf,
+    )
+    assert evaluate_opportunity_for_user(opp_sf, profile_ca).geographic_eligibility == "excluded"
+
+    # Perfil na Espanha NÃO pode dar match com "Vitória, ES" (Espírito Santo, Brasil)
+    profile_es = ProfessionalProfile(
+        full_name="Perfil Spain",
+        professional_email="es@example.com",
+        city="Madrid",
+        state=None,
+        country="Spain",
+        preferences=default_career_preferences(),
+    )
+    ec_vit, c_vit, unk_vit = parse_geo_eligibility("Vitória, ES")
+    opp_vit = _make_opp(
+        location_text="Vitória, ES",
+        country=c_vit,
+        eligible_countries=ec_vit,
+        eligibility_unknown=unk_vit,
+    )
+    assert evaluate_opportunity_for_user(opp_vit, profile_es).geographic_eligibility == "excluded"
+
+    # Perfil na Alemanha NÃO pode dar match com "Wilmington, DE" (Delaware, EUA)
+    profile_de = ProfessionalProfile(
+        full_name="Perfil Germany",
+        professional_email="de@example.com",
+        city="Berlin",
+        state=None,
+        country="Germany",
+        preferences=default_career_preferences(),
+    )
+    ec_de, c_de, unk_de = parse_geo_eligibility("Wilmington, DE")
+    opp_de = _make_opp(
+        location_text="Wilmington, DE",
+        country=c_de,
+        eligible_countries=ec_de,
+        eligibility_unknown=unk_de,
+    )
+    assert evaluate_opportunity_for_user(opp_de, profile_de).geographic_eligibility == "excluded"
+
+    # Código isolado ["CA"] continua elegível para Canadá; ["Vitória", "ES", "Brasil"] para Brasil
+    opp_iso_ca = _make_opp(eligible_countries=["CA"])
+    assert evaluate_opportunity_for_user(opp_iso_ca, profile_ca).geographic_eligibility == "eligible"
+
+    profile_br = _make_brazil_profile()
+    ec_vit_br, c_vit_br, unk_vit_br = parse_geo_eligibility("Vitória, ES, Brasil")
+    opp_vit_br = _make_opp(
+        location_text="Vitória, ES, Brasil",
+        country=c_vit_br,
+        eligible_countries=ec_vit_br,
+        eligibility_unknown=unk_vit_br,
+    )
+    assert evaluate_opportunity_for_user(opp_vit_br, profile_br).geographic_eligibility == "eligible"
+
+
+# ==============================================================================
+# DX-03.1.1 (DX031-AUD-02): Precedência de restrições concretas sobre Worldwide
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected_canonical", "expected_kind"),
+    [
+        ("Worldwide", "Worldwide", "worldwide"),
+        ("Remote, Worldwide", "Worldwide", "worldwide"),
+        ("Worldwide, USA", "United States", "country"),
+        ("USA, Worldwide", "United States", "country"),
+        ("Worldwide, Canada", "Canada", "country"),
+        ("Worldwide, Brazil", "Brazil", "country"),
+        ("Worldwide, LATAM", "LATAM", "region"),
+        ("LATAM", "LATAM", "region"),
+    ],
+)
+def test_dx031_1_aud02_worldwide_precedence_in_single_string(
+    raw_value: str, expected_canonical: str | None, expected_kind: str
+):
+    assert classify_geographic_token(raw_value) == (expected_canonical, expected_kind)
+
+
+def test_dx031_1_aud02_worldwide_with_concrete_restrictions_in_matching_flow():
+    profile_br = _make_brazil_profile()
+    profile_de = ProfessionalProfile(
+        full_name="Perfil Germany",
+        professional_email="de@example.com",
+        city="Berlin",
+        state=None,
+        country="Germany",
+        preferences=default_career_preferences(),
+    )
+
+    # String única em eligible_countries e em country: restrição concreta de outro país exclui Brasil
+    for conflicting in ("Worldwide, USA", "USA, Worldwide", "Worldwide, Canada"):
+        opp_ec = _make_opp(eligible_countries=[conflicting])
+        ev_ec = evaluate_opportunity_for_user(opp_ec, profile_br)
+        assert ev_ec.geographic_eligibility == "excluded", conflicting
+        assert ev_ec.eligible is False, conflicting
+
+        opp_country = _make_opp(country=conflicting, eligible_countries=[])
+        ev_c = evaluate_opportunity_for_user(opp_country, profile_br)
+        assert ev_c.geographic_eligibility == "excluded", conflicting
+        assert ev_c.eligible is False, conflicting
+
+    # Lista separada ["Worldwide", "USA"] produz a mesma decisão coerente
+    opp_list = _make_opp(eligible_countries=["Worldwide", "USA"])
+    assert evaluate_opportunity_for_user(opp_list, profile_br).geographic_eligibility == "excluded"
+
+    # "Worldwide, Brazil" continua elegível para Brasil (pela restrição concreta Brazil)
+    opp_ww_br = _make_opp(eligible_countries=["Worldwide, Brazil"])
+    assert evaluate_opportunity_for_user(opp_ww_br, profile_br).geographic_eligibility == "eligible"
+    assert evaluate_opportunity_for_user(opp_ww_br, profile_de).geographic_eligibility == "excluded"
+
+    # "Worldwide" e "Remote, Worldwide" continuam globais (elegíveis para Brasil e Alemanha)
+    for global_val in (["Worldwide"], ["Remote, Worldwide"], ["Remote", "Worldwide"]):
+        opp_g = _make_opp(eligible_countries=global_val)
+        assert evaluate_opportunity_for_user(opp_g, profile_br).geographic_eligibility == "eligible", global_val
+        assert evaluate_opportunity_for_user(opp_g, profile_de).geographic_eligibility == "eligible", global_val
+
+    # "Worldwide, LATAM" (string e lista) respeita a restrição regional LATAM:
+    # elegível para Brasil, mas NÃO global irrestrito para Alemanha
+    for latam_val in (["Worldwide, LATAM"], ["Worldwide", "LATAM"]):
+        opp_latam = _make_opp(eligible_countries=latam_val)
+        assert evaluate_opportunity_for_user(opp_latam, profile_br).geographic_eligibility == "eligible", latam_val
+        assert evaluate_opportunity_for_user(opp_latam, profile_de).geographic_eligibility == "excluded", latam_val
+
+
+# ==============================================================================
 # DX-03.1-B: Interpretação conservadora de "Remote" / "Remote,"
 # ==============================================================================
 
