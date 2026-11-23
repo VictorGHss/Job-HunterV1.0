@@ -659,6 +659,45 @@ def classify_experience_requirements(
     )
 
 
+_STRUCTURED_INTERNSHIP_TOKENS = frozenset(
+    {"intern", "internship", "estagio", "estagiario", "estagiaria", "apprentice", "working student"}
+)
+_STRUCTURED_UPPER_TOKENS = frozenset(
+    {
+        "pleno",
+        "mid",
+        "mid-level",
+        "mid level",
+        "mid-senior",
+        "intermediate",
+        "senior",
+        "sr",
+        "especialista",
+        "staff",
+        "principal",
+        "lead",
+        "manager",
+        "director",
+        "management",
+        "exec",
+        "executive",
+    }
+)
+_STRUCTURED_JUNIOR_TOKENS = frozenset({"junior", "jr"})
+_STRUCTURED_ENTRY_TOKENS = frozenset(
+    {
+        "entry",
+        "entry_level",
+        "entry-level",
+        "entry level",
+        "trainee",
+        "graduate",
+        "early-career",
+        "early career",
+    }
+)
+
+
 def _classify_seniority_level(
     *,
     norm_title: str,
@@ -695,25 +734,7 @@ def _classify_seniority_level(
         and not title_has_upper
         and not title_has_junior
         and not has_required_senior_years
-        and not (
-            combined_meta
-            & {
-                "senior",
-                "sr",
-                "staff",
-                "principal",
-                "mid",
-                "mid-level",
-                "mid level",
-                "pleno",
-                "lead",
-                "manager",
-                "director",
-                "especialista",
-                "exec",
-                "executive",
-            }
-        )
+        and not (combined_meta & _STRUCTURED_UPPER_TOKENS)
         and not _FREELANCE_BODY_EXPLICIT_RE.search(norm_desc)
     ):
         return (SeniorityLevel.INTERNSHIP.value, "seniority:meta_internship")
@@ -746,9 +767,17 @@ def _classify_seniority_level(
         return (SeniorityLevel.SENIOR.value, "seniority:meta_senior")
     if meta_tokens & {"mid", "mid-level", "mid level", "pleno", "intermediate"}:
         return (SeniorityLevel.MID_LEVEL.value, "seniority:meta_mid_level")
-    if combined_meta & {"junior", "jr"} and not has_required_senior_years:
+    if (
+        combined_meta & _STRUCTURED_JUNIOR_TOKENS
+        and not has_required_senior_years
+        and not (combined_meta & _STRUCTURED_UPPER_TOKENS)
+    ):
         return (SeniorityLevel.JUNIOR.value, "seniority:meta_or_tag_junior")
-    if combined_meta & {"entry_level", "entry-level", "entry level", "entry", "trainee", "graduate", "early-career", "early career"} and not has_required_senior_years:
+    if (
+        combined_meta & _STRUCTURED_ENTRY_TOKENS
+        and not has_required_senior_years
+        and not (combined_meta & _STRUCTURED_UPPER_TOKENS)
+    ):
         return (SeniorityLevel.ENTRY_LEVEL.value, "seniority:meta_or_tag_entry_level")
 
     return (SeniorityLevel.UNKNOWN.value, "seniority:unspecified_unknown")
@@ -1382,6 +1411,7 @@ def classify_opportunity(
     if (
         (tag_set | meta_tokens) & {"junior", "jr", "entry_level", "entry-level", "entry level", "trainee", "graduate"}
         and not desc_has_senior_req
+        and not ((tag_set | meta_tokens) & _STRUCTURED_UPPER_TOKENS)
     ):
         reasons.append("tags:junior_without_conflict")
         return _finalize(OpportunityType.JUNIOR.value, "medium")
@@ -1390,45 +1420,6 @@ def classify_opportunity(
     reasons.append("fallback:senior_mid_or_generic_other")
     confidence = "high" if desc_has_senior_req else "medium"
     return _finalize(OpportunityType.OTHER.value, confidence)
-
-
-_STRUCTURED_INTERNSHIP_TOKENS = frozenset(
-    {"intern", "internship", "estagio", "estagiario", "estagiaria", "apprentice", "working student"}
-)
-_STRUCTURED_UPPER_TOKENS = frozenset(
-    {
-        "pleno",
-        "mid",
-        "mid-level",
-        "mid level",
-        "mid-senior",
-        "intermediate",
-        "senior",
-        "sr",
-        "especialista",
-        "staff",
-        "principal",
-        "lead",
-        "manager",
-        "director",
-        "management",
-        "exec",
-        "executive",
-    }
-)
-_STRUCTURED_JUNIOR_TOKENS = frozenset({"junior", "jr"})
-_STRUCTURED_ENTRY_TOKENS = frozenset(
-    {
-        "entry",
-        "entry_level",
-        "entry-level",
-        "entry level",
-        "trainee",
-        "graduate",
-        "early-career",
-        "early career",
-    }
-)
 
 
 def reconcile_structured_classification(
