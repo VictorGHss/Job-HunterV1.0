@@ -6,6 +6,60 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-03.2.1-C1] - 2026-11-25 — Correções pós-auditoria da normalização semântica
+
+### Corrigido
+
+- **M-01 — Recomposição determinística de `Opportunity.technologies` em atualizações (`sync_service.py`, `technology_normalization.py`):**
+  - Adicionados `extract_link_technologies_from_metadata()`, `deduplicate_technologies_preserving_order()` e `_recompose_opportunity_technologies()` aplicados de forma unificada nos Casos 1, 2 e 3 de `_upsert_opportunity()`.
+  - Corrigida a perda de tecnologias agregadas de fontes secundárias quando a fonte primária (ex.: Jobicy ou Himalayas com `technologies=[]`) é re-sincronizada posteriormente.
+  - Garantida a remoção de tecnologias obsoletas que deixaram de constar na fonte primária ou secundária quando a proveniência de todos os vínculos é reconstruível, com política explícita de preservação conservadora para vínculos legados sem metadados originais suficientes.
+- **B-01 — Desambiguação de `HashiCorp Nomad` (`technology_normalization.py`):**
+  - Substituída a entrada sombreada `("Nomad", ("nomad",))` por `("HashiCorp Nomad", ("hashicorp nomad",))`, mantendo `nomad` isolado e `digital nomad` rejeitados em fontes ruidosas.
+- **B-02 — Simetria semântica no fallback em memória (`matching.py`, `technology_normalization.py`, `classification.py`, `sync_service.py`, `jobicy.py`):**
+  - Introduzido o contrato compartilhado `extract_primary_classification_signals()` separando `area_tags` e `seniority_tags` exclusivamente a partir dos metadados da fonte primária (sem misturar vínculos secundários).
+  - `resolve_opportunity_areas()` e `resolve_opportunity_seniority_and_experience()` passaram a reutilizar esse contrato (incluindo `categories` do Himalayas e `raw_tags` do Remote OK sob DX-03.1.3), mantendo `job_industry` do Jobicy restrito à dimensão de área profissional (nunca alimentando senioridade).
+- **OBS-01 — Eliminação de corroboração tautológica pelo título em `_is_safe_composite_match()` (`sync_service.py`):**
+  - Removida a chamada a `extract_technologies_from_title()` na interseção técnica de deduplicação, bloqueando falsos positivos com termos homônimos (`Swift`, `Dart`, `Ruby`, `Java`, `Scala`).
+  - Substituída por corroboração assimétrica estrita em vagas de área técnica (`TECH_TARGET_AREAS`), verificando tecnologias efetivamente declaradas por um provedor contra a descrição substantiva do outro quando apenas um lado declara `technologies`.
+- **OBS-02 — Documentação de postura conservadora para `.NET` com espaço:**
+  - Mantida a recusa de `". Net"` com espaço em `extract_technologies_from_title()` para evitar falsos positivos com pontuação comum (ex.: `"Engineer. Net salary"`), preservando o reconhecimento de `.NET`.
+
+### Testes
+
+- `backend/tests/test_dx0321_semantic_tag_normalization.py`: adicionados testes dedicados cobrindo `HashiCorp Nomad` vs `Nomad`/`digital nomad` (B-01), fallback em memória no `matching.py` para Himalayas/Jobicy/Remote OK/legado/multi-vínculo (B-02), cenários cross-source C, E1, E2, E3, ordem inversa com Himalayas e preservação conservadora de vínculos legados (M-01/B-03), bloqueio de homônimos em `_is_safe_composite_match()` (OBS-01) e comportamento conservador de `. Net` (OBS-02).
+
+---
+
+## [DX-03.2.1] - 2026-11-25 — Preservação de proveniência e normalização semântica de tecnologias
+
+### Adicionado
+
+- **Normalizador semântico compartilhado (`backend/app/services/opportunities/technology_normalization.py`):**
+  - Introduzidos `preserve_raw_string_list`, `preserve_raw_industry`, `canonicalize_technology_token`, `normalize_technologies`, `extract_technologies_from_title` e `merge_normalized_technologies`.
+  - Canonicalização determinística de aliases conhecidos (ex.: `python` → `Python`, `nodejs` → `Node.js`, `React.js` → `React`, `postgres` → `PostgreSQL`, `k8s` → `Kubernetes`, `dotnet` → `.NET`), deduplicação case-insensitive e preservação da ordem determinística.
+  - Exclusão explícita de cargos, setores econômicos, senioridade, modalidades, lifestyle, vínculos contratuais, funções genéricas e labels administrativas de `Opportunity.technologies`.
+  - Tratamento conservador de termos curtos ambíguos (`C`, `R`, `Go`, `AI`, `.NET`, `C++`, `C#`), sem perder tecnologias legítimas de nicho nem competências técnicas curadas em repositórios GitHub BR (`DDD`, `SOLID`, `Clean Architecture`, `Testes automatizados`).
+
+### Modificado
+
+- **Preservação de proveniência por fonte nos conectores (`remote_ok.py`, `himalayas.py`, `jobicy.py`, `github_vagas.py`):**
+  - **Remote OK:** preserva a lista original completa em `raw_metadata["raw_tags"]` (sem perder capitalização ou ordem) e grava em `technologies` apenas tecnologias efetivamente reconhecidas, mantendo intacta a classificação DX-03.1.3.
+  - **Himalayas:** preserva todas as categorias originais em `raw_metadata["categories"]` sem truncamento (`[:8]`) e deixa de gravar cargos/categorias em `technologies`.
+  - **Jobicy:** preserva `jobIndustry` em `raw_metadata["job_industry"]` mantendo sua estrutura original (`list` ou `str`) e deixa de gravar setores econômicos em `technologies`.
+  - **GitHub Backend BR:** preserva integralmente as labels originais em `raw_metadata["labels"]`, exclui labels administrativas/triagem (`link-quebrado`, `em-triagem`, `duplicada`, `pausada`, `spam`, `invalid`) e meta-labels de `technologies`, preservando tecnologias e competências técnicas curadas.
+  - **GitHub Frontend BR:** preserva labels originais e adiciona extração conservadora exclusivamente a partir de evidências técnicas explícitas no título (ex.: `React Native`, `.NET`, `React.js`, `Node.js`), sem extrair cargos, `UX Design` ou listas genéricas da descrição.
+- **Mesclagem cross-source e reclassificação (`sync_service.py`, `matching.py`):**
+  - `_merge_secondary_metadata_into_opportunity()` passou a usar `merge_normalized_technologies()`, impedindo contaminação por categorias/setores de fontes secundárias, deduplicando case-insensitive sem alterar metadados da fonte primária e sem apagar dados legados existentes.
+  - `reclassify_opportunities()` passou a carregar os vínculos da fonte primária (`OpportunitySourceLink.raw_metadata`) e consumir os sinais originais preservados (`raw_tags`, `categories`, `job_industry`, `labels`) sem misturar metadados de fontes secundárias e com fallback conservador para registros legados, mantendo integralmente as regras de conflito DX-03.1.3.
+  - `resolve_opportunity_seniority_and_experience()` em `matching.py` também considera `raw_tags` no fallback em memória.
+
+### Testes
+
+- `backend/tests/test_dx0321_semantic_tag_normalization.py`: testes abrangentes cobrindo normalização semântica, termos ambíguos, tecnologias de nicho, preservação de metadados nos 5 conectores, extração conservadora de títulos no GitHub Frontend BR, mesclagem cross-source, isolamento de proveniência em `OpportunitySourceLink`, regressão DX-03.1.x em `reclassify_opportunities`, matching, oportunidades manuais e integridade de `content_hash`.
+
+---
+
 ## [DX-03.1.3] - 2026-11-23 — Bloqueio de conflitos de senioridade em tags
 
 ### Corrigido

@@ -28,6 +28,7 @@ from app.services.opportunities.sanitization import (
     sanitize_plain_text,
     validate_safe_external_url,
 )
+from app.services.opportunities.technology_normalization import preserve_raw_string_list
 
 HIMALAYAS_BROWSE_ENDPOINT = "https://himalayas.app/jobs/api"
 HIMALAYAS_SEARCH_ENDPOINT = "https://himalayas.app/jobs/api/search"
@@ -230,15 +231,17 @@ class HimalayasConnector(BaseOpportunityConnector):
                     application_url = None
 
             raw_categories = item.get("categories") if isinstance(item.get("categories"), list) else []
-            cleaned_categories = normalize_string_list(
-                [str(c).replace("-", " ") for c in raw_categories[:8]]
+            preserved_categories = preserve_raw_string_list(raw_categories)
+            classifier_categories = normalize_string_list(
+                [c.replace("-", " ") for c in preserved_categories],
+                max_items=200,
             )
 
             raw_seniority = item.get("seniority") if isinstance(item.get("seniority"), list) else []
             seniority_list = normalize_string_list([str(s) for s in raw_seniority])
             emp_raw = sanitize_plain_text(item.get("employmentType"), max_length=64) or ""
 
-            classifier_tags = list(cleaned_categories) + list(seniority_list)
+            classifier_tags = list(classifier_categories) + list(seniority_list)
             if emp_raw:
                 classifier_tags.append(emp_raw)
 
@@ -321,7 +324,7 @@ class HimalayasConnector(BaseOpportunityConnector):
                     salary_currency=salary_currency,
                     salary_period=salary_period,
                     requirements=[],
-                    technologies=cleaned_categories,
+                    technologies=[],
                     source_url=source_url,
                     application_url=application_url or source_url,
                     published_at=published_at,
@@ -337,6 +340,7 @@ class HimalayasConnector(BaseOpportunityConnector):
                     raw_metadata={
                         "guid": source_url,
                         "application_link": application_url or source_url,
+                        "categories": preserved_categories,
                         "seniority": seniority_list,
                         "employment_type_raw": emp_raw,
                         "timezone_restrictions": timezone_restrictions,
