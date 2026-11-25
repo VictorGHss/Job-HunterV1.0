@@ -743,7 +743,10 @@ def resolve_opportunity_seniority_and_experience(
 
     meta = getattr(opportunity, "raw_metadata", None) or {}
     meta_levels: list[str] = []
+    fallback_tags: list[str] = list(opportunity.technologies or [])
     if isinstance(meta, dict):
+        if isinstance(meta.get("raw_tags"), list):
+            fallback_tags = [str(x) for x in meta["raw_tags"]] + fallback_tags
         if isinstance(meta.get("labels"), list):
             meta_levels.extend(str(x) for x in meta["labels"])
         if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
@@ -753,7 +756,7 @@ def resolve_opportunity_seniority_and_experience(
 
     decision = classify_opportunity(
         title=opportunity.title,
-        tags=list(opportunity.technologies or []),
+        tags=fallback_tags,
         description=opportunity.description,
         requirements=list(opportunity.requirements or []),
         metadata_levels=meta_levels,

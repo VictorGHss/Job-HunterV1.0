@@ -26,10 +26,14 @@ from app.services.opportunities.connectors.base import (
 from app.services.opportunities.matching import parse_location_cities
 from app.services.opportunities.sanitization import (
     normalize_canonical_url,
-    normalize_string_list,
     sanitize_external_html_text,
     sanitize_plain_text,
     validate_safe_external_url,
+)
+from app.services.opportunities.technology_normalization import (
+    extract_technologies_from_title,
+    normalize_technologies,
+    preserve_raw_string_list,
 )
 
 _BRACKET_PREFIX_RE = re.compile(r"^\s*\[([^\]]+)\]\s*")
@@ -189,6 +193,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
 
     default_fallback_area: str = ProfessionalArea.SOFTWARE_DEVELOPMENT.value
     id_prefix: str = "gh"
+    extract_technologies_from_title_enabled: bool = False
 
     def __init__(
         self,
@@ -263,7 +268,7 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
 
             ext_id = f"{self.id_prefix}-{raw_number}"
             raw_labels = item.get("labels") if isinstance(item.get("labels"), list) else []
-            label_names = normalize_string_list(
+            label_names = preserve_raw_string_list(
                 [
                     lb.get("name", "")
                     if isinstance(lb, dict)
@@ -335,9 +340,21 @@ class BaseGitHubIssuesVagasConnector(BaseOpportunityConnector):
                 ):
                     secondary_areas.append(ProfessionalArea.SOFTWARE_DEVELOPMENT.value)
 
-            tech_tags = [
+            candidate_tech_labels = [
                 lb for lb in label_names if lb.strip().lower() not in _META_LABELS_LOWER
             ]
+            tech_tags = normalize_technologies(
+                candidate_tech_labels,
+                source_context="github_curated",
+                context_title=raw_title,
+            )
+            if self.extract_technologies_from_title_enabled:
+                title_techs = extract_technologies_from_title(raw_title)
+                seen_tech = {t.lower() for t in tech_tags}
+                for tech in title_techs:
+                    if tech.lower() not in seen_tech:
+                        seen_tech.add(tech.lower())
+                        tech_tags.append(tech)
             (
                 work_mode,
                 location_text,
@@ -562,6 +579,7 @@ class GitHubBackendBRConnector(BaseGitHubIssuesVagasConnector):
 class GitHubFrontendBRConnector(BaseGitHubIssuesVagasConnector):
     id_prefix = "gh-frontend-br"
     default_fallback_area = ProfessionalArea.FRONTEND.value
+    extract_technologies_from_title_enabled = True
 
     definition = SourceDefinition(
         slug="github_frontend_br",

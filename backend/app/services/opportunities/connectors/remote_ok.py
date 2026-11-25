@@ -22,10 +22,13 @@ from app.services.opportunities.connectors.base import (
 )
 from app.services.opportunities.sanitization import (
     normalize_canonical_url,
-    normalize_string_list,
     sanitize_external_html_text,
     sanitize_plain_text,
     validate_safe_external_url,
+)
+from app.services.opportunities.technology_normalization import (
+    normalize_technologies,
+    preserve_raw_string_list,
 )
 
 REMOTE_OK_API_BASE = "https://remoteok.com/api"
@@ -165,13 +168,18 @@ class RemoteOKConnector(BaseOpportunityConnector):
                 except ValueError:
                     application_url = None
 
-            tags = normalize_string_list(
+            raw_tags = preserve_raw_string_list(
                 item.get("tags") if isinstance(item.get("tags"), list) else []
+            )
+            normalized_technologies = normalize_technologies(
+                raw_tags,
+                source_context="remote_ok",
+                context_title=raw_title,
             )
             description = sanitize_external_html_text(item.get("description"))
             decision = classify_opportunity(
                 title=raw_title,
-                tags=tags,
+                tags=raw_tags,
                 description=description,
             )
             opp_type, emp_type, sen_level = reconcile_structured_classification(decision)
@@ -213,7 +221,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     salary_currency=salary_currency,
                     salary_period=salary_period,
                     requirements=[],
-                    technologies=tags,
+                    technologies=normalized_technologies,
                     source_url=source_url,
                     application_url=application_url,
                     published_at=published_at,
@@ -228,6 +236,7 @@ class RemoteOKConnector(BaseOpportunityConnector):
                     experience_summary=decision.experience_summary,
                     raw_metadata={
                         "slug": sanitize_plain_text(item.get("slug")),
+                        "raw_tags": raw_tags,
                         "source": "remote_ok",
                     },
                 )

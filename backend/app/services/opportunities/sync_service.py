@@ -52,6 +52,10 @@ from app.services.opportunities.matching import (
     utc_now,
 )
 from app.services.opportunities.sanitization import compute_opportunity_content_hash
+from app.services.opportunities.technology_normalization import (
+    extract_technologies_from_title,
+    merge_normalized_technologies,
+)
 
 CONNECTOR_CLASSES: dict[str, type[BaseOpportunityConnector]] = {
     RemoteOKConnector.definition.slug: RemoteOKConnector,
@@ -308,8 +312,16 @@ def _is_safe_composite_match(
     if has_identical_desc_prefix:
         return True
 
-    cand_techs = {normalize_classification_text(t) for t in (cand.technologies or []) if t}
-    draft_techs = {normalize_classification_text(t) for t in (draft.technologies or []) if t}
+    cand_techs = {
+        normalize_classification_text(t)
+        for t in (list(cand.technologies or []) + extract_technologies_from_title(cand.title))
+        if t
+    }
+    draft_techs = {
+        normalize_classification_text(t)
+        for t in (list(draft.technologies or []) + extract_technologies_from_title(draft.title))
+        if t
+    }
     if len(cand_techs & draft_techs) >= 1 and len(norm_draft_title.split()) >= 3:
         return True
 
@@ -571,11 +583,12 @@ def _merge_secondary_metadata_into_opportunity(
     existing.last_seen_at = now
     existing.last_status_check_at = now
 
-    merged_techs = list(existing.technologies or [])
-    for tech in draft.technologies or []:
-        if tech not in merged_techs:
-            merged_techs.append(tech)
-    existing.technologies = merged_techs
+    existing.technologies = merge_normalized_technologies(
+        existing.technologies,
+        draft.technologies,
+        incoming_source_slug=source.slug,
+        context_title=existing.title or draft.title,
+    )
 
     # Mescla países elegíveis quando a oportunidade é remota para não descartar elegibilidade geográfica
     if existing.work_mode == "remote" and draft.work_mode == "remote":
@@ -1435,6 +1448,125 @@ class ReclassificationReport:
     after_experience_counts: dict[str, int] | None = None
 
 
+def _resolve_primary_source_metadata(opp: Opportunity) -> dict:
+    """
+    Recupera exclusivamente os metadados da fonte primária da oportunidade,
+    priorizando `OpportunitySourceLink.raw_metadata` do vínculo primário sem
+    misturar metadados de vínculos secundários de outras fontes.
+    """
+    base_meta = dict(opp.raw_metadata) if isinstance(opp.raw_metadata, dict) else {}
+    links = list(getattr(opp, "source_links", None) or [])
+    primary_link = next(
+        (
+            link
+            for link in links
+            if link.is_primary
+            and (opp.source_id is None or link.source_id == opp.source_id)
+            and isinstance(link.raw_metadata, dict)
+            and link.raw_metadata
+        ),
+        None,
+    )
+    if primary_link is None:
+        return base_meta
+
+    merged = dict(base_meta)
+    for key in (
+        "raw_tags",
+        "categories",
+        "job_industry",
+        "labels",
+        "job_type",
+        "job_level",
+        "seniority",
+        "employment_type_raw",
+        "source",
+    ):
+        if key in primary_link.raw_metadata:
+            merged[key] = primary_link.raw_metadata[key]
+    return merged
+
+
+def _extract_classification_inputs_for_reclassify(
+    opp: Opportunity,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """
+    Extrai `(classifier_tags, meta_levels, raw_labels, raw_job_types)` usando
+    os sinais originais preservados da fonte primária (`raw_tags`, `categories`,
+    `job_industry`, `labels`, `seniority`, `job_level`, `job_type`,
+    `employment_type_raw`) com fallback conservador para `Opportunity.technologies`
+    em registros legados.
+    """
+    meta = _resolve_primary_source_metadata(opp)
+    classifier_tags: list[str] = []
+    seen_tags_lower: set[str] = set()
+
+    def _add_tag(val: str) -> None:
+        cleaned = str(val).strip()
+        if not cleaned:
+            return
+        low = cleaned.lower()
+        if low not in seen_tags_lower:
+            seen_tags_lower.add(low)
+            classifier_tags.append(cleaned)
+
+    # Prioriza sinais originais preservados da fonte primária (ex.: Remote OK `raw_tags`)
+    if isinstance(meta.get("raw_tags"), list):
+        for tag in meta["raw_tags"]:
+            _add_tag(str(tag))
+
+    # Preserva tecnologias atuais como sinal complementar e fallback conservador
+    # para registros legados que ainda não possuem `raw_tags`.
+    for tech in opp.technologies or []:
+        _add_tag(str(tech))
+
+    meta_levels: list[str] = []
+    raw_labels: list[str] = []
+    raw_job_types: list[str] = []
+
+    if isinstance(meta.get("labels"), list):
+        for lb in meta["labels"]:
+            s = str(lb)
+            _add_tag(s)
+            meta_levels.append(s)
+            raw_labels.append(s)
+
+    if isinstance(meta.get("categories"), list):
+        for cat in meta["categories"]:
+            _add_tag(str(cat).replace("-", " "))
+
+    raw_industry = meta.get("job_industry")
+    if isinstance(raw_industry, list):
+        for ind in raw_industry:
+            _add_tag(str(ind))
+    elif isinstance(raw_industry, str) and raw_industry.strip():
+        _add_tag(raw_industry)
+
+    if isinstance(meta.get("job_type"), list):
+        for jt in meta["job_type"]:
+            s = str(jt)
+            _add_tag(s)
+            raw_job_types.append(s)
+
+    if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
+        jl = str(meta["job_level"])
+        _add_tag(jl)
+        meta_levels.append(jl)
+
+    if isinstance(meta.get("seniority"), list):
+        for sen in meta["seniority"]:
+            s = str(sen)
+            _add_tag(s)
+            meta_levels.append(s)
+
+    if meta.get("employment_type_raw"):
+        emp_raw = str(meta["employment_type_raw"])
+        _add_tag(emp_raw)
+        raw_job_types.append(emp_raw)
+
+    return (classifier_tags, meta_levels, raw_labels, raw_job_types)
+
+
 def reclassify_opportunities(
     db: Session,
     *,
@@ -1480,7 +1612,10 @@ def reclassify_opportunities(
     opportunities = (
         db.execute(
             select(Opportunity)
-            .options(selectinload(Opportunity.source))
+            .options(
+                selectinload(Opportunity.source),
+                selectinload(Opportunity.source_links),
+            )
             .where(
                 Opportunity.source_id.is_not(None),
                 Opportunity.source_id.in_(target_source_ids),
@@ -1514,36 +1649,17 @@ def reclassify_opportunities(
         before_seniority_counter[old_sen] += 1
         before_exp_counter[old_exp_mode] += 1
 
-        meta = opp.raw_metadata if isinstance(opp.raw_metadata, dict) else {}
-        extra_tags: list[str] = []
-        meta_levels: list[str] = []
-        if isinstance(meta.get("labels"), list):
-            extra_tags.extend(str(x) for x in meta["labels"])
-            meta_levels.extend(str(x) for x in meta["labels"])
-        if isinstance(meta.get("job_type"), list):
-            extra_tags.extend(str(x) for x in meta["job_type"])
-        if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
-            extra_tags.append(str(meta["job_level"]))
-            meta_levels.append(str(meta["job_level"]))
-        if isinstance(meta.get("seniority"), list):
-            extra_tags.extend(str(x) for x in meta["seniority"])
-            meta_levels.extend(str(x) for x in meta["seniority"])
-        if meta.get("employment_type_raw"):
-            extra_tags.append(str(meta["employment_type_raw"]))
+        classifier_tags, meta_levels, raw_labels, raw_job_types = (
+            _extract_classification_inputs_for_reclassify(opp)
+        )
 
         decision = classify_opportunity(
             title=opp.title,
-            tags=list(opp.technologies or []) + extra_tags,
+            tags=classifier_tags,
             description=opp.description,
             requirements=list(opp.requirements or []),
             metadata_levels=meta_levels,
         )
-        raw_labels = [str(x) for x in (meta.get("labels") or [])] if isinstance(meta.get("labels"), list) else []
-        raw_job_types: list[str] = []
-        if isinstance(meta.get("job_type"), list):
-            raw_job_types.extend(str(x) for x in meta["job_type"])
-        if meta.get("employment_type_raw"):
-            raw_job_types.append(str(meta["employment_type_raw"]))
 
         new_opp_type, new_emp_type, new_sen = reconcile_structured_classification(
             decision,

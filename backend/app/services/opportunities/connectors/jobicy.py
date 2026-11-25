@@ -31,6 +31,7 @@ from app.services.opportunities.sanitization import (
     sanitize_plain_text,
     validate_safe_external_url,
 )
+from app.services.opportunities.technology_normalization import preserve_raw_industry
 
 _TRAILING_GEO_SUFFIX_RE = re.compile(
     r"\s*\|\s*(?P<geo>uk|united kingdom|germany|spain|sweden|ireland|france|netherlands|poland|italy|usa|us|canada|brazil|brasil|mexico|argentina|colombia|chile|portugal|australia|india|emea|apac|latam|europe|worldwide)\s*(?:\|\s*remote)?\s*$",
@@ -198,10 +199,11 @@ class JobicyConnector(BaseOpportunityConnector):
             base_title_norm = normalize_classification_text(base_title)
 
             raw_industry = item.get("jobIndustry")
+            preserved_industry = preserve_raw_industry(raw_industry)
             industries = (
-                normalize_string_list(raw_industry)
-                if isinstance(raw_industry, list)
-                else normalize_string_list([str(raw_industry)]) if raw_industry else []
+                normalize_string_list(preserved_industry)
+                if isinstance(preserved_industry, list)
+                else normalize_string_list([preserved_industry]) if preserved_industry else []
             )
             raw_job_types = item.get("jobType")
             job_types = (
@@ -277,7 +279,7 @@ class JobicyConnector(BaseOpportunityConnector):
                     salary_currency=salary_currency,
                     salary_period=salary_period,
                     requirements=[],
-                    technologies=industries,
+                    technologies=[],
                     source_url=source_url,
                     application_url=application_url,
                     published_at=published_at,
@@ -292,6 +294,7 @@ class JobicyConnector(BaseOpportunityConnector):
                     experience_summary=decision.experience_summary,
                     raw_metadata={
                         "job_slug": sanitize_plain_text(item.get("jobSlug")),
+                        "job_industry": preserved_industry,
                         "job_level": job_level,
                         "job_type": job_types,
                         "base_title_norm": base_title_norm,
