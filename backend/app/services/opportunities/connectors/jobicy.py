@@ -213,7 +213,8 @@ class JobicyConnector(BaseOpportunityConnector):
             )
             job_level = sanitize_plain_text(item.get("jobLevel"), max_length=64)
 
-            classifier_tags = list(industries) + list(job_types)
+            classifier_tags = list(job_types)
+            area_tags = list(industries) + list(job_types)
             level_meta: list[str] = []
             if job_level and job_level.lower() not in {"any", "all"}:
                 classifier_tags.append(job_level)
@@ -225,6 +226,7 @@ class JobicyConnector(BaseOpportunityConnector):
             decision = classify_opportunity(
                 title=raw_title,
                 tags=classifier_tags,
+                area_tags=area_tags,
                 description=description,
                 metadata_levels=level_meta,
             )

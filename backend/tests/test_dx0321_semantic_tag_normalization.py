@@ -46,10 +46,16 @@ from app.services.opportunities.connectors.github_vagas import (
 from app.services.opportunities.connectors.himalayas import HimalayasConnector
 from app.services.opportunities.connectors.jobicy import JobicyConnector
 from app.services.opportunities.connectors.remote_ok import RemoteOKConnector
-from app.services.opportunities.matching import evaluate_opportunity_for_user
+from app.services.opportunities.connectors.base import NormalizedOpportunityDraft
+from app.services.opportunities.matching import (
+    evaluate_opportunity_for_user,
+    resolve_opportunity_areas,
+    resolve_opportunity_seniority_and_experience,
+)
 from app.services.opportunities.opportunity_service import create_manual_opportunity
 from app.services.opportunities.sanitization import compute_opportunity_content_hash
 from app.services.opportunities.sync_service import (
+    _is_safe_composite_match,
     ensure_default_sources,
     reclassify_opportunities,
     sync_sources,
@@ -979,3 +985,693 @@ def test_dx0321_matching_manual_opportunities_and_content_hash_integrity(db_sess
         description="Build APIs",
     )
     assert h1 == h2
+
+
+# ==============================================================================
+# 6. Correções Pós-Auditoria DX-03.2.1-C1 (M-01, B-01, B-02, B-03, OBS-01, OBS-02)
+# ==============================================================================
+
+
+def test_dx0321_c1_b01_hashicorp_nomad_disambiguation_and_obs02_dotnet_spacing():
+    # B-01: HashiCorp Nomad reconhecido apenas com identidade inequívoca; "Nomad" isolado e "digital nomad" rejeitados
+    assert normalize_technologies(["HashiCorp Nomad"], source_context="remote_ok") == [
+        "HashiCorp Nomad"
+    ]
+    assert normalize_technologies(["hashicorp nomad"], source_context="remote_ok") == [
+        "HashiCorp Nomad"
+    ]
+    assert normalize_technologies(["Nomad"], source_context="remote_ok") == []
+    assert normalize_technologies(["digital nomad"], source_context="remote_ok") == []
+    assert normalize_technologies(
+        ["Nomad", "digital nomad", "hashicorp nomad", "Docker"],
+        source_context="remote_ok",
+    ) == ["HashiCorp Nomad", "Docker"]
+
+    # OBS-02: postura conservadora preservada para ". Net" com espaço (evita falso positivo com pontuação)
+    assert extract_technologies_from_title("[Remoto] Back-end Engineer. Net (USD)") == []
+    assert extract_technologies_from_title("Software Engineer. Net salary competitive") == []
+    assert extract_technologies_from_title("[Remoto] Back-end Engineer .NET (USD)") == [".NET"]
+
+
+def test_dx0321_c1_b02_in_memory_matching_fallbacks_preserve_semantics_and_isolation(
+    db_session: Session,
+):
+    now = datetime.now(UTC)
+
+    # 1a. Himalayas com categories=["Backend", "Junior"], seniority=[] e technologies=[]:
+    # prova que `categories` alimenta área e senioridade no fallback em memória.
+    opp_him_cat = Opportunity(
+        external_id="b02-him-cat",
+        title="Software Engineer",
+        description="Work on scalable systems.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=[],
+        source_url="https://himalayas.app/companies/acme/jobs/b02-him-cat",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-him-cat",
+        raw_metadata={
+            "source": "himalayas",
+            "categories": ["Backend", "Junior"],
+            "seniority": [],
+            "employment_type_raw": "Full Time",
+        },
+    )
+    area_him, sec_him = resolve_opportunity_areas(opp_him_cat)
+    assert area_him == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+    assert ProfessionalArea.BACKEND.value in sec_him
+    assert resolve_opportunity_seniority_and_experience(opp_him_cat)[0] == SeniorityLevel.JUNIOR.value
+
+    # 1b. Himalayas com categories=["Backend"] e seniority=["Entry-level"] -> ENTRY_LEVEL
+    opp_him_entry = Opportunity(
+        external_id="b02-him-entry",
+        title="Software Engineer",
+        description="Work on scalable systems.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=[],
+        source_url="https://himalayas.app/companies/acme/jobs/b02-him-entry",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-him-entry",
+        raw_metadata={
+            "source": "himalayas",
+            "categories": ["Backend"],
+            "seniority": ["Entry-level"],
+            "employment_type_raw": "Full Time",
+        },
+    )
+    assert resolve_opportunity_seniority_and_experience(opp_him_entry)[0] == SeniorityLevel.ENTRY_LEVEL.value
+
+    # 2. Jobicy com job_industry e technologies=[]: setor alimenta área, mas NUNCA senioridade!
+    opp_jobicy = Opportunity(
+        external_id="b02-jobicy",
+        title="Software Engineer",
+        description="Build platform services.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=[],
+        source_url="https://jobicy.com/jobs/b02-jobicy",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-jobicy",
+        raw_metadata={
+            "source": "jobicy",
+            # Mesmo se o setor contiver termo semelhante a senioridade, não pode contaminar senioridade
+            "job_industry": ["Backend", "Junior"],
+            "job_level": "Any",
+            "job_type": ["Full-Time"],
+        },
+    )
+    area_jobicy, sec_jobicy = resolve_opportunity_areas(opp_jobicy)
+    assert area_jobicy == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+    assert ProfessionalArea.BACKEND.value in sec_jobicy
+    sen_jobicy = resolve_opportunity_seniority_and_experience(opp_jobicy)[0]
+    assert sen_jobicy == SeniorityLevel.UNKNOWN.value
+
+    # 3. Remote OK com raw_tags conflitantes ["python", "exec", "junior"] e technologies=["Python"] -> bloqueio DX-03.1.3
+    opp_rok_conflict = Opportunity(
+        external_id="b02-rok-conflict",
+        title="Backend Developer",
+        description="Build Python APIs.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://remoteok.com/remote-jobs/b02-rok-conflict",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-rok-conflict",
+        raw_metadata={
+            "source": "remote_ok",
+            "raw_tags": ["python", "exec", "junior"],
+        },
+    )
+    assert resolve_opportunity_seniority_and_experience(opp_rok_conflict)[0] == SeniorityLevel.UNKNOWN.value
+
+    # 4. Registro legado sem metadata original -> fallback conservador em technologies
+    opp_legacy = Opportunity(
+        external_id="b02-legacy",
+        title="Software Engineer",
+        description="Build APIs.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=["python", "junior"],
+        source_url="https://remoteok.com/remote-jobs/b02-legacy",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-legacy",
+        raw_metadata={"source": "remote_ok"},
+    )
+    area_leg, sec_leg = resolve_opportunity_areas(opp_legacy)
+    assert area_leg == ProfessionalArea.SOFTWARE_DEVELOPMENT.value
+    assert ProfessionalArea.BACKEND.value in sec_leg
+    assert resolve_opportunity_seniority_and_experience(opp_legacy)[0] == SeniorityLevel.JUNIOR.value
+
+    # 5. Oportunidade com vínculo secundário distinto: fallback em memória usa exclusivamente raw_metadata primário
+    sources = {s.slug: s for s in ensure_default_sources(db_session)}
+    opp_multi = Opportunity(
+        source_id=sources["remote_ok"].id,
+        external_id="b02-multi",
+        title="Software Engineer",
+        description="Build cloud services.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.UNKNOWN.value,
+        secondary_areas=[],
+        eligible_countries=["Worldwide"],
+        technologies=["Python"],
+        source_url="https://remoteok.com/remote-jobs/b02-multi",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-b02-multi",
+        raw_metadata={"source": "remote_ok", "raw_tags": ["python"]},
+    )
+    db_session.add(opp_multi)
+    db_session.flush()
+    db_session.add_all(
+        [
+            OpportunitySourceLink(
+                opportunity_id=opp_multi.id,
+                source_id=sources["remote_ok"].id,
+                external_id="b02-multi",
+                source_url=opp_multi.source_url,
+                is_primary=True,
+                source_status=ExternalSourceStatus.ACTIVE.value,
+                first_seen_at=now,
+                last_seen_at=now,
+                raw_metadata={"source": "remote_ok", "raw_tags": ["python"]},
+            ),
+            OpportunitySourceLink(
+                opportunity_id=opp_multi.id,
+                source_id=sources["himalayas"].id,
+                external_id="b02-multi-him",
+                source_url="https://himalayas.app/companies/acme/jobs/b02-multi",
+                is_primary=False,
+                source_status=ExternalSourceStatus.ACTIVE.value,
+                first_seen_at=now,
+                last_seen_at=now,
+                raw_metadata={
+                    "source": "himalayas",
+                    "categories": ["Junior"],
+                    "seniority": ["Entry-level"],
+                },
+            ),
+        ]
+    )
+    db_session.commit()
+    db_session.refresh(opp_multi, attribute_names=["source_links"])
+    assert resolve_opportunity_seniority_and_experience(opp_multi)[0] == SeniorityLevel.UNKNOWN.value
+
+
+def test_dx0321_c1_m01_b03_scenarios_c_e1_e2_e3_jobicy_primary_and_remoteok_secondary(
+    db_session: Session,
+):
+    """
+    Reproduz exatamente M-01 e os cenários C, E1, E2 e E3 da auditoria usando
+    `sync_sources()` -> `_upsert_opportunity()` real:
+    - Cenário C: Jobicy cria (technologies=[]), Remote OK vincula secundário (Python, FastAPI, Docker).
+    - Cenário E1: Remote OK secundário atualiza trazendo Redis (e mantendo/deduplicando).
+    - Cenário E2: Jobicy primário é re-sincronizado (technologies=[]) -> secundárias permanecem agregadas!
+    - Cenário E3: Atualização subsequente de ambas as fontes mantém união determinística sem obsoletas.
+    """
+    shared_apply_url = "https://careers.jobicy-primary.example/jobs/backend-9001"
+
+    def _jobicy_payload(title_suffix: str = "") -> dict:
+        return {
+            "jobs": [
+                {
+                    "id": 90010,
+                    "url": "https://jobicy.com/jobs/90010-python-backend",
+                    "jobTitle": f"Python Backend Engineer{title_suffix}",
+                    "companyName": "CloudBridge",
+                    "jobIndustry": ["Software Engineering", "Data Science & Analytics"],
+                    "jobType": ["Full-Time"],
+                    "jobGeo": "Anywhere",
+                    "jobLevel": "Any",
+                    "applicationUrl": shared_apply_url,
+                    "jobDescription": "<p>Build distributed backend services with Python and FastAPI.</p>",
+                }
+            ]
+        }
+
+    def _rok_payload(tags: list[str]) -> list[dict]:
+        return [
+            {"legal": "Remote OK"},
+            {
+                "id": "rok-90010",
+                "slug": "python-backend-90010",
+                "position": "Python Backend Engineer",
+                "company": "CloudBridge",
+                "location": "Worldwide",
+                "tags": tags,
+                "url": "https://remoteok.com/remote-jobs/rok-90010",
+                "apply_url": shared_apply_url,
+                "description": "<p>Build distributed backend services with Python and FastAPI.</p>",
+            },
+        ]
+
+    def _make_overrides(jobicy_data: dict, rok_data: list[dict]) -> dict:
+        return {
+            "jobicy": JobicyConnector(
+                industries=("engineering",),
+                max_pages=1,
+                transport=httpx.MockTransport(lambda _: httpx.Response(200, json=jobicy_data)),
+                sleep_fn=lambda _: None,
+            ),
+            "remote_ok": RemoteOKConnector(
+                tags=("dev",),
+                transport=httpx.MockTransport(lambda _: httpx.Response(200, json=rok_data)),
+                sleep_fn=lambda _: None,
+            ),
+        }
+
+    # --- Cenário C: Ordem inversa (Jobicy primário -> Remote OK secundário) ---
+    ov_c = _make_overrides(
+        _jobicy_payload(),
+        _rok_payload(["python", "FastAPI", "docker", "finance", "digital nomad"]),
+    )
+    sync_sources(db_session, source_slug="jobicy", force=True, connector_overrides=ov_c)
+    sync_sources(db_session, source_slug="remote_ok", force=True, connector_overrides=ov_c)
+
+    opp = db_session.execute(select(Opportunity)).scalar_one()
+    assert opp.source.slug == "jobicy"
+    assert opp.technologies == ["Python", "FastAPI", "Docker"]
+    assert opp.raw_metadata["source"] == "jobicy"
+    assert opp.raw_metadata["job_industry"] == ["Software Engineering", "Data Science & Analytics"]
+    assert "raw_tags" not in opp.raw_metadata
+    assert "remote_ok" in opp.raw_metadata.get("also_seen_in_sources", [])
+
+    links = {
+        lnk.source.slug: lnk
+        for lnk in db_session.execute(
+            select(OpportunitySourceLink).where(OpportunitySourceLink.opportunity_id == opp.id)
+        )
+        .scalars()
+        .all()
+    }
+    assert set(links.keys()) == {"jobicy", "remote_ok"}
+    assert links["jobicy"].is_primary is True
+    assert links["jobicy"].raw_metadata["job_industry"] == [
+        "Software Engineering",
+        "Data Science & Analytics",
+    ]
+    assert links["remote_ok"].is_primary is False
+    assert links["remote_ok"].raw_metadata["raw_tags"] == [
+        "python",
+        "FastAPI",
+        "docker",
+        "finance",
+        "digital nomad",
+    ]
+
+    # --- Cenário E1: Atualização da fonte secundária (Remote OK adiciona Redis e duplica PYTHON) ---
+    ov_e1 = _make_overrides(
+        _jobicy_payload(),
+        _rok_payload(["PYTHON", "FastAPI", "docker", "redis", "exec"]),
+    )
+    sync_sources(db_session, source_slug="remote_ok", force=True, connector_overrides=ov_e1)
+    db_session.expire_all()
+    opp = db_session.execute(select(Opportunity)).scalar_one()
+    assert opp.technologies == ["Python", "FastAPI", "Docker", "Redis"]
+    links = {
+        lnk.source.slug: lnk
+        for lnk in db_session.execute(
+            select(OpportunitySourceLink).where(OpportunitySourceLink.opportunity_id == opp.id)
+        )
+        .scalars()
+        .all()
+    }
+    assert links["remote_ok"].raw_metadata["raw_tags"] == ["PYTHON", "FastAPI", "docker", "redis", "exec"]
+    assert opp.raw_metadata["source"] == "jobicy"
+
+    # --- Cenário E2 (M-01): Re-sincronização da fonte primária (Jobicy com technologies=[]) ---
+    ov_e2 = _make_overrides(
+        _jobicy_payload(title_suffix=" (Updated)"),
+        _rok_payload(["PYTHON", "FastAPI", "docker", "redis", "exec"]),
+    )
+    sync_sources(db_session, source_slug="jobicy", force=True, connector_overrides=ov_e2)
+    db_session.expire_all()
+    opp = db_session.execute(select(Opportunity)).scalar_one()
+    assert opp.title == "Python Backend Engineer (Updated)"
+    # Tecnologias secundárias NÃO são perdidas quando a primária (Jobicy) é atualizada!
+    assert opp.technologies == ["Python", "FastAPI", "Docker", "Redis"]
+    assert opp.raw_metadata["job_industry"] == ["Software Engineering", "Data Science & Analytics"]
+    assert "remote_ok" in opp.raw_metadata.get("also_seen_in_sources", [])
+
+    # --- Cenário E3: Atualização de ambas as fontes (Remote OK remove Docker e adiciona Kubernetes) ---
+    ov_e3 = _make_overrides(
+        _jobicy_payload(title_suffix=" v3"),
+        _rok_payload(["python", "fastapi", "redis", "k8s"]),
+    )
+    sync_sources(db_session, source_slug="jobicy", force=True, connector_overrides=ov_e3)
+    sync_sources(db_session, source_slug="remote_ok", force=True, connector_overrides=ov_e3)
+    db_session.expire_all()
+    opp = db_session.execute(select(Opportunity)).scalar_one()
+    # Docker removido da secundária sai da agregação; Kubernetes entra; ordem determinística
+    assert opp.technologies == ["Python", "FastAPI", "Redis", "Kubernetes"]
+
+
+def test_dx0321_c1_m01_primary_removal_himalayas_primary_and_legacy_conservative_fallback(
+    db_session: Session,
+):
+    # 1. Remoção de tecnologia na fonte primária (Remote OK primário + GitHub Backend BR secundário):
+    # tecnologia removida da primária que não existe na secundária sai da agregação; secundária permanece.
+    rok_v1 = [
+        {"legal": "Remote OK"},
+        {
+            "id": "rok-rem-1",
+            "slug": "backend-rem-1",
+            "position": "Python Backend Engineer na RemCorp",
+            "company": "RemCorp",
+            "location": "Worldwide",
+            "tags": ["python", "fastapi", "docker"],
+            "url": "https://remoteok.com/remote-jobs/rok-rem-1",
+            "description": "<p>Build distributed Python services with FastAPI and PostgreSQL.</p>",
+        },
+    ]
+    gh_sec = [
+        {
+            "number": 5501,
+            "state": "open",
+            "title": "Python Backend Engineer na RemCorp",
+            "html_url": "https://github.com/backend-br/vagas/issues/5501",
+            "created_at": "2026-11-20T10:00:00Z",
+            "labels": [{"name": "Remoto"}, {"name": "PYTHON"}, {"name": "postgres"}],
+            "body": "Build distributed Python services with FastAPI and PostgreSQL.",
+        }
+    ]
+    rok_v2_without_docker = [
+        {"legal": "Remote OK"},
+        {
+            "id": "rok-rem-1",
+            "slug": "backend-rem-1",
+            "position": "Python Backend Engineer na RemCorp",
+            "company": "RemCorp",
+            "location": "Worldwide",
+            "tags": ["python", "fastapi"],
+            "url": "https://remoteok.com/remote-jobs/rok-rem-1",
+            "description": "<p>Build distributed Python services with FastAPI and PostgreSQL.</p>",
+        },
+    ]
+
+    def _ov(rok_data):
+        return {
+            "remote_ok": RemoteOKConnector(
+                tags=("dev",),
+                transport=httpx.MockTransport(lambda _: httpx.Response(200, json=rok_data)),
+                sleep_fn=lambda _: None,
+            ),
+            "github_backend_br": GitHubBackendBRConnector(
+                max_pages=1,
+                transport=httpx.MockTransport(lambda _: httpx.Response(200, json=gh_sec)),
+                sleep_fn=lambda _: None,
+            ),
+        }
+
+    sync_sources(db_session, source_slug="remote_ok", force=True, connector_overrides=_ov(rok_v1))
+    sync_sources(db_session, source_slug="github_backend_br", force=True, connector_overrides=_ov(rok_v1))
+    opp_rem = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "rok-rem-1")
+    ).scalar_one()
+    assert opp_rem.technologies == ["Python", "FastAPI", "Docker", "PostgreSQL"]
+
+    # Remote OK atualiza removendo Docker -> Docker desaparece, PostgreSQL da secundária permanece!
+    sync_sources(
+        db_session,
+        source_slug="remote_ok",
+        force=True,
+        connector_overrides=_ov(rok_v2_without_docker),
+    )
+    db_session.expire_all()
+    opp_rem = db_session.execute(
+        select(Opportunity).where(Opportunity.external_id == "rok-rem-1")
+    ).scalar_one()
+    assert opp_rem.technologies == ["Python", "FastAPI", "PostgreSQL"]
+    assert "Docker" not in opp_rem.technologies
+
+    # 2. Ordem inversa com Himalayas como fonte primária -> Remote OK secundário -> re-sync Himalayas
+    shared_him_url = "https://careers.him-primary.example/jobs/data-7001"
+    future_epoch = int((datetime.now(UTC) + timedelta(days=20)).timestamp())
+    him_payload = {
+        "jobs": [
+            {
+                "guid": "https://himalayas.app/companies/himcorp/jobs/data-7001",
+                "title": "Data Platform Engineer",
+                "companyName": "HimCorp",
+                "employmentType": "Full Time",
+                "seniority": ["Mid-level"],
+                "locationRestrictions": ["Brazil"],
+                "categories": ["Data-Engineer", "Software-Engineer", "Cat-3", "Cat-4", "Cat-5", "Cat-6", "Cat-7", "Cat-8", "Cat-9"],
+                "applicationLink": shared_him_url,
+                "description": "<p>Build Kafka and Snowflake pipelines in Python.</p>",
+                "expiryDate": future_epoch,
+            }
+        ]
+    }
+    rok_him_sec = [
+        {"legal": "Remote OK"},
+        {
+            "id": "rok-him-7001",
+            "slug": "data-7001",
+            "position": "Data Platform Engineer",
+            "company": "HimCorp",
+            "location": "Worldwide",
+            "tags": ["python", "kafka", "snowflake", "finance"],
+            "url": "https://remoteok.com/remote-jobs/rok-him-7001",
+            "apply_url": shared_him_url,
+            "description": "<p>Build Kafka and Snowflake pipelines in Python.</p>",
+        },
+    ]
+    ov_him = {
+        "himalayas": HimalayasConnector(
+            max_pages=1,
+            search_queries=(),
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=him_payload)),
+            sleep_fn=lambda _: None,
+        ),
+        "remote_ok": RemoteOKConnector(
+            tags=("dev",),
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=rok_him_sec)),
+            sleep_fn=lambda _: None,
+        ),
+    }
+    sync_sources(db_session, source_slug="himalayas", force=True, connector_overrides=ov_him)
+    sync_sources(db_session, source_slug="remote_ok", force=True, connector_overrides=ov_him)
+    sync_sources(db_session, source_slug="himalayas", force=True, connector_overrides=ov_him)
+    db_session.expire_all()
+    opp_him = db_session.execute(
+        select(Opportunity).where(Opportunity.company_name == "HimCorp")
+    ).scalar_one()
+    assert opp_him.source.slug == "himalayas"
+    assert opp_him.technologies == ["Python", "Kafka", "Snowflake"]
+    assert len(opp_him.raw_metadata["categories"]) == 9
+
+    # 3. Registro legado com vínculo secundário sem raw_tags: re-sync da primária NÃO destrói tecnologias legadas
+    sources = {s.slug: s for s in ensure_default_sources(db_session)}
+    now = datetime.now(UTC)
+    legacy_opp = Opportunity(
+        source_id=sources["jobicy"].id,
+        external_id="99901",
+        title="Legacy Cross-Source Engineer",
+        company_name="LegacyCorp",
+        description="Build legacy systems.",
+        opportunity_type=OpportunityType.OTHER.value,
+        seniority_level=SeniorityLevel.UNKNOWN.value,
+        employment_type=EmploymentType.UNKNOWN.value,
+        work_mode=WorkMode.REMOTE.value,
+        professional_area=ProfessionalArea.BACKEND.value,
+        eligible_countries=["Worldwide"],
+        technologies=["Python", "LegacyProprietaryTech"],
+        source_url="https://jobicy.com/jobs/99901-legacy",
+        application_url="https://jobicy.com/jobs/99901-legacy",
+        first_seen_at=now,
+        last_seen_at=now,
+        source_status=ExternalSourceStatus.ACTIVE.value,
+        content_hash="h-legacy-99901",
+        raw_metadata={"source": "jobicy", "also_seen_in_sources": ["remote_ok"]},
+    )
+    db_session.add(legacy_opp)
+    db_session.flush()
+    db_session.add_all(
+        [
+            OpportunitySourceLink(
+                opportunity_id=legacy_opp.id,
+                source_id=sources["jobicy"].id,
+                external_id="99901",
+                source_url=legacy_opp.source_url,
+                is_primary=True,
+                source_status=ExternalSourceStatus.ACTIVE.value,
+                first_seen_at=now,
+                last_seen_at=now,
+                raw_metadata={"source": "jobicy"},
+            ),
+            OpportunitySourceLink(
+                opportunity_id=legacy_opp.id,
+                source_id=sources["remote_ok"].id,
+                external_id="rok-legacy-99901",
+                source_url="https://remoteok.com/remote-jobs/rok-legacy-99901",
+                is_primary=False,
+                source_status=ExternalSourceStatus.ACTIVE.value,
+                first_seen_at=now,
+                last_seen_at=now,
+                # Vínculo legado sem raw_tags -> proveniência não reconstruível!
+                raw_metadata={"source": "remote_ok"},
+            ),
+        ]
+    )
+    db_session.commit()
+
+    ov_legacy = {
+        "jobicy": JobicyConnector(
+            industries=("engineering",),
+            max_pages=1,
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    json={
+                        "jobs": [
+                            {
+                                "id": 99901,
+                                "url": "https://jobicy.com/jobs/99901-legacy",
+                                "jobTitle": "Legacy Cross-Source Engineer",
+                                "companyName": "LegacyCorp",
+                                "jobIndustry": ["Software Engineering"],
+                                "jobType": ["Full-Time"],
+                                "jobGeo": "Anywhere",
+                                "jobLevel": "Any",
+                                "jobDescription": "<p>Build legacy systems.</p>",
+                            }
+                        ]
+                    },
+                )
+            ),
+            sleep_fn=lambda _: None,
+        )
+    }
+    sync_sources(db_session, source_slug="jobicy", force=True, connector_overrides=ov_legacy)
+    db_session.expire_all()
+    persisted_legacy = db_session.get(Opportunity, legacy_opp.id)
+    assert persisted_legacy is not None
+    assert persisted_legacy.technologies == ["Python", "LegacyProprietaryTech"]
+
+
+def test_dx0321_c1_obs01_composite_match_blocks_homonym_tautology_and_preserves_legit_pairs():
+    now = datetime.now(UTC)
+
+    def _make_cand(title: str, area: str, desc: str, techs: list[str]) -> Opportunity:
+        return Opportunity(
+            external_id="cand-1",
+            title=title,
+            company_name="GlobalCo",
+            description=desc,
+            opportunity_type=OpportunityType.OTHER.value,
+            seniority_level=SeniorityLevel.UNKNOWN.value,
+            employment_type=EmploymentType.UNKNOWN.value,
+            work_mode=WorkMode.REMOTE.value,
+            professional_area=area,
+            secondary_areas=[],
+            eligible_countries=["Worldwide"],
+            technologies=techs,
+            source_url="https://source-a.example/1",
+            first_seen_at=now,
+            last_seen_at=now,
+            source_status=ExternalSourceStatus.ACTIVE.value,
+            content_hash="h-c1",
+        )
+
+    def _make_draft(title: str, area: str, desc: str, techs: list[str]) -> NormalizedOpportunityDraft:
+        return NormalizedOpportunityDraft(
+            external_id="draft-1",
+            title=title,
+            company_name="GlobalCo",
+            description=desc,
+            opportunity_type=OpportunityType.OTHER.value,
+            employment_type=EmploymentType.UNKNOWN.value,
+            work_mode=WorkMode.REMOTE.value,
+            location_text="Worldwide",
+            city=None,
+            state=None,
+            country=None,
+            eligible_countries=["Worldwide"],
+            eligibility_unknown=False,
+            language="Inglês",
+            salary_min=None,
+            salary_max=None,
+            salary_currency=None,
+            salary_period=None,
+            requirements=[],
+            technologies=techs,
+            source_url="https://source-b.example/1",
+            application_url=None,
+            published_at=now,
+            deadline_at=None,
+            source_status=ExternalSourceStatus.ACTIVE.value,
+            professional_area=area,
+        )
+
+    # Pares NÃO legítimos com homônimos no título e descrições distintas NÃO podem dar match tautológico
+    homonym_titles = [
+        ("Swift Logistics Coordinator", ProfessionalArea.ADMINISTRATION.value),
+        ("Dart Board Sales Manager", ProfessionalArea.MARKETING_SALES.value),
+        ("Ruby Jewelry Store Manager", ProfessionalArea.MARKETING_SALES.value),
+        ("Java Coffee Barista", ProfessionalArea.OTHER.value),
+        ("Scala Opera Singer", ProfessionalArea.OTHER.value),
+    ]
+    for title, area in homonym_titles:
+        cand = _make_cand(title, area, "Coordinate daily branch operations in region North.", [])
+        draft = _make_draft(title, area, "Manage weekend retail shifts and inventory in region South.", [])
+        assert _is_safe_composite_match(cand, draft, same_source=False) is False, title
+
+    # Mesmo se um lado não técnico tiver uma tag ruidosa homônima, área não técnica não dispara corroboração por descrição
+    cand_coffee = _make_cand("Java Coffee Barista", ProfessionalArea.OTHER.value, "Prepare Java coffee blends.", [])
+    draft_coffee = _make_draft("Java Coffee Barista", ProfessionalArea.OTHER.value, "Morning cafe barista role.", ["Java"])
+    assert _is_safe_composite_match(cand_coffee, draft_coffee, same_source=False) is False
+
+    # Par legítimo cross-source: Jobicy (technologies=[], desc técnica) + Remote OK (technologies declaradas)
+    cand_legit = _make_cand(
+        "Junior Python Backend Engineer",
+        ProfessionalArea.BACKEND.value,
+        "Build FastAPI and PostgreSQL microservices.",
+        [],
+    )
+    draft_legit = _make_draft(
+        "Junior Python Backend Engineer",
+        ProfessionalArea.BACKEND.value,
+        "Build FastAPI services and PostgreSQL APIs.",
+        ["Python", "FastAPI", "PostgreSQL"],
+    )
+    assert _is_safe_composite_match(cand_legit, draft_legit, same_source=False) is True

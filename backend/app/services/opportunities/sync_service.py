@@ -1,3 +1,4 @@
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,7 @@ from app.models.opportunity import (
 )
 from app.schemas.opportunity import SyncRunSummary
 from app.services.opportunities.classification import (
+    TECH_TARGET_AREAS,
     classify_opportunity,
     normalize_classification_text,
     reconcile_structured_classification,
@@ -53,8 +55,11 @@ from app.services.opportunities.matching import (
 )
 from app.services.opportunities.sanitization import compute_opportunity_content_hash
 from app.services.opportunities.technology_normalization import (
-    extract_technologies_from_title,
+    deduplicate_technologies_preserving_order,
+    extract_link_technologies_from_metadata,
+    extract_primary_classification_signals,
     merge_normalized_technologies,
+    normalize_technologies,
 )
 
 CONNECTOR_CLASSES: dict[str, type[BaseOpportunityConnector]] = {
@@ -312,18 +317,29 @@ def _is_safe_composite_match(
     if has_identical_desc_prefix:
         return True
 
-    cand_techs = {
-        normalize_classification_text(t)
-        for t in (list(cand.technologies or []) + extract_technologies_from_title(cand.title))
-        if t
-    }
-    draft_techs = {
-        normalize_classification_text(t)
-        for t in (list(draft.technologies or []) + extract_technologies_from_title(draft.title))
-        if t
-    }
+    cand_techs = {normalize_classification_text(t) for t in (cand.technologies or []) if t}
+    draft_techs = {normalize_classification_text(t) for t in (draft.technologies or []) if t}
     if len(cand_techs & draft_techs) >= 1 and len(norm_draft_title.split()) >= 3:
         return True
+
+    # Corroboração assimétrica segura (OBS-01): quando exatamente uma fonte declara
+    # tecnologias e a outra (ex.: Jobicy/Himalayas) mantém `technologies=[]`, verifica se
+    # uma tecnologia declarada pelo primeiro provedor aparece explicitamente na descrição
+    # substantiva do segundo, restrita a vagas de área técnica (sem derivar do título).
+    if (
+        len(norm_draft_title.split()) >= 3
+        and cand.professional_area in TECH_TARGET_AREAS
+        and draft.professional_area in TECH_TARGET_AREAS
+        and bool(cand_techs) != bool(draft_techs)
+    ):
+        declared_techs = cand_techs or draft_techs
+        other_desc = draft_desc_norm if cand_techs else cand_desc_norm
+        if other_desc and any(
+            re.search(rf"(?<![a-z0-9+#]){re.escape(tech)}(?![a-z0-9+#])", other_desc)
+            for tech in declared_techs
+            if len(tech) >= 2
+        ):
+            return True
 
     # Títulos altamente específicos (ex.: "[Belo Horizonte, Brasil] Senior Software Engineer, Full Stack, Kids and Families na Google")
     if len(norm_draft_title.split()) >= 5 and norm_cand_title == norm_draft_title:
@@ -574,6 +590,93 @@ def _recompute_opportunity_lifecycle(opp: Opportunity, now: datetime) -> None:
     opp.last_status_check_at = now
 
 
+def _recompose_opportunity_technologies(
+    db: Session,
+    opp: Opportunity,
+    *,
+    active_link_id: uuid.UUID,
+    active_source_slug: str,
+    active_draft_technologies: list[str] | None,
+    previous_technologies: list[str] | None,
+) -> list[str]:
+    """
+    Recompõe deterministicamente `Opportunity.technologies` como a união ordenada das
+    tecnologias normalizadas da fonte primária e de todos os vínculos secundários
+    persistidos (`OpportunitySourceLink.raw_metadata`):
+    - Mantém tecnologias agregadas de fontes secundárias quando a fonte primária é
+      atualizada (correção M-01).
+    - Remove tecnologias obsoletas que deixaram de ser declaradas pela fonte quando
+      a proveniência de todos os vínculos é reconstruível.
+    - Aplica fallback conservador para registros legados cujos vínculos ainda não
+      possuem metadados originais suficientes, sem destruir tecnologias existentes
+      sem evidência.
+    """
+    links = (
+        db.execute(
+            select(OpportunitySourceLink)
+            .options(selectinload(OpportunitySourceLink.source))
+            .where(OpportunitySourceLink.opportunity_id == opp.id)
+        )
+        .scalars()
+        .all()
+    )
+    ordered_links = sorted(
+        links,
+        key=lambda lnk: (
+            0 if lnk.is_primary else 1,
+            (lnk.source.slug if lnk.source is not None else "").lower(),
+            ensure_utc(lnk.first_seen_at) or datetime.min.replace(tzinfo=UTC),
+            str(lnk.id),
+        ),
+    )
+
+    recomposed: list[str] = []
+    all_reconstructible = True
+
+    def _source_context_for_slug(slug: str) -> str:
+        low = slug.strip().lower()
+        if low == "remote_ok":
+            return "remote_ok"
+        if low in {"github_backend_br", "github_frontend_br"}:
+            return "github_curated"
+        if low in {"himalayas", "jobicy"}:
+            return low
+        return "generic"
+
+    for lnk in ordered_links:
+        link_slug = (
+            lnk.source.slug
+            if lnk.source is not None
+            else str((lnk.raw_metadata or {}).get("source") or "")
+        )
+        if lnk.id == active_link_id:
+            link_techs = normalize_technologies(
+                active_draft_technologies,
+                source_context=_source_context_for_slug(active_source_slug or link_slug),
+                context_title=opp.title,
+            )
+            recomposed.extend(link_techs)
+        else:
+            link_techs, reconstructible = extract_link_technologies_from_metadata(
+                link_slug,
+                lnk.raw_metadata,
+                context_title=opp.title,
+            )
+            if not reconstructible:
+                all_reconstructible = False
+            recomposed.extend(link_techs)
+
+    if all_reconstructible and ordered_links:
+        return deduplicate_technologies_preserving_order(recomposed)
+
+    # Política conservadora para registros legados com vínculo sem metadados originais:
+    # preserva tecnologias existentes sem limpeza cega e incorpora as novas já normalizadas
+    # por cada vínculo reconstruível, deduplicando case-insensitive.
+    return deduplicate_technologies_preserving_order(
+        list(previous_technologies or []) + recomposed
+    )
+
+
 def _merge_secondary_metadata_into_opportunity(
     existing: Opportunity,
     source: OpportunitySource,
@@ -582,13 +685,6 @@ def _merge_secondary_metadata_into_opportunity(
 ) -> None:
     existing.last_seen_at = now
     existing.last_status_check_at = now
-
-    existing.technologies = merge_normalized_technologies(
-        existing.technologies,
-        draft.technologies,
-        incoming_source_slug=source.slug,
-        context_title=existing.title or draft.title,
-    )
 
     # Mescla países elegíveis quando a oportunidade é remota para não descartar elegibilidade geográfica
     if existing.work_mode == "remote" and draft.work_mode == "remote":
@@ -729,6 +825,7 @@ def _upsert_opportunity(
             )
             db.flush()
 
+        previous_technologies = list(existing.technologies or [])
         _merge_secondary_metadata_into_opportunity(existing, source, draft, now)
         link = _upsert_source_link(
             db,
@@ -738,6 +835,14 @@ def _upsert_opportunity(
             now=now,
             is_primary=False,
             existing_link=matched_link,
+        )
+        existing.technologies = _recompose_opportunity_technologies(
+            db,
+            existing,
+            active_link_id=link.id,
+            active_source_slug=source.slug,
+            active_draft_technologies=draft.technologies,
+            previous_technologies=previous_technologies,
         )
         db.refresh(existing, attribute_names=["source_links"])
         _recompute_opportunity_lifecycle(existing, now)
@@ -750,6 +855,7 @@ def _upsert_opportunity(
         or (matched_link is not None and not matched_link.is_primary)
     )
     if is_secondary_same_source:
+        previous_technologies = list(existing.technologies or [])
         _merge_secondary_metadata_into_opportunity(existing, source, draft, now)
         link = _upsert_source_link(
             db,
@@ -760,11 +866,20 @@ def _upsert_opportunity(
             is_primary=False,
             existing_link=matched_link,
         )
+        existing.technologies = _recompose_opportunity_technologies(
+            db,
+            existing,
+            active_link_id=link.id,
+            active_source_slug=source.slug,
+            active_draft_technologies=draft.technologies,
+            previous_technologies=previous_technologies,
+        )
         db.refresh(existing, attribute_names=["source_links"])
         _recompute_opportunity_lifecycle(existing, now)
         return (existing, link, UpsertOutcome.INTRA_SOURCE_DUPLICATE)
 
     # Caso 3: Atualização da publicação primária na mesma fonte
+    previous_technologies = list(existing.technologies or [])
     old_ext_id = existing.external_id
     existing.external_id = draft.external_id
     existing.title = draft.title
@@ -794,7 +909,6 @@ def _upsert_opportunity(
     existing.salary_currency = draft.salary_currency
     existing.salary_period = draft.salary_period
     existing.requirements = draft.requirements
-    existing.technologies = draft.technologies
     existing.source_url = draft.source_url
     existing.application_url = draft.application_url
     if draft.published_at is not None:
@@ -830,6 +944,14 @@ def _upsert_opportunity(
         now=now,
         is_primary=True,
         existing_link=matched_link,
+    )
+    existing.technologies = _recompose_opportunity_technologies(
+        db,
+        existing,
+        active_link_id=link.id,
+        active_source_slug=source.slug,
+        active_draft_technologies=draft.technologies,
+        previous_technologies=previous_technologies,
     )
     db.refresh(existing, attribute_names=["source_links"])
     _recompute_opportunity_lifecycle(existing, now)
@@ -1489,82 +1611,22 @@ def _resolve_primary_source_metadata(opp: Opportunity) -> dict:
 
 def _extract_classification_inputs_for_reclassify(
     opp: Opportunity,
-) -> tuple[list[str], list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """
-    Extrai `(classifier_tags, meta_levels, raw_labels, raw_job_types)` usando
-    os sinais originais preservados da fonte primária (`raw_tags`, `categories`,
-    `job_industry`, `labels`, `seniority`, `job_level`, `job_type`,
-    `employment_type_raw`) com fallback conservador para `Opportunity.technologies`
-    em registros legados.
+    Extrai `(area_tags, seniority_tags, meta_levels, raw_labels, raw_job_types)`
+    reutilizando o contrato unificado `extract_primary_classification_signals`
+    exclusivamente sobre os metadados da fonte primária (com fallback conservador
+    para `Opportunity.technologies` em registros legados).
     """
     meta = _resolve_primary_source_metadata(opp)
-    classifier_tags: list[str] = []
-    seen_tags_lower: set[str] = set()
-
-    def _add_tag(val: str) -> None:
-        cleaned = str(val).strip()
-        if not cleaned:
-            return
-        low = cleaned.lower()
-        if low not in seen_tags_lower:
-            seen_tags_lower.add(low)
-            classifier_tags.append(cleaned)
-
-    # Prioriza sinais originais preservados da fonte primária (ex.: Remote OK `raw_tags`)
-    if isinstance(meta.get("raw_tags"), list):
-        for tag in meta["raw_tags"]:
-            _add_tag(str(tag))
-
-    # Preserva tecnologias atuais como sinal complementar e fallback conservador
-    # para registros legados que ainda não possuem `raw_tags`.
-    for tech in opp.technologies or []:
-        _add_tag(str(tech))
-
-    meta_levels: list[str] = []
-    raw_labels: list[str] = []
-    raw_job_types: list[str] = []
-
-    if isinstance(meta.get("labels"), list):
-        for lb in meta["labels"]:
-            s = str(lb)
-            _add_tag(s)
-            meta_levels.append(s)
-            raw_labels.append(s)
-
-    if isinstance(meta.get("categories"), list):
-        for cat in meta["categories"]:
-            _add_tag(str(cat).replace("-", " "))
-
-    raw_industry = meta.get("job_industry")
-    if isinstance(raw_industry, list):
-        for ind in raw_industry:
-            _add_tag(str(ind))
-    elif isinstance(raw_industry, str) and raw_industry.strip():
-        _add_tag(raw_industry)
-
-    if isinstance(meta.get("job_type"), list):
-        for jt in meta["job_type"]:
-            s = str(jt)
-            _add_tag(s)
-            raw_job_types.append(s)
-
-    if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
-        jl = str(meta["job_level"])
-        _add_tag(jl)
-        meta_levels.append(jl)
-
-    if isinstance(meta.get("seniority"), list):
-        for sen in meta["seniority"]:
-            s = str(sen)
-            _add_tag(s)
-            meta_levels.append(s)
-
-    if meta.get("employment_type_raw"):
-        emp_raw = str(meta["employment_type_raw"])
-        _add_tag(emp_raw)
-        raw_job_types.append(emp_raw)
-
-    return (classifier_tags, meta_levels, raw_labels, raw_job_types)
+    signals = extract_primary_classification_signals(meta, opp.technologies)
+    return (
+        list(signals.area_tags),
+        list(signals.seniority_tags),
+        list(signals.meta_levels),
+        list(signals.raw_labels),
+        list(signals.raw_job_types),
+    )
 
 
 def reclassify_opportunities(
@@ -1649,13 +1711,14 @@ def reclassify_opportunities(
         before_seniority_counter[old_sen] += 1
         before_exp_counter[old_exp_mode] += 1
 
-        classifier_tags, meta_levels, raw_labels, raw_job_types = (
+        area_tags, seniority_tags, meta_levels, raw_labels, raw_job_types = (
             _extract_classification_inputs_for_reclassify(opp)
         )
 
         decision = classify_opportunity(
             title=opp.title,
-            tags=classifier_tags,
+            tags=seniority_tags,
+            area_tags=area_tags,
             description=opp.description,
             requirements=list(opp.requirements or []),
             metadata_levels=meta_levels,

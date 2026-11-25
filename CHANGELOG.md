@@ -6,6 +6,31 @@ O formato baseia-se em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0
 
 ---
 
+## [DX-03.2.1-C1] - 2026-11-25 — Correções pós-auditoria da normalização semântica
+
+### Corrigido
+
+- **M-01 — Recomposição determinística de `Opportunity.technologies` em atualizações (`sync_service.py`, `technology_normalization.py`):**
+  - Adicionados `extract_link_technologies_from_metadata()`, `deduplicate_technologies_preserving_order()` e `_recompose_opportunity_technologies()` aplicados de forma unificada nos Casos 1, 2 e 3 de `_upsert_opportunity()`.
+  - Corrigida a perda de tecnologias agregadas de fontes secundárias quando a fonte primária (ex.: Jobicy ou Himalayas com `technologies=[]`) é re-sincronizada posteriormente.
+  - Garantida a remoção de tecnologias obsoletas que deixaram de constar na fonte primária ou secundária quando a proveniência de todos os vínculos é reconstruível, com política explícita de preservação conservadora para vínculos legados sem metadados originais suficientes.
+- **B-01 — Desambiguação de `HashiCorp Nomad` (`technology_normalization.py`):**
+  - Substituída a entrada sombreada `("Nomad", ("nomad",))` por `("HashiCorp Nomad", ("hashicorp nomad",))`, mantendo `nomad` isolado e `digital nomad` rejeitados em fontes ruidosas.
+- **B-02 — Simetria semântica no fallback em memória (`matching.py`, `technology_normalization.py`, `classification.py`, `sync_service.py`, `jobicy.py`):**
+  - Introduzido o contrato compartilhado `extract_primary_classification_signals()` separando `area_tags` e `seniority_tags` exclusivamente a partir dos metadados da fonte primária (sem misturar vínculos secundários).
+  - `resolve_opportunity_areas()` e `resolve_opportunity_seniority_and_experience()` passaram a reutilizar esse contrato (incluindo `categories` do Himalayas e `raw_tags` do Remote OK sob DX-03.1.3), mantendo `job_industry` do Jobicy restrito à dimensão de área profissional (nunca alimentando senioridade).
+- **OBS-01 — Eliminação de corroboração tautológica pelo título em `_is_safe_composite_match()` (`sync_service.py`):**
+  - Removida a chamada a `extract_technologies_from_title()` na interseção técnica de deduplicação, bloqueando falsos positivos com termos homônimos (`Swift`, `Dart`, `Ruby`, `Java`, `Scala`).
+  - Substituída por corroboração assimétrica estrita em vagas de área técnica (`TECH_TARGET_AREAS`), verificando tecnologias efetivamente declaradas por um provedor contra a descrição substantiva do outro quando apenas um lado declara `technologies`.
+- **OBS-02 — Documentação de postura conservadora para `.NET` com espaço:**
+  - Mantida a recusa de `". Net"` com espaço em `extract_technologies_from_title()` para evitar falsos positivos com pontuação comum (ex.: `"Engineer. Net salary"`), preservando o reconhecimento de `.NET`.
+
+### Testes
+
+- `backend/tests/test_dx0321_semantic_tag_normalization.py`: adicionados testes dedicados cobrindo `HashiCorp Nomad` vs `Nomad`/`digital nomad` (B-01), fallback em memória no `matching.py` para Himalayas/Jobicy/Remote OK/legado/multi-vínculo (B-02), cenários cross-source C, E1, E2, E3, ordem inversa com Himalayas e preservação conservadora de vínculos legados (M-01/B-03), bloqueio de homônimos em `_is_safe_composite_match()` (OBS-01) e comportamento conservador de `. Net` (OBS-02).
+
+---
+
 ## [DX-03.2.1] - 2026-11-25 — Preservação de proveniência e normalização semântica de tecnologias
 
 ### Adicionado

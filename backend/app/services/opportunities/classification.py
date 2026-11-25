@@ -1242,6 +1242,7 @@ def classify_opportunity(
     *,
     title: str | None,
     tags: list[str] | None = None,
+    area_tags: list[str] | None = None,
     description: str | None = None,
     requirements: list[str] | None = None,
     metadata_levels: list[str] | None = None,
@@ -1273,7 +1274,7 @@ def classify_opportunity(
 
     primary_area, secondary_areas, area_reasons = classify_professional_area(
         title=title,
-        tags=tags,
+        tags=tags if area_tags is None else area_tags,
         description=description,
         requirements=requirements,
     )

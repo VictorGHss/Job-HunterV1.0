@@ -32,6 +32,10 @@ from app.services.opportunities.classification import (
     classify_opportunity,
     classify_professional_area,
     normalize_classification_text,
+    reconcile_structured_classification,
+)
+from app.services.opportunities.technology_normalization import (
+    extract_primary_classification_signals,
 )
 
 _WORLDWIDE_TOKENS = {
@@ -688,16 +692,20 @@ def resolve_opportunity_areas(opportunity: Opportunity) -> tuple[str, list[str]]
     """
     Retorna `(professional_area, secondary_areas)` da oportunidade. Caso o objeto em memória
     ainda esteja com `unknown` (ex.: fixture de teste instanciada diretamente), executa o
-    classificador determinístico sobre título, descrição, requisitos e tecnologias.
+    classificador determinístico sobre título, descrição, requisitos e os sinais primários
+    preservados em `opportunity.raw_metadata` + `opportunity.technologies` (sem misturar
+    vínculos secundários).
     """
     current_primary = (getattr(opportunity, "professional_area", None) or "").strip()
     current_secondary = list(getattr(opportunity, "secondary_areas", None) or [])
     if current_primary and current_primary != ProfessionalArea.UNKNOWN.value:
         return (current_primary, current_secondary)
 
+    meta = getattr(opportunity, "raw_metadata", None)
+    signals = extract_primary_classification_signals(meta, opportunity.technologies)
     primary, secondary, _ = classify_professional_area(
         title=opportunity.title,
-        tags=list(opportunity.technologies or []),
+        tags=list(signals.area_tags),
         description=opportunity.description,
         requirements=list(opportunity.requirements or []),
     )
@@ -741,28 +749,25 @@ def resolve_opportunity_seniority_and_experience(
             exp_eval.desirable_technologies,
         )
 
-    meta = getattr(opportunity, "raw_metadata", None) or {}
-    meta_levels: list[str] = []
-    fallback_tags: list[str] = list(opportunity.technologies or [])
-    if isinstance(meta, dict):
-        if isinstance(meta.get("raw_tags"), list):
-            fallback_tags = [str(x) for x in meta["raw_tags"]] + fallback_tags
-        if isinstance(meta.get("labels"), list):
-            meta_levels.extend(str(x) for x in meta["labels"])
-        if meta.get("job_level") and str(meta["job_level"]).lower() not in {"any", "all"}:
-            meta_levels.append(str(meta["job_level"]))
-        if isinstance(meta.get("seniority"), list):
-            meta_levels.extend(str(x) for x in meta["seniority"])
+    meta = getattr(opportunity, "raw_metadata", None)
+    signals = extract_primary_classification_signals(meta, opportunity.technologies)
 
     decision = classify_opportunity(
         title=opportunity.title,
-        tags=fallback_tags,
+        tags=list(signals.seniority_tags),
+        area_tags=list(signals.area_tags),
         description=opportunity.description,
         requirements=list(opportunity.requirements or []),
-        metadata_levels=meta_levels,
+        metadata_levels=list(signals.meta_levels),
+    )
+    _, _, reconciled_seniority = reconcile_structured_classification(
+        decision,
+        metadata_levels=list(signals.meta_levels),
+        metadata_job_types=list(signals.raw_job_types),
+        metadata_labels=list(signals.raw_labels),
     )
     return (
-        decision.seniority_level,
+        reconciled_seniority,
         decision.experience_requirement_mode,
         decision.experience_min_years,
         decision.experience_preferred_years,

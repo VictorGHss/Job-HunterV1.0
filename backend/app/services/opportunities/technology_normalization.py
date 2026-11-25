@@ -13,9 +13,10 @@ Princípio central:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import unicodedata
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from app.services.opportunities.sanitization import sanitize_plain_text
 
@@ -334,7 +335,7 @@ _CANONICAL_TECH_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("CI/CD", ("ci/cd", "ci cd", "cicd")),
     ("Vault", ("hashicorp vault",)),
     ("Consul", ("consul",)),
-    ("Nomad", ("nomad",)),
+    ("HashiCorp Nomad", ("hashicorp nomad",)),
     ("OAuth", ("oauth", "oauth2", "oauth 2.0", "oidc")),
     # Testes e QA técnicos
     ("Playwright", ("playwright",)),
@@ -1199,3 +1200,241 @@ def merge_normalized_technologies(
             break
 
     return merged
+
+
+def deduplicate_technologies_preserving_order(
+    items: Iterable[str] | None,
+    *,
+    max_items: int = 40,
+) -> list[str]:
+    """
+    Deduplica tecnologias de forma case-insensitive e por equivalência canônica,
+    preservando integralmente a ordem determinística de entrada.
+    """
+    result: list[str] = []
+    seen_keys: set[str] = set()
+    for item in items or []:
+        if not item or not str(item).strip():
+            continue
+        cleaned = str(item).strip()
+        folded = _fold_key(cleaned)
+        if not folded or folded in seen_keys:
+            continue
+        canonical_key: str | None = None
+        if folded in CANONICAL_TECH_ALIASES:
+            canonical_key = _fold_key(CANONICAL_TECH_ALIASES[folded])
+        elif folded in CURATED_COMPETENCY_ALIASES:
+            canonical_key = _fold_key(CURATED_COMPETENCY_ALIASES[folded])
+        if canonical_key and canonical_key in seen_keys:
+            continue
+        seen_keys.add(folded)
+        if canonical_key:
+            seen_keys.add(canonical_key)
+        result.append(cleaned)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def extract_link_technologies_from_metadata(
+    source_slug: str | None,
+    raw_metadata: Mapping[str, Any] | None,
+    *,
+    context_title: str | None = None,
+) -> tuple[list[str], bool]:
+    """
+    Recompõe deterministicamente as tecnologias de um `OpportunitySourceLink`
+    a partir do seu `raw_metadata` específico de provedor.
+
+    Retorna `(technologies, provenance_reconstructible)`:
+    - `provenance_reconstructible=True`: a taxonomia original da fonte está
+      presente no vínculo e permite recomposição exata.
+    - `provenance_reconstructible=False`: vínculo legado sem metadados originais
+      suficientes; chamadores devem aplicar política de preservação conservadora.
+    """
+    slug = (source_slug or "").strip().lower()
+    meta = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+
+    if slug == "remote_ok":
+        raw_tags = meta.get("raw_tags")
+        if isinstance(raw_tags, list):
+            return (
+                normalize_technologies(
+                    raw_tags,
+                    source_context="remote_ok",
+                    context_title=context_title,
+                ),
+                True,
+            )
+        return ([], False)
+
+    if slug == "himalayas":
+        if isinstance(meta.get("categories"), list):
+            return ([], True)
+        return ([], False)
+
+    if slug == "jobicy":
+        if "job_industry" in meta:
+            return ([], True)
+        return ([], False)
+
+    if slug == "github_backend_br":
+        raw_labels = meta.get("labels")
+        if isinstance(raw_labels, list):
+            return (
+                normalize_technologies(
+                    raw_labels,
+                    source_context="github_curated",
+                    context_title=context_title,
+                ),
+                True,
+            )
+        return ([], False)
+
+    if slug == "github_frontend_br":
+        raw_labels = meta.get("labels")
+        if isinstance(raw_labels, list):
+            label_techs = normalize_technologies(
+                raw_labels,
+                source_context="github_curated",
+                context_title=context_title,
+            )
+            title_techs = extract_technologies_from_title(context_title)
+            return (
+                deduplicate_technologies_preserving_order(label_techs + title_techs),
+                True,
+            )
+        return ([], False)
+
+    return ([], False)
+
+
+# ==============================================================================
+# Extração unificada de sinais de classificação da fonte primária (B-02)
+# ==============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class PrimaryClassificationSignals:
+    """
+    Sinais extraídos exclusivamente dos metadados da fonte primária, separados por
+    dimensão semântica para evitar que setores econômicos (`job_industry`) sejam
+    alimentados no classificador de senioridade.
+    """
+
+    area_tags: tuple[str, ...]
+    seniority_tags: tuple[str, ...]
+    meta_levels: tuple[str, ...]
+    raw_labels: tuple[str, ...]
+    raw_job_types: tuple[str, ...]
+
+
+def extract_primary_classification_signals(
+    primary_metadata: Mapping[str, Any] | None,
+    technologies: Iterable[str] | None = None,
+) -> PrimaryClassificationSignals:
+    """
+    Contrato único compartilhado por `reclassify_opportunities()` e pelos fallbacks
+    em memória de `matching.py`:
+    - `raw_tags` (Remote OK): alimenta área e senioridade (protegido por DX-03.1.3).
+    - `categories` (Himalayas): alimenta área e senioridade (substituindo `-` por espaço).
+    - `job_industry` (Jobicy): representa setor econômico — alimenta apenas `area_tags`,
+      NUNCA `seniority_tags` nem `meta_levels`.
+    - `labels` (GitHub BR): alimenta `area_tags`, `seniority_tags`, `meta_levels` e `raw_labels`.
+    - `technologies`: sinal complementar e fallback conservador para registros legados
+      que ainda não possuem os novos campos de proveniência.
+    """
+    meta = primary_metadata if isinstance(primary_metadata, Mapping) else {}
+
+    area_tags: list[str] = []
+    seen_area: set[str] = set()
+    seniority_tags: list[str] = []
+    seen_sen: set[str] = set()
+
+    def _add(target: list[str], seen: set[str], value: str) -> None:
+        cleaned = str(value).strip()
+        if not cleaned:
+            return
+        low = cleaned.lower()
+        if low not in seen:
+            seen.add(low)
+            target.append(cleaned)
+
+    # 1. Tags originais do Remote OK (evidência primária para área e senioridade)
+    raw_tags = meta.get("raw_tags")
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            s = str(tag)
+            _add(area_tags, seen_area, s)
+            _add(seniority_tags, seen_sen, s)
+
+    # 2. Tecnologias declaradas (complemento técnico + fallback conservador legado)
+    for tech in technologies or []:
+        s = str(tech)
+        _add(area_tags, seen_area, s)
+        _add(seniority_tags, seen_sen, s)
+
+    meta_levels: list[str] = []
+    raw_labels: list[str] = []
+    raw_job_types: list[str] = []
+
+    # 3. Labels estruturadas do GitHub BR
+    labels = meta.get("labels")
+    if isinstance(labels, list):
+        for lb in labels:
+            s = str(lb)
+            _add(area_tags, seen_area, s)
+            _add(seniority_tags, seen_sen, s)
+            meta_levels.append(s)
+            raw_labels.append(s)
+
+    # 4. Categorias do Himalayas (funções e sinais de senioridade)
+    categories = meta.get("categories")
+    if isinstance(categories, list):
+        for cat in categories:
+            normalized_cat = str(cat).replace("-", " ")
+            _add(area_tags, seen_area, normalized_cat)
+            _add(seniority_tags, seen_sen, normalized_cat)
+
+    # 5. Setor econômico do Jobicy (`job_industry`) — apenas dimensão de área, NUNCA senioridade!
+    raw_industry = meta.get("job_industry")
+    if isinstance(raw_industry, list):
+        for ind in raw_industry:
+            _add(area_tags, seen_area, str(ind))
+    elif isinstance(raw_industry, str) and raw_industry.strip():
+        _add(area_tags, seen_area, raw_industry)
+
+    # 6. Tipo de contrato / vínculo estruturado (Jobicy `job_type`, Himalayas `employment_type_raw`)
+    job_types = meta.get("job_type")
+    if isinstance(job_types, list):
+        for jt in job_types:
+            s = str(jt)
+            _add(seniority_tags, seen_sen, s)
+            raw_job_types.append(s)
+
+    if meta.get("employment_type_raw"):
+        emp_raw = str(meta["employment_type_raw"])
+        _add(seniority_tags, seen_sen, emp_raw)
+        raw_job_types.append(emp_raw)
+
+    # 7. Nível estruturado (Jobicy `job_level`, Himalayas `seniority`)
+    job_level = meta.get("job_level")
+    if job_level and str(job_level).lower() not in {"any", "all"}:
+        jl = str(job_level)
+        _add(seniority_tags, seen_sen, jl)
+        meta_levels.append(jl)
+
+    seniorities = meta.get("seniority")
+    if isinstance(seniorities, list):
+        for sen in seniorities:
+            s = str(sen)
+            _add(seniority_tags, seen_sen, s)
+            meta_levels.append(s)
+
+    return PrimaryClassificationSignals(
+        area_tags=tuple(area_tags),
+        seniority_tags=tuple(seniority_tags),
+        meta_levels=tuple(meta_levels),
+        raw_labels=tuple(raw_labels),
+        raw_job_types=tuple(raw_job_types),
+    )
